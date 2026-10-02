@@ -84,11 +84,15 @@ pub struct Metric {
 ///   * `OracleSymbolsQueried` — the denominator. Without it, `RowsWritten = 3`
 ///     is unreadable: it could be a healthy pass over 3 tracked symbols or a
 ///     collapsed one over 30.
-///   * `OracleUsdRatesSnapshotted` — rows copied into `prices.usd_rate` (task
-///     0167). Zero is normal on a steady-state pass, which is exactly why it
-///     needs a series rather than an alarm: [`OracleStats`] already records
-///     that zero *forever* while `written` climbs is the failure, and that is a
-///     shape only a plotted history shows.
+///   * `OracleUsdRatesSnapshotted` — rows copied into `prices.usd_rate` for the
+///     PEG set, canonical USDC (task 0167). Zero is normal on a steady-state
+///     pass, which is exactly why it needs a series rather than an alarm:
+///     [`OracleStats`] already records that zero *forever* while `written`
+///     climbs is the failure, and that is a shape only a plotted history shows.
+///     ⚠️ Peg set only — see [`OracleStats::rates_snapshotted`] for why the
+///     measured set must not be folded in (task 0228).
+///   * `OracleMeasuredRatesSnapshotted` — the same for the MEASURED set, the
+///     native asset (task 0228). The same zero-forever shape is its failure.
 ///   * `OracleFailedRuns` — `0` here, `1` in [`failure_metrics`]. See the
 ///     module docs' three-state table.
 pub fn pass_metrics(stats: &OracleStats) -> Vec<Metric> {
@@ -105,6 +109,10 @@ pub fn pass_metrics(stats: &OracleStats) -> Vec<Metric> {
         count("OracleRowsSkipped", stats.skipped as f64),
         count("OracleTimestampRejected", stats.timestamp_rejected as f64),
         count("OracleUsdRatesSnapshotted", stats.rates_snapshotted as f64),
+        count(
+            "OracleMeasuredRatesSnapshotted",
+            stats.measured_rates_snapshotted as f64,
+        ),
     ]
 }
 
@@ -199,6 +207,7 @@ mod tests {
             skipped: 3,
             timestamp_rejected: 1,
             rates_snapshotted: 12,
+            measured_rates_snapshotted: 0,
         };
         let m = pass_metrics(&stats);
 
@@ -213,7 +222,29 @@ mod tests {
         // datapoint rather than silence.
         assert_eq!(by(&m, "OracleRuns").value, 1.0);
         assert_eq!(by(&m, "OracleFailedRuns").value, 0.0);
-        assert_eq!(m.len(), 7);
+        assert_eq!(by(&m, "OracleMeasuredRatesSnapshotted").value, 0.0);
+        assert_eq!(m.len(), 8);
+    }
+
+    /// 0228 review finding 1. The measured set (XLM) snapshots rows on every
+    /// pass, so if its count were folded into `OracleUsdRatesSnapshotted` a
+    /// stalled USDC snapshot — non-fatal, logged only — would never show the
+    /// "zero forever while `OracleRowsWritten` climbs" shape this series exists
+    /// for. And since 0228 the pivot's only post-epoch rate is USDC's `oracle`
+    /// rows. So the peg series stays peg-only, and the measured set gets its own.
+    #[test]
+    fn a_stalled_peg_snapshot_reads_zero_however_many_measured_rows_land() {
+        let stats = OracleStats {
+            queried: 30,
+            written: 28,
+            skipped: 2,
+            timestamp_rejected: 0,
+            rates_snapshotted: 0,
+            measured_rates_snapshotted: 1,
+        };
+        let m = pass_metrics(&stats);
+        assert_eq!(by(&m, "OracleUsdRatesSnapshotted").value, 0.0);
+        assert_eq!(by(&m, "OracleMeasuredRatesSnapshotted").value, 1.0);
     }
 
     /// The dark-feed case: the guard refuses every reading, so nothing is
@@ -229,6 +260,7 @@ mod tests {
             skipped: 30,
             timestamp_rejected: 30,
             rates_snapshotted: 0,
+            measured_rates_snapshotted: 0,
         };
         let m = pass_metrics(&stats);
         let written = by(&m, "OracleRowsWritten");
@@ -252,6 +284,7 @@ mod tests {
             skipped: 2,
             timestamp_rejected: 0,
             rates_snapshotted: 4,
+            measured_rates_snapshotted: 0,
         };
         let one_bad = OracleStats {
             written: 27,

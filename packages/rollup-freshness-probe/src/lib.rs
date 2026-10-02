@@ -45,6 +45,16 @@ pub mod disk;
 /// for why one alarm transition is accepted here.
 pub mod mv_drift;
 
+/// Rollup MVs stuck `WaitingForDependencies` or STOPped (task 0203, the cost of
+/// task 0143's `DEPENDS ON` chain). See [`refresh_waits`] for why a denied
+/// `system.view_refreshes` publishes "unreadable" and never 0.
+pub mod refresh_waits;
+
+/// Coarse buckets that disagree with their source tier — the completeness
+/// signal a tip-based freshness check cannot give (task 0203). See
+/// [`reconcile_mismatch`] for the grace and for why these reads run last.
+pub mod reconcile_mismatch;
+
 /// USD-value correctness on the USDT quote leg (task 0204, gap 4). Rides in the
 /// same invocation as the rollup lag and the disk read, for the same namespace
 /// reason — see [`usd_sanity`].
@@ -53,6 +63,24 @@ pub mod mv_drift;
 /// liveness**: a wrong `close_usd` is fresh, present and invisible to every
 /// other alarm here.
 pub mod usd_sanity;
+
+/// The three stored-data invariants of the `close_usd = 0` sentinel (ADR 0292,
+/// task 0151): a candle with no price-forming fill carries no price, a USD close
+/// cannot exist without a close, and a candle that claims price-forming fills
+/// carries the price they formed. See [`zero_invariants`] for why this is a
+/// scheduled assertion rather than a ClickHouse `CHECK` constraint.
+pub mod zero_invariants;
+
+/// Asset-id uniqueness (task 0139): identities sharing an id in `assets`, and
+/// recent candles naming an id `assets` does not hold. See
+/// [`asset_id_uniqueness`] for why each refuses an empty read.
+pub mod asset_id_uniqueness;
+
+/// `current_prices` writer liveness (task 0243). Rides in the same invocation
+/// and publishes under the same [`METRIC_NAME`] with `Table = current_prices` —
+/// but it is **not** a rollup tier and must never be added to [`ROLLUP_TIERS`];
+/// see [`current_prices`] for why.
+pub mod current_prices;
 
 /// CloudWatch namespace for the rollup freshness metric. Must match the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
@@ -206,10 +234,14 @@ pub const ROLLUP_TIERS: &[RollupTier] = &[
     RollupTier {
         table: "price_ohlcv_1M",
         bucket_seconds: 31 * 86_400,
-        // mv_ohlcv_1w_to_1M REFRESH EVERY 1 DAY
+        // mv_ohlcv_1d_to_1M REFRESH EVERY 1 DAY
         mv_refresh_seconds: 86_400,
-        // A month's 1M bucket does not exist until a week actually STARTS inside
-        // that month, which can be up to 6 days in.
+        // Task 0286 / BRIEF F10: the month rolls from the DAY now, so its 1M
+        // bucket exists as soon as a DAY starts in the month — the slack this
+        // justified (a week had to START inside the month, up to 6 days in) no
+        // longer applies. The NUMBER is kept anyway: a wider bound can only
+        // delay an alarm, never fire a false one, and a rollout is not the
+        // place to tighten a threshold. Tightening it is a deliberate follow-up.
         alignment_slack_seconds: 6 * 86_400,
         lag_bound_seconds: 45 * 86_400,
     },
@@ -229,6 +261,21 @@ pub struct TableLag {
 pub struct Metric {
     pub table: String,
     pub value: f64,
+}
+
+/// How the probe's log line shows a reading it does not have because the
+/// read errored ([`reading`]).
+pub const FAILED: &str = "failed";
+
+/// How the probe's log line shows a count it suppressed because the source is
+/// unreadable (a missing grant, or none of the declared objects visible).
+pub const SKIPPED_UNREADABLE: &str = "unreadable";
+
+/// One reading for the probe's log line: the value, or WHY there is none
+/// (`missing`: [`FAILED`] or [`SKIPPED_UNREADABLE`]) — never a default 0,
+/// which is the healthy shape of every count the probe logs (review IN-01).
+pub fn reading<T: std::fmt::Display>(value: Option<T>, missing: &str) -> String {
+    value.map_or_else(|| missing.to_owned(), |v| v.to_string())
 }
 
 /// Map the queried per-tier lags to CloudWatch data, and synthesise a breaching
@@ -418,6 +465,17 @@ pub async fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review IN-01: a missing reading names why it is missing; a real 0 is
+    /// still a 0.
+    #[test]
+    fn a_missing_reading_is_logged_by_its_reason_never_as_zero() {
+        assert_eq!(reading(Some(0.0_f64), FAILED), "0");
+        assert_eq!(reading(Some(3_u64), FAILED), "3");
+        assert_eq!(reading(None::<f64>, FAILED), "failed");
+        assert_eq!(reading(None::<u64>, SKIPPED_UNREADABLE), "unreadable");
+        assert_eq!(reading(Some(""), FAILED), "");
+    }
 
     #[test]
     fn lag_maps_verbatim() {

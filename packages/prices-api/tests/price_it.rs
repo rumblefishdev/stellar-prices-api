@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration test for `GET /v1/assets/{id}/price`. Gated
 //! `#[ignore]` (matches the `prices-clickhouse` integration tests):
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test price_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test price_it -- --ignored --test-threads=1
 //!
 //! Each test owns an isolated scratch database (the `prices.*` schema rewritten
 //! onto the scratch name) and drops it at the end. The handler's SQL uses
@@ -12,6 +12,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use prices_clickhouse::USDC_ISSUER;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use tower::ServiceExt;
 
 fn ch_url() -> String {
@@ -21,6 +23,11 @@ fn ch_url() -> String {
 fn rewrite(sql: &str, db: &str) -> String {
     sql.replace("prices.", &format!("{db}."))
         .replace("IF NOT EXISTS prices", &format!("IF NOT EXISTS {db}"))
+}
+
+/// A credit asset under the USDC issuer.
+fn credit(code: &'static str) -> AssetFixture<'static> {
+    AssetFixture::new(code, "credit", USDC_ISSUER, "")
 }
 
 /// Create + seed an isolated scratch db; return a client scoped to it.
@@ -40,30 +47,48 @@ async fn setup(db: &str) -> Client {
         .await
         .unwrap();
 
-    // 1 = native XLM, 2 = USDC classic. Each with a current-price row.
+    // Native XLM and classic USDC, each with a current-price row.
+    let assets = [AssetFixture::new("XLM", "native", "", ""), credit("USDC")];
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'XLM', 'native', '', ''), \
-             (2, 'USDC', 'credit', '{issuer}', '')",
-            issuer = prices_clickhouse::USDC_ISSUER
-        ))
+        .query(&assets_insert(db, &assets))
         .execute()
         .await
         .unwrap();
-    // asset 1 carries the task-0072 columns populated (the mv_current_prices
-    // shape); asset 2 deliberately leaves them at their table DEFAULTs, so both
+    let [xlm, usdc] = assets.map(|a| a.id());
+    // XLM carries the task-0072 columns populated (the mv_current_prices
+    // shape); USDC deliberately leaves them at their table DEFAULTs, so both
     // the pass-through path and the empty-producer path are covered.
+    //
+    // Task 0216: XLM also carries a REAL as_of, deliberately 30 minutes
+    // behind its updated_at — the two are both DateTime and adjacent in the
+    // row, so a fixture that dated them alike could not tell a correct
+    // projection from a transposed one.
     admin
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
-              vwap_24h, volume_24h_usd, sources, updated_at, method) VALUES \
-             (1, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
+              vwap_24h, volume_24h_usd, sources, updated_at, method, as_of, price_status) \
+             VALUES \
+             ({xlm}, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
               '{{\"sdex\":{{\"price\":\"0.5\",\"volume_24h\":\"1000\"}}}}', \
-              '2026-02-10 12:00:30', 'traded'), \
-             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '')"
+              '2026-02-10 12:00:30', 'traded', '2026-02-10 11:30:00', 'carried')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // USDC is inserted WITHOUT as_of and price_status, so the row really
+    // takes the table DEFAULTs (`toDateTime(0)` / `''`) rather than a
+    // hand-written copy of them. That is the epoch/'' pair the wire must
+    // render as ""/"", and this is the fixture that would notice an init.sql
+    // edit changing either DEFAULT (`DEFAULT now()` on as_of is the plausible
+    // one).
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
+              vwap_24h, volume_24h_usd, sources, updated_at, method) \
+             VALUES \
+             ({usdc}, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '')"
         ))
         .execute()
         .await
@@ -125,7 +150,7 @@ fn approx(v: &serde_json::Value, expected: f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_native_returns_seeded_row() {
     let db = "it_price_native_0040";
     let client = setup(db).await;
@@ -151,6 +176,23 @@ async fn price_native_returns_seeded_row() {
         "sources must be parsed from the MV's JSON string into an object"
     );
 
+    // Task 0216 — asserted BY VALUE, not by key presence. This endpoint ends in
+    // `fetch_optional` + `LIMIT 1`, and the RowBinary cursor only notices a
+    // struct/projection mismatch at end of stream, which that path never
+    // reaches: a query whose columns drifted returns a plausible 200 with the
+    // wrong values in it. Checking that the keys exist would pass against
+    // exactly that failure.
+    assert_eq!(
+        json["as_of"], "2026-02-10T11:30:00Z",
+        "as_of must be the price's own time, not the snapshot's"
+    );
+    assert_ne!(
+        json["as_of"], json["updated_at"],
+        "as_of and updated_at are both timestamps of the same type and adjacent \
+         in the row — if they read alike here, a transposition would be invisible"
+    );
+    assert_eq!(json["price_status"], "carried");
+
     teardown(db).await;
 }
 
@@ -159,7 +201,7 @@ async fn price_native_returns_seeded_row() {
 /// also the live shape for an exotic-quote asset, where no source has a
 /// USD-priceable close (~62% of candles per task 0114).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_empty_sources_degrades_to_empty_object() {
     let db = "it_price_empty_sources_0072";
     let client = setup(db).await;
@@ -170,11 +212,25 @@ async fn price_empty_sources_degrades_to_empty_object() {
     assert_eq!(json["sources"], serde_json::json!({}));
     assert!(json["sources"].is_object(), "must be {{}}, not null");
 
+    // Task 0216 — the same row's new columns sit on their table DEFAULTs
+    // (`toDateTime(0)` and `''`), the documented "this row has not been
+    // rewritten by the current snapshot definition yet" state. Both must reach
+    // the wire as the empty string: the epoch is a sentinel, and publishing it
+    // as `1970-01-01T00:00:00Z` would read as a very old price rather than as
+    // no price. Note the price here IS 1.0001 with an empty `method` — the
+    // status is '' because the row was seeded directly, NOT because the price
+    // is missing. Do not "correct" this to `priced`.
+    assert_eq!(
+        json["as_of"], "",
+        "the epoch sentinel must be mapped to the empty string, never formatted"
+    );
+    assert_eq!(json["price_status"], "");
+
     teardown(db).await;
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_classic_resolves_by_code_and_issuer() {
     let db = "it_price_classic_0040";
     let client = setup(db).await;
@@ -188,7 +244,7 @@ async fn price_classic_resolves_by_code_and_issuer() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_unknown_asset_is_404() {
     let db = "it_price_unknown_0040";
     let client = setup(db).await;
@@ -210,7 +266,7 @@ async fn price_unknown_asset_is_404() {
 /// strict filter finds nothing to drop. `min_volume_usd_cuts_an_all_dust_asset`
 /// below covers the asset where the two differ.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_min_volume_override_narrows_sources_and_reweights() {
     let db = "it_price_min_volume_0118";
     let client = setup(db).await;
@@ -220,21 +276,17 @@ async fn price_min_volume_override_narrows_sources_and_reweights() {
     // default) would publish: (1*100000 + 1.02*20000 + 5*150) / 120150.
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (3, 'MULTI', 'credit', '{issuer}', '')",
-            issuer = prices_clickhouse::USDC_ISSUER
-        ))
+        .query(&assets_insert(db, &[credit("MULTI")]))
         .execute()
         .await
         .unwrap();
+    let multi = credit("MULTI").id();
     admin
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
               vwap_24h, volume_24h_usd, sources, updated_at) VALUES \
-             (3, 5, 0, 0, 0, 1.00832292967124, 120150, \
+             ({multi}, 5, 0, 0, 0, 1.00832292967124, 120150, \
               '{{\"sdex\":{{\"price\":\"1\",\"volume_24h\":\"100000\"}},\
                  \"aquarius\":{{\"price\":\"1.02\",\"volume_24h\":\"20000\"}},\
                  \"soroswap\":{{\"price\":\"5\",\"volume_24h\":\"150\"}}}}', \
@@ -313,7 +365,7 @@ async fn price_min_volume_override_narrows_sources_and_reweights() {
 /// fixed the handler treated `<= 100` as a pass-through and did exactly that,
 /// while `100.01` emptied the object — a cliff at the documented default.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_min_volume_cuts_an_all_dust_asset_at_the_system_default() {
     let db = "it_price_min_volume_dust_0118";
     let client = setup(db).await;
@@ -322,21 +374,17 @@ async fn price_min_volume_cuts_an_all_dust_asset_at_the_system_default() {
     // producer's conditional arm keeps them (nothing funded to defend).
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'DUST', 'credit', '{issuer}', '')",
-            issuer = prices_clickhouse::USDC_ISSUER
-        ))
+        .query(&assets_insert(db, &[credit("DUST")]))
         .execute()
         .await
         .unwrap();
+    let dust = credit("DUST").id();
     admin
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
               vwap_24h, volume_24h_usd, sources, updated_at) VALUES \
-             (4, 3, 0, 0, 0, 3.375, 80, \
+             ({dust}, 3, 0, 0, 0, 3.375, 80, \
               '{{\"sdex\":{{\"price\":\"3\",\"volume_24h\":\"50\"}},\
                  \"soroswap\":{{\"price\":\"4\",\"volume_24h\":\"30\"}}}}', \
               '2026-02-10 12:00:30')"
@@ -379,28 +427,24 @@ async fn price_min_volume_cuts_an_all_dust_asset_at_the_system_default() {
 /// consumer cannot tell a measured 1.0000 from a filled one, which is the whole
 /// reason it exists.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_surfaces_the_provenance_method() {
     let db = "it_price_method_0178";
     let client = setup(db).await;
 
     // A third asset priced from the oracle arm, as canonical USDC is on prod.
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) \
-             VALUES (3, 'ORC', 'credit', '{issuer}', '')",
-            issuer = prices_clickhouse::USDC_ISSUER
-        ))
+        .query(&assets_insert(db, &[credit("ORC")]))
         .execute()
         .await
         .unwrap();
+    let orc = credit("ORC").id();
     client
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
               vwap_24h, volume_24h_usd, sources, updated_at, method) VALUES \
-             (3, 0.9993, 0, 0, 0, 0, 12000, '{{}}', '2026-02-10 12:00:30', 'oracle')"
+             ({orc}, 0.9993, 0, 0, 0, 0, 12000, '{{}}', '2026-02-10 12:00:30', 'oracle')"
         ))
         .execute()
         .await

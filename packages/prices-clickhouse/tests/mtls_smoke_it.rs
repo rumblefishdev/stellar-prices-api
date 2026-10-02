@@ -32,6 +32,10 @@
 //! (provisioned by task 0063; never committed). The key is read straight into
 //! rustls and never logged — `MtlsBundle`'s Debug redacts all PEM, and this test
 //! prints only the table count, never the material.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! production test and deliberately never run by CI: production state must not
+//! gate a PR (task 0275).
 #![cfg(feature = "aws-mtls")]
 
 use prices_clickhouse::mtls::{MtlsBundle, client_with_mtls};
@@ -66,7 +70,7 @@ fn load_target() -> Option<(String, MtlsBundle, String)> {
 }
 
 #[tokio::test]
-#[ignore = "live mTLS round-trip — set CH_DOMAIN + MTLS_{CERT,KEY,CA}_PATH and run with --ignored"]
+#[ignore = "requires production — operator after-check; never gates a PR"]
 async fn mtls_round_trip_select_one_and_lists_tables() {
     let Some((domain, bundle, database)) = load_target() else {
         eprintln!(

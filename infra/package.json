@@ -24,7 +24,16 @@
     "tags": [
       "type:infra",
       "scope:infra"
-    ]
+    ],
+    "targets": {
+      "test": {
+        "command": "node --test \"tools/scripts/**/*.test.mjs\"",
+        "options": {
+          "cwd": "{workspaceRoot}"
+        },
+        "cache": false
+      }
+    }
   },
   "devDependencies": {
     "aws-cdk": "^2.1114.1"

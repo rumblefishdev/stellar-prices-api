@@ -417,13 +417,13 @@ export function Toc({ sections }: { sections: readonly TocEntry[] }) {
                 aria-current={active ? 'location' : undefined}
                 sx={{
                   display: 'block',
-                  // A nested entry is an operation's method and path, which
-                  // does not fit 220px in one line — it wraps in the column
-                  // and stays one pill in the phone rail.
-                  whiteSpace: {
-                    xs: 'nowrap',
-                    md: nested ? 'normal' : 'nowrap',
-                  },
+                  // An entry wraps in the column and stays one pill in the
+                  // phone rail. A nested entry is an operation's method and
+                  // path, which does not fit 220px in one line; a top-level
+                  // one is a policy section's title (task 0303), which does
+                  // not either — the reference's and the quick start's stay
+                  // on one line because they are short, not because of a rule.
+                  whiteSpace: { xs: 'nowrap', md: 'normal' },
                   overflowWrap: 'anywhere',
                   py: { xs: 0.75, md: nested ? 0.5 : 1 },
                   px: { xs: 1.5, md: 0 },

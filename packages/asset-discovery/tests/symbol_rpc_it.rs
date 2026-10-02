@@ -7,6 +7,10 @@
 //! on a third-party RPC, so the parser and envelope builder are pinned by offline
 //! unit tests in `symbols.rs`; this test is what proves the two ends actually
 //! meet against a real contract.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! public-network test and deliberately never run by CI: third-party uptime
+//! must not gate a PR, and a developer can fix none of it (task 0275).
 
 use asset_discovery::symbols::{DEFAULT_SOROBAN_RPC, Outcome, http_client, resolve_symbol};
 
@@ -21,7 +25,7 @@ fn rpc_url() -> String {
 }
 
 #[tokio::test]
-#[ignore = "hits the public Soroban RPC endpoint"]
+#[ignore = "requires public network — third-party uptime; never gates a PR"]
 async fn resolves_a_real_token_symbol() {
     let got = resolve_symbol(&http_client(), &rpc_url(), SOLVBTC).await;
     assert_eq!(
@@ -32,7 +36,7 @@ async fn resolves_a_real_token_symbol() {
 }
 
 #[tokio::test]
-#[ignore = "hits the public Soroban RPC endpoint"]
+#[ignore = "requires public network — third-party uptime; never gates a PR"]
 async fn a_contract_that_is_not_a_token_is_absent_not_transient() {
     // A well-formed C-address that was never deployed: the simulation comes back
     // with an error rather than a value. That is a fact about the contract, so it
@@ -44,7 +48,7 @@ async fn a_contract_that_is_not_a_token_is_absent_not_transient() {
 }
 
 #[tokio::test]
-#[ignore = "hits the public Soroban RPC endpoint"]
+#[ignore = "requires public network — third-party uptime; never gates a PR"]
 async fn an_unreachable_endpoint_is_transient_not_absent() {
     // The other half of the split, and the one that matters most: an RPC outage
     // must NOT sentinel every contract it touches, which would name the whole

@@ -4,8 +4,8 @@
 //! on the shared `prices.assets` ReplacingMergeTree row). Needs a local
 //! ClickHouse with the `prices` schema:
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p asset-discovery --test enrichment_survives_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p asset-discovery --test enrichment_survives_it -- --ignored --test-threads=1
 //!
 //! Destructive to the local `prices.assets` / `prices.asset_metadata` tables —
 //! never run against a shared/prod cluster.
@@ -17,7 +17,7 @@ fn ch_url() -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn home_domain_survives_a_second_write_assets() {
     let writer = OhlcvWriter::plaintext(&ch_url());
     prices_clickhouse::apply_sql(writer.client(), prices_clickhouse::INIT_SQL)
@@ -34,7 +34,7 @@ async fn home_domain_survives_a_second_write_assets() {
 
     // Register an asset and write its identity row (as the ledger processor does).
     let mut registry = AssetRegistry::from_existing(Vec::new());
-    let asset_id = registry.get_or_assign(&AssetIdentity::Credit {
+    registry.intern(&AssetIdentity::Credit {
         code: "USDC".to_string(),
         issuer: prices_clickhouse::USDC_ISSUER.to_string(),
     });
@@ -42,6 +42,17 @@ async fn home_domain_survives_a_second_write_assets() {
         .write_assets(&registry)
         .await
         .expect("write identity");
+    // The id is the database's, read back by identity (task 0139).
+    let asset_id: u64 = writer
+        .client()
+        .query(
+            "SELECT asset_id FROM prices.assets FINAL \
+             WHERE asset_code = 'USDC' AND issuer_address = ?",
+        )
+        .bind(prices_clickhouse::USDC_ISSUER)
+        .fetch_one()
+        .await
+        .expect("read back the derived id");
 
     // Enrich home_domain via the single-writer enrichment table.
     writer

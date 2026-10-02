@@ -79,20 +79,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AssetRegistry::from_existing(Vec::new()),
             Registries::new(),
         );
-        reconciler.run(args.max_iterations).await?
+        reconciler.run_terminal(args.max_iterations).await?
     } else {
         let sink = ClickHouseSink::plaintext(&args.clickhouse_url);
         sink.preflight().await?;
         let registry = sink.load_registry().await?;
         let pool_registry = sink.load_pool_registry().await?;
         let reconciler = Reconciler::new(fetcher, cursor, sink, registry, pool_registry);
-        reconciler.run(args.max_iterations).await?
+        reconciler.run_terminal(args.max_iterations).await?
     };
 
     info!(
         start = stats.start_cursor,
         end = stats.end_cursor,
         persisted = stats.ledgers_persisted,
+        held_back = stats.ledgers_held_back,
         rows = stats.rows_emitted,
         dry_run = args.dry_run,
         "reconcile complete"

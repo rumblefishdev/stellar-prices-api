@@ -72,7 +72,7 @@ fn accumulate_ledger(
 ) {
     let mut out = LedgerSoroban::default();
     process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
-    for (source, tick) in &out.amm_ticks {
+    for (source, tick) in out.amm_ticks {
         accumulators.entry(source).or_default().merge(tick);
         *ticks_by_source.entry(source).or_default() += 1;
     }
@@ -97,18 +97,42 @@ fn accumulate_ledger(
     }
 }
 
-/// Write one source's buffered candles as a single batch. Newly-minted asset ids
-/// are persisted FIRST (so a candle never references an asset_id absent from
-/// `prices.assets`) and ONLY when the registry actually grew since the last asset
-/// write — collapsing what would otherwise be a full-registry write on every
-/// batch down to a handful over a run. Dry-run counts without writing.
+/// The two writes [`emit_buffer`] orders: an identity's `prices.assets` row
+/// before any candle that names it. A trait so a recording sink can pin that.
+pub(crate) trait EmitSink {
+    async fn write_new_assets(&self, assets: &AssetRegistry) -> Result<(), EventsBackfillError>;
+    async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), EventsBackfillError>;
+}
+
+impl EmitSink for OhlcvWriter {
+    async fn write_new_assets(&self, assets: &AssetRegistry) -> Result<(), EventsBackfillError> {
+        retry_write(|| async { OhlcvWriter::write_new_assets(self, assets).await }).await
+    }
+    async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), EventsBackfillError> {
+        retry_write(|| async { OhlcvWriter::write_candles(self, candles, source).await }).await
+    }
+}
+
+/// Write one source's buffered candles as a single batch. The identities this
+/// run interned since the last asset write go FIRST, so a candle never names an
+/// asset absent from `prices.assets`, and only those: re-emitting the whole
+/// ~210k-row registry whenever it grew wrote a duplicate part each time (the
+/// 0256 shape). They stay pending until the write returns `Ok` (task 0139).
+/// Dry-run counts without writing.
 async fn emit_buffer(
-    writer: &OhlcvWriter,
+    sink: &impl EmitSink,
     dry_run: bool,
     candles: &[OhlcvCandle],
     source: &str,
-    assets: &AssetRegistry,
-    assets_written: &mut usize,
+    assets: &mut AssetRegistry,
     total_candles: &mut u64,
 ) -> Result<(), EventsBackfillError> {
     if candles.is_empty() {
@@ -118,13 +142,11 @@ async fn emit_buffer(
     if dry_run {
         return Ok(());
     }
-    let asset_count = assets.assets().count();
-    if asset_count > *assets_written {
-        retry_write(|| async { writer.write_assets(assets).await }).await?;
-        *assets_written = asset_count;
+    if assets.pending_new().next().is_some() {
+        sink.write_new_assets(assets).await?;
+        assets.clear_pending();
     }
-    retry_write(|| async { writer.write_candles(candles, source).await }).await?;
-    Ok(())
+    sink.write_candles(candles, source).await
 }
 
 fn build_client(cli: &Cli) -> Client {
@@ -152,20 +174,23 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     writer.preflight().await?;
     info!("pre-flight: ClickHouse reachable");
 
+    // Registry-only mode (task 0291): runs before the empty-registry check
+    // below, because discovering pools into an empty registry is legitimate.
+    if cli.discover_pools {
+        return crate::discover::execute(cli, &writer).await;
+    }
+
     // Preload — identical to the live/backfill cold start so repriced candles
-    // reuse existing surrogate `asset_id`s and resolve every seeded pool.
+    // write only newly seen assets and resolve every seeded pool.
     let existing_assets = writer.load_assets().await?;
     let mut assets = AssetRegistry::from_existing(existing_assets);
-    let mut reg = writer.load_pool_registry().await?;
+    let mut reg = reprice_registry(writer.load_pool_registry().await?)?;
 
     // Every AMM pool has a `venue` entry (the registry superset); its strkeys are
     // the exact contract set whose events we must read. We filter reads to these
     // so the extractor sees each pool's FULL event group (Phoenix emits 8
     // micro-events, all NULL-signature) — a signature/topic filter would break it.
     let pool_strkeys: Vec<String> = reg.venue.keys().cloned().collect();
-    if pool_strkeys.is_empty() {
-        return Err(EventsBackfillError::EmptyPoolRegistry);
-    }
     let id_map = resolve_contract_ids(writer.client(), &pool_strkeys).await?;
     let contract_ids: Vec<i64> = id_map.keys().copied().collect();
     if contract_ids.is_empty() {
@@ -194,15 +219,19 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // of a silent LEFT-JOIN drop.
     let mut ledgers_missing_close: u64 = 0;
     let mut events_missing_close: u64 = 0;
+    // Events whose `application_order` was NEGATIVE and therefore took
+    // `transaction_index = 0` (task 0286 D1's fallback). Since task 0304 the
+    // column is read straight off the event row, so this is no longer "BE does
+    // not cover this ledger" — it can only be a corrupt or unexpected row, and
+    // any non-zero count means those fills ARE in the wrong order.
+    let mut apply_order_fallbacks: u64 = 0;
 
-    // Run-level state (persists across chunks): one accumulator per source, one
-    // write buffer per source, and the count of assets already written to
-    // prices.assets (seeded with the preload so the first mint is what triggers a
-    // write). `flush_older_than` keeps the current minute open across chunk
-    // boundaries; the buffers are drained (written) once per chunk.
+    // Run-level state (persists across chunks): one accumulator per source and
+    // one write buffer per source. `flush_older_than` keeps the current minute
+    // open across chunk boundaries; the buffers are drained (written) once per
+    // chunk.
     let mut accumulators: HashMap<&'static str, CandleAccumulator> = HashMap::new();
     let mut buffers: HashMap<&'static str, Vec<OhlcvCandle>> = HashMap::new();
-    let mut assets_written: usize = assets.assets().count();
 
     let mut chunk_start = cli.start;
     loop {
@@ -216,7 +245,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         let mut cur_closed_at: i64 = 0;
         let mut cur_missing = false;
         let mut cur_events: Vec<RawSorobanEvent> = Vec::new();
-        let mut last_key: Option<(i64, i64, i16)> = None;
+        let mut last_key: Option<(i64, i64, u16, u32)> = None;
 
         while let Some(r) = cursor.next().await? {
             total_events += 1;
@@ -258,7 +287,20 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 continue;
             }
 
-            let key = (r.contract_id, r.transaction_id, r.event_index);
+            // The operation is part of the key, not just the event index: BE
+            // added `operation_index` and widened `event_index` in the same
+            // 2026-09-17 change (task 0304), which is what a per-OPERATION
+            // event numbering looks like. If `event_index` does restart at each
+            // operation, then without the operation here two REAL events of one
+            // transaction collide and the second is silently dropped as a
+            // duplicate. Including it is correct under either numbering, since
+            // an RMT double repeats the operation too.
+            let key = (
+                r.contract_id,
+                r.transaction_id,
+                r.operation_index,
+                r.event_index,
+            );
             if last_key == Some(key) {
                 continue; // adjacent RMT double of the same event
             }
@@ -270,11 +312,33 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
             // drop one event, never abort the run.
             let topics = serde_json::from_str::<Value>(&r.topics_xdr).unwrap_or(Value::Null);
             let data = serde_json::from_str::<Value>(&r.data_xdr).unwrap_or(Value::Null);
+            let (transaction_index, used_fallback) = resolve_transaction_index(r.application_order);
+            if used_fallback {
+                // Degraded but VISIBLE, the same shape as the missing-close
+                // counters above: one warning for the whole run so a chunk of
+                // millions cannot flood the log, plus a counter printed in the
+                // summary so "it worked" and "it silently used tx 0 everywhere"
+                // are never the same output.
+                if apply_order_fallbacks == 0 {
+                    warn!(
+                        ledger = r.ledger_sequence,
+                        transaction_id = r.transaction_id,
+                        application_order = r.application_order,
+                        "NEGATIVE application_order on soroban_events — not a position, so \
+                         this transaction's AMM events are ordered as transaction 0. These \
+                         fills ARE in the wrong order and the range is NOT repaired; do not \
+                         record the month as done (warned once per run, counted in the \
+                         summary as `negative apply order`)"
+                    );
+                }
+                apply_order_fallbacks += 1;
+            }
             cur_events.push(RawSorobanEvent {
                 contract_id: strkey.clone(),
                 transaction_id: r.transaction_id.to_string(),
+                transaction_index,
                 ledger_sequence: r.ledger_sequence,
-                event_index: r.event_index as u32,
+                event_index: r.event_index,
                 topics,
                 data,
             });
@@ -308,8 +372,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 cli.dry_run,
                 batch,
                 source,
-                &assets,
-                &mut assets_written,
+                &mut assets,
                 &mut total_candles,
             )
             .await?;
@@ -336,8 +399,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 cli.dry_run,
                 &candles,
                 source,
-                &assets,
-                &mut assets_written,
+                &mut assets,
                 &mut total_candles,
             )
             .await?;
@@ -393,6 +455,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         cli.dry_run,
         unresolved_genuine.len(),
         dropped_swaps,
+        apply_order_fallbacks,
     );
     info!(
         elapsed_s = run_start.elapsed().as_secs(),
@@ -478,6 +541,24 @@ fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<Unr
     out
 }
 
+/// Map one streamed row's `application_order` onto the fill key's
+/// `transaction_index` (task 0286 D1). Returns the index and whether the
+/// FALLBACK was taken.
+///
+/// ⚠️ The `found` marker is gone with the join (task 0304): `application_order`
+/// is now a non-nullable column on the event row, so "BE does not cover this
+/// ledger" is no longer a state this can be in. What remains is the value
+/// check. The column is `Int16`, and a NEGATIVE order is not a position — it
+/// can only come from a corrupt or unexpected row — so it degrades to 0 and
+/// reports the fallback instead of wrapping into a huge `u16`.
+pub(crate) fn resolve_transaction_index(application_order: i16) -> (u16, bool) {
+    if application_order < 0 {
+        return (0, true);
+    }
+    (application_order as u16, false)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_summary(
     ticks_by_source: &HashMap<&'static str, u64>,
     failed_by_source: &HashMap<&'static str, u64>,
@@ -486,6 +567,7 @@ fn print_summary(
     dry_run: bool,
     unresolved_contracts: usize,
     dropped_swaps: u64,
+    apply_order_fallbacks: u64,
 ) {
     println!();
     println!("=== events-backfill complete ===");
@@ -508,6 +590,26 @@ fn print_summary(
     println!("swaps dropped (unresolved):{dropped_swaps}");
     let failed_total: u64 = failed_by_source.values().sum();
     println!("swaps failed dispatch:     {failed_total}");
+    // Always printed, 0 included: it is the line that says the fill order in
+    // this run came from BE's real apply order rather than from a fallback.
+    // Named for what it now measures — a negative `application_order` on the
+    // event row, not a missing join row (task 0304). Non-zero means the range
+    // is not repaired.
+    println!("negative apply order:      {apply_order_fallbacks}");
+}
+
+/// The registry the reprice reads events for: the LOADED `pool_registry` plus
+/// the committed factory-less pools (task 0300 D3a).
+///
+/// The empty check is on the table's rows, before the merge: an unseeded
+/// `pool_registry` still refuses the run rather than repricing only the static
+/// pools.
+fn reprice_registry(mut loaded: Registries) -> Result<Registries, EventsBackfillError> {
+    if loaded.venue.is_empty() {
+        return Err(EventsBackfillError::EmptyPoolRegistry);
+    }
+    loaded.merge_static_pools();
+    Ok(loaded)
 }
 
 #[cfg(test)]
@@ -527,6 +629,7 @@ mod tests {
         RawSorobanEvent {
             contract_id: POOL.to_string(),
             transaction_id: format!("tx-{ledger}"),
+            transaction_index: 0,
             ledger_sequence: ledger,
             event_index: 0,
             topics: json!([
@@ -648,5 +751,154 @@ mod tests {
             flushed[0].trade_count, 2,
             "both swaps must be summed into minute M's candle (an undercount would show 1)"
         );
+    }
+
+    /// Task 0286 D1's fallback, as it stands after task 0304 removed the join.
+    /// `application_order` is now a non-nullable column on the event row, so
+    /// "BE does not cover this transaction" is no longer reachable and the
+    /// found-marker is gone. The VALUE check is what survives, and it is the
+    /// one that was always about corruption rather than coverage.
+    #[test]
+    fn a_negative_apply_order_falls_back_to_zero_and_is_counted() {
+        assert_eq!(
+            resolve_transaction_index(7),
+            (7, false),
+            "a real application_order is the transaction index, no fallback"
+        );
+        assert_eq!(
+            resolve_transaction_index(0),
+            (0, false),
+            "transaction 0 of a ledger is a POSITION, not a fallback — the              ambiguity that made this need a marker died with the join"
+        );
+        assert_eq!(
+            resolve_transaction_index(-1),
+            (0, true),
+            "a negative application_order cannot be a position; degrade, do not wrap"
+        );
+        assert_eq!(
+            resolve_transaction_index(i16::MIN),
+            (0, true),
+            "the whole negative range degrades, not just -1"
+        );
+    }
+
+    const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+
+    /// Task 0300 D3a: the static pools never mask an unseeded `pool_registry`
+    /// — the guard is about the table, and still fires on an empty one.
+    #[test]
+    fn an_empty_pool_registry_still_refuses_the_reprice() {
+        assert!(matches!(
+            reprice_registry(Registries::new()),
+            Err(EventsBackfillError::EmptyPoolRegistry)
+        ));
+    }
+
+    /// Task 0300 D3a: on a seeded table the reprice also reads the committed
+    /// factory-less pools' events.
+    #[test]
+    fn a_seeded_reprice_also_reads_the_static_pools() {
+        const AQUA: &str = "CDE57N6XTUPBKYYDGQMXX7E7SLNOLFY3JEQB4MULSMR2AKTSAENGX2HC";
+        let mut loaded = Registries::new();
+        loaded.venue.insert(AQUA.to_string(), Venue::Aquarius);
+
+        let reg = reprice_registry(loaded).expect("a seeded table reprices");
+        assert_eq!(reg.venue.len(), 2);
+        assert_eq!(reg.venue.get(AQUA), Some(&Venue::Aquarius));
+        assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
+    }
+
+    // ---- task 0139: only new identities, and before their candles ----------
+
+    /// Records every ordered write; fails the asset write on demand.
+    #[derive(Default)]
+    struct RecordingSink {
+        calls: std::cell::RefCell<Vec<String>>,
+        fail_assets: bool,
+    }
+
+    impl EmitSink for RecordingSink {
+        async fn write_new_assets(
+            &self,
+            assets: &AssetRegistry,
+        ) -> Result<(), EventsBackfillError> {
+            if self.fail_assets {
+                return Err(EventsBackfillError::InvalidChunkSize);
+            }
+            let n = assets.pending_new().count();
+            self.calls.borrow_mut().push(format!("assets {n}"));
+            Ok(())
+        }
+        async fn write_candles(
+            &self,
+            candles: &[OhlcvCandle],
+            source: &str,
+        ) -> Result<(), EventsBackfillError> {
+            let n = candles.len();
+            self.calls
+                .borrow_mut()
+                .push(format!("candles {source} {n}"));
+            Ok(())
+        }
+    }
+
+    /// One candle of a new pair, its two identities interned beside 1,000
+    /// loaded ones.
+    fn new_pair() -> (AssetRegistry, Vec<OhlcvCandle>) {
+        let loaded = (0..1000)
+            .map(|i| prices_ingest_core::AssetIdentity::Contract(format!("CLOADED{i}")))
+            .collect();
+        let mut assets = AssetRegistry::from_existing(loaded);
+        let base = prices_ingest_core::AssetIdentity::Contract(T0.to_string());
+        let quote = prices_ingest_core::AssetIdentity::Contract(T1.to_string());
+        assets.intern(&base);
+        assets.intern(&quote);
+        let mut acc = CandleAccumulator::new();
+        acc.merge(prices_ingest_core::TradeTick {
+            ledger_sequence: 100,
+            closed_at: 1_700_000_000,
+            transaction_index: 0,
+            operation_index: 0,
+            claim_index: 0,
+            base,
+            quote,
+            price: 2.into(),
+            volume_base: 1.into(),
+            volume_quote: 2.into(),
+            price_forming: true,
+        });
+        (assets, acc.flush_all())
+    }
+
+    #[tokio::test]
+    async fn only_new_identities_are_written_and_before_their_candles() {
+        let sink = RecordingSink::default();
+        let (mut assets, candles) = new_pair();
+        let mut total = 0;
+        for _ in 0..2 {
+            emit_buffer(&sink, false, &candles, "soroswap", &mut assets, &mut total)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *sink.calls.borrow(),
+            ["assets 2", "candles soroswap 1", "candles soroswap 1"],
+            "the 1,000 loaded identities are never re-emitted"
+        );
+        assert_eq!(assets.pending_new().count(), 0, "cleared after Ok");
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_asset_write_writes_no_candle_and_keeps_the_identities_pending() {
+        let sink = RecordingSink {
+            fail_assets: true,
+            ..Default::default()
+        };
+        let (mut assets, candles) = new_pair();
+        let emitted = emit_buffer(&sink, false, &candles, "soroswap", &mut assets, &mut 0).await;
+        assert!(emitted.is_err());
+        assert!(sink.calls.borrow().is_empty(), "no candle");
+        assert_eq!(assets.pending_new().count(), 2, "retried by the next batch");
     }
 }

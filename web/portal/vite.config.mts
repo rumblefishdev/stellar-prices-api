@@ -2,7 +2,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 /**
- * `base` is what makes Vite emit asset URLs under `/api/`; without it
+ * `base` is what makes Vite emit asset URLs under `/prices-api/`; without it
  * every `<script src>` and `<link href>` points at the domain root and the app
  * 403s on its own JavaScript the moment it is not served from `/`. The router's
  * `basename` is the other half — this one covers assets, that one covers routes,
@@ -21,9 +21,9 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
  *
  * The trailing slash is required. Vite treats a `base` without one as a path
  * prefix to concatenate rather than a directory, which produces
- * `/apiassets/…`.
+ * `/prices-apiassets/…`.
  */
-const BASE_PATH = '/api/';
+const BASE_PATH = '/prices-api/';
 
 /**
  * Dev-server proxy targets, mirroring `soroban-block-explorer`'s pattern.
@@ -41,11 +41,12 @@ const BASE_PATH = '/api/';
  * would need a rewrite here that production does not perform.
  */
 /**
- * The backend's top-level segments under `/api/`. The bundle shares the prefix
- * (task 0194), so a plain `/api` proxy rule would swallow Vite's own
- * `/api/@vite/…` and `/api/src/…` requests; instead the backend is enumerated
- * as one regex key. Adding a backend route at a NEW top-level segment means
- * adding it here — a missing one is a Vite 404 page, loud and local.
+ * The backend's top-level segments under `/api/`. The bundle shared the prefix
+ * until task 0326 (a plain `/api` proxy rule would have swallowed Vite's own
+ * `/api/@vite/…` and `/api/src/…` requests), so the backend is enumerated as
+ * one regex key; it still holds with the bundle at `/prices-api/`. Adding a
+ * backend route at a NEW top-level segment means adding it here — a missing one
+ * is a Vite 404 page, loud and local.
  */
 const PORTAL_BACKEND_SEGMENTS = [
   'auth',
@@ -114,8 +115,7 @@ export default defineConfig(({ mode }) => {
   // are read HERE, in the Node config, and only `VITE_`-prefixed vars are
   // exposed to `import.meta.env` in the client bundle. A dev key put in
   // `VITE_API_KEY` would be compiled into the JavaScript and served to every
-  // visitor — see the acceptance criterion "no API key, no secret and no
-  // third-party script in the bundle".
+  // visitor. No API key and no secret may reach the bundle.
   const env = loadEnv(mode, import.meta.dirname, '');
 
   const proxyTarget = env['DEV_API_PROXY_TARGET'];

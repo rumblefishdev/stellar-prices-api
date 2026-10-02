@@ -1,0 +1,80 @@
+[
+  {
+    "Id": "gw_count",
+    "Label": "API Gateway requests (stage production)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "Count",
+        "Dimensions": [
+          { "Name": "ApiName", "Value": "prices-production-api" },
+          { "Name": "Stage", "Value": "production" }
+        ]
+      },
+      "Period": 60,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "gw_4xx",
+    "Label": "API Gateway 4XX responses",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "4XXError",
+        "Dimensions": [
+          { "Name": "ApiName", "Value": "prices-production-api" },
+          { "Name": "Stage", "Value": "production" }
+        ]
+      },
+      "Period": 60,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "gw_5xx",
+    "Label": "API Gateway 5XX responses",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "5XXError",
+        "Dimensions": [
+          { "Name": "ApiName", "Value": "prices-production-api" },
+          { "Name": "Stage", "Value": "production" }
+        ]
+      },
+      "Period": 60,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "ingest_lag",
+    "Label": "Ledger-processor lag: age of the oldest ledger notification (s)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Dimensions": [
+          { "Name": "QueueName", "Value": "prices-ingest-production" }
+        ]
+      },
+      "Period": 60,
+      "Stat": "Maximum"
+    }
+  },
+  {
+    "Id": "ingest_dlq",
+    "Label": "Ingest dead-letter queue depth",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Dimensions": [
+          { "Name": "QueueName", "Value": "prices-ingest-dlq-production" }
+        ]
+      },
+      "Period": 60,
+      "Stat": "Maximum"
+    }
+  }
+]

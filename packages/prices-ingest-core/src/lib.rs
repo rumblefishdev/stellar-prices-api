@@ -5,16 +5,18 @@
 //! (`sdex-backfill`) and is now reused verbatim by the live **Prices Ledger
 //! Processor Lambda** (`prices-ledger-processor`, task 0038). Both writers go
 //! through the same modules so live and backfill produce **identical**
-//! `prices.price_ohlcv_1m` rows (same surrogate `asset_id`s via the
-//! [`AssetRegistry`], same SAC→classic collapse, same preferred-quote
+//! `prices.price_ohlcv_1m` rows (same identities, from which ClickHouse
+//! derives the `asset_id`s, same SAC→classic collapse, same preferred-quote
 //! orientation, same `Decimal(38,14)` scaling, same `version`). Splitting this
 //! into its own crate is what prevents the two paths from drifting.
 //!
 //! Layers, in pipeline order:
 //! - [`filter`] — classic SDEX trades from `LedgerCloseMeta` operation results.
 //! - [`soroban`] — Soroban AMM trades + oracle samples from contract events.
-//! - [`canonical`] — asset identity, the [`AssetRegistry`] surrogate-id store,
-//!   and `(base, quote)` canonicalisation.
+//! - [`static_pools`] — the committed list of factory-less pools
+//!   ([`STATIC_POOLS`], task 0300) merged into the AMM registries.
+//! - [`canonical`] — asset identity, the [`AssetRegistry`] of known and newly
+//!   seen identities, and `(base, quote)` canonicalisation.
 //! - [`price`] / [`tick`] — per-trade price + the [`TradeTick`] the bucketer eats.
 //! - [`bucket`] — 1-minute OHLCV accumulation ([`CandleAccumulator`]).
 //! - [`writer`] — the transport-agnostic ClickHouse [`OhlcvWriter`] (works with a
@@ -32,21 +34,29 @@ pub mod registry_io;
 pub mod retry;
 pub mod safe_log;
 pub mod soroban;
+pub mod static_pools;
 pub mod tick;
 pub mod writer;
 
 pub use bucket::{CandleAccumulator, OhlcvCandle};
 pub use canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
-pub use decode::{decode_object, ledger_sequence};
+pub use decode::{decode_object, ledger_close_time, ledger_sequence};
 pub use error::IngestError;
-pub use filter::{RawTrade, extract_trades};
-pub use price::{compute_price, stroops_to_decimal};
+pub use filter::{
+    OfferLookupCounts, PriceSource, RawTrade, extract_trades, extract_trades_with_counts,
+    offer_lookup_counts,
+};
+pub use price::{
+    CANDLE_PRICE_SCALE, compute_price, offer_price, price_forming_i64, price_forming_i128,
+    price_survives_column_scale, rounding_bound_holds, stroops_to_decimal,
+};
 pub use registry_io::PoolRegistryRow;
 pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
 pub use safe_log::safe_response_token;
 pub use soroban::{
-    LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, process_ledger,
-    process_soroban_event_rows, reflector_key_to_identity,
+    LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, learn_factory_event,
+    process_ledger, process_soroban_event_rows, reflector_key_to_identity,
 };
-pub use tick::{TradeTick, raw_trade_to_tick};
+pub use static_pools::STATIC_POOLS;
+pub use tick::{PricedFrom, TradeTick, raw_trade_to_tick, raw_trade_to_tick_with_source};
 pub use writer::{AssetMetadata, OhlcvWriter, OracleSample, UnresolvedPool};

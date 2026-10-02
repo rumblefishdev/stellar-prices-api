@@ -73,11 +73,11 @@ At ~145k ledgers/hr: `11,737,424 ÷ 145,000 ≈ 81 h ≈ 3.4 days`.
 You need three things. **Confirm all three with the primary operator now** — you don't
 want to discover a gap the moment pass 1 completes.
 
-| #   | Thing                                                  | Used for                | How to verify                                                                                                                                  |
-| --- | ------------------------------------------------------ | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | SSH key `~/.ssh/sorban-prod_ed25519`                   | Talk to prod ClickHouse | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 'echo ok'` prints `ok`                                                                |
-| 2   | AWS profile `soroban-explorer` (region `eu-central-1`) | Toggle the cleanup rule | `aws events describe-rule --name prices-production-cleanup --region eu-central-1 --profile soroban-explorer --query State` prints `"DISABLED"` |
-| 3   | **Access to `fishuser-hero` (`192.168.1.106`)**        | **Launch pass 2**       | `ssh fishuser-hero 'echo ok'` prints `ok`                                                                                                      |
+| #   | Thing                                               | Used for                | How to verify                                                                                                                               |
+| --- | --------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | SSH key `~/.ssh/sorban-prod_ed25519`                | Talk to prod ClickHouse | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 'echo ok'` prints `ok`                                                             |
+| 2   | AWS profile `soroban-admin` (region `eu-central-1`) | Toggle the cleanup rule | `aws events describe-rule --name prices-production-cleanup --region eu-central-1 --profile soroban-admin --query State` prints `"DISABLED"` |
+| 3   | **Access to `fishuser-hero` (`192.168.1.106`)**     | **Launch pass 2**       | `ssh fishuser-hero 'echo ok'` prints `ok`                                                                                                   |
 
 > 🚧 **Network caveat — read this.** `fishuser-hero` is on a **private LAN**.
 > From a different network you **cannot reach it** without being on the same LAN or
@@ -143,10 +143,10 @@ ETA   = remaining_to_activation / rate  (hours from now)
 
 ```bash
 aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer --query State --output text
+  --profile soroban-admin --query State --output text
 ```
 
-> **Profile note.** `soroban-explorer` is the conventional name; on 2026-08-04
+> **Profile note.** `soroban-admin` is the conventional name; on 2026-08-04
 > the profile that worked was **`soroban-admin`**. Use whichever is live for you.
 > A `UnrecognizedClientException: security token ... invalid` means an expired
 > SSO session, not a wrong profile — re-login before concluding anything.
@@ -157,7 +157,7 @@ disabled again:
 
 ```bash
 aws events disable-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer
+  --profile soroban-admin
 ```
 
 > ⚠️ **The rule's state is necessary but NOT sufficient.** During 2026-07-15→20
@@ -623,7 +623,7 @@ Only once the gate passes, gather the rest of the pre-flight:
 ```bash
 # [LAPTOP] cleanup STILL disabled (must be)
 aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer --query State --output text        # expect DISABLED
+  --profile soroban-admin --query State --output text        # expect DISABLED
 
 # get the EXACT activation boundary timestamp (do NOT assume midnight)
 CHQ <<'SQL'
@@ -677,10 +677,10 @@ Only after §7.3 passes. This restores normal nightly retention.
 ```bash
 # [LAPTOP]
 aws events enable-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer
+  --profile soroban-admin
 
 aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer --query State --output text
+  --profile soroban-admin --query State --output text
 ```
 
 **✅ Checkpoint:** prints **`ENABLED`**. Done — the history is now permanently stored.
@@ -726,7 +726,7 @@ here. Better to pause than to guess against production.
 | Soroban activation ledger      | `50,457,424` (pass-1 target = `50,457,423`)                                                               |
 | Pass-2 range                   | `[1, 23,423,999]`                                                                                         |
 | Backfill top (never exceed)    | `63,352,611`                                                                                              |
-| Cleanup rule                   | `prices-production-cleanup` (region `eu-central-1`, profile `soroban-explorer`)                           |
+| Cleanup rule                   | `prices-production-cleanup` (region `eu-central-1`, profile `soroban-admin`)                              |
 | Pre-roll script (use this one) | `packages/prices-clickhouse/schema/preroll-incremental.sql`                                               |
 | Pass-2 log (on fishuser-hero)  | `~/sdex-pass2.log`                                                                                        |
 | Runbooks                       | `docs/runbooks/preroll-incremental-presoroban.md`, `docs/runbooks/fix-backfill-history-loss-and-rerun.md` |

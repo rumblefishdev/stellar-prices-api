@@ -9,8 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-/// Longest token we bother decoding. Our own tokens are well under 100 chars
-/// (a decimal string + a u32); anything longer is foreign.
+/// Longest token we bother decoding. Our own tokens stay well under this
+/// (a ≤64-byte value + a u64 id of at most 20 digits); anything longer is
+/// foreign.
 const MAX_TOKEN_LEN: usize = 256;
 
 /// Decoded cursor payload. `deny_unknown_fields` so a foreign token with extra
@@ -21,7 +22,13 @@ pub struct Cursor {
     /// Sort-column value of the last row.
     pub v: String,
     /// Asset id of the last row (tiebreaker).
-    pub id: u32,
+    ///
+    /// u64 since task 0139: ids are `xxh3` of the identity. A token issued
+    /// while ids were u32 still decodes (a u32 JSON number is a valid u64).
+    /// Across the 0139 migration such a token carries an old-space id, so a
+    /// walk in flight may skip or repeat rows once; it never errors. No version
+    /// key: rejecting `id <= u32::MAX` would refuse real hashes too.
+    pub id: u64,
 }
 
 /// Longest value accepted where an `asset_code` is compared as a string: the
@@ -55,7 +62,7 @@ impl Cursor {
 /// (PR #217 review): the STANDARD alphabet emits `+`/`=`, and a client echoing
 /// `next_cursor` into `?cursor=` without percent-encoding turns `+` into a
 /// space — killing pagination on a token the API itself issued.
-pub fn encode(v: &str, id: u32) -> String {
+pub fn encode(v: &str, id: u64) -> String {
     let json = serde_json::to_vec(&Cursor {
         v: v.to_string(),
         id,
@@ -88,6 +95,31 @@ mod tests {
         let c = decode(&token).expect("decodes");
         assert_eq!(c.v, "1523400.50");
         assert_eq!(c.id, 42);
+    }
+
+    #[test]
+    fn a_token_issued_with_a_u32_id_still_decodes() {
+        // Exactly what the pre-0139 encoder produced for id 4 (native XLM).
+        let old = URL_SAFE_NO_PAD.encode(r#"{"v":"1523400.50","id":4}"#);
+        let c = decode(&old).expect("u32-era token decodes");
+        assert_eq!(c.id, 4);
+        assert_eq!(c.v, "1523400.50");
+        let max = URL_SAFE_NO_PAD.encode(format!(r#"{{"v":"1","id":{}}}"#, u32::MAX));
+        assert_eq!(decode(&max).expect("decodes").id, u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn a_u64_id_above_u32_max_round_trips() {
+        for id in [u64::from(u32::MAX) + 1, 0x9e37_79b9_7f4a_7c15, u64::MAX] {
+            let token = encode("USDC", id);
+            assert!(token.len() <= MAX_TOKEN_LEN);
+            let c = decode(&token).expect("decodes");
+            assert_eq!(c.id, id);
+            assert_eq!(c.v, "USDC");
+        }
+        // The longest value a string sort accepts still fits the token cap.
+        let long = encode(&"x".repeat(MAX_STRING_PAYLOAD_LEN), u64::MAX);
+        assert_eq!(decode(&long).expect("decodes").id, u64::MAX);
     }
 
     #[test]

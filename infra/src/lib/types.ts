@@ -15,6 +15,31 @@ export interface CicdConfig {
 }
 
 /**
+ * The four paid usage plans beside `pricing-api-free` (task 0311). The key is
+ * also the tier's segment of the AWS plan name, `pricing-api-${tier}-${envName}`
+ * — the portal backend parses the tier back out of exactly that name.
+ */
+export type PaidPlanTier = 'basic' | 'analyst' | 'lite' | 'pro';
+
+/** Every paid tier, in ascending order of limits. */
+export const PAID_PLAN_TIERS: readonly PaidPlanTier[] = [
+  'basic',
+  'analyst',
+  'lite',
+  'pro',
+];
+
+/** The three figures a paid usage plan carries (task 0311). */
+export interface PlanLimits {
+  /** Sustained requests/second per key (UsagePlan throttle.rateLimit). */
+  readonly rateLimit: number;
+  /** Token-bucket capacity above the rate (UsagePlan throttle.burstLimit). */
+  readonly burstLimit: number;
+  /** Requests per calendar month (UsagePlan quota.limit, Period.MONTH). */
+  readonly monthlyQuota: number;
+}
+
+/**
  * Per-environment configuration for the prices-api CDK app.
  *
  * Production is the only supported AWS environment — staging was
@@ -71,10 +96,42 @@ export interface EnvironmentConfig {
    */
   readonly pricingApiFreePlanMonthlyQuota: number;
   /**
+   * The paid usage plans, one per tier (task 0311). Each becomes an AWS usage
+   * plan named `pricing-api-${tier}-${envName}` on the same stage as the free
+   * plan, with quota `Period.MONTH`, offset 0.
+   *
+   * Nobody is issued a paid key: an operator moves an existing key onto one of
+   * these plans by hand (docs/runbooks/manual-api-key-tier.md). The dashboard
+   * then reads whatever the key's plan says — these figures are per-env config,
+   * not something the portal code depends on.
+   *
+   * NOT held to the one-tenth-of-stage guard the free plan is (see
+   * `planVsStage` in `validateConfig`): that guard is about keys anybody can
+   * mint by signing in. A paid plan is only checked against the stage default
+   * itself, because a plan above the per-method default cannot be delivered.
+   */
+  readonly pricingApiPaidPlans: Readonly<Record<PaidPlanTier, PlanLimits>>;
+  /**
    * Whether the API Gateway stage response cache (0.5 GB) is enabled. Per-route
    * TTLs are fixed in `ApiGatewayStack` per §2.1.
    */
   readonly apiGatewayCacheEnabled: boolean;
+  /**
+   * Whether the weekly coverage sweep's EventBridge rule is ENABLED (task 0100).
+   *
+   * The probe reads BE's `default.soroban_events` / `default.soroban_contracts`
+   * as `prices_writer`, which needs two SELECT grants only BE can add (their
+   * `users.d` XML). Production is `true`: BE applied them on 2026-09-21 and they
+   * were verified live the same day as `prices_writer` (`SHOW GRANTS`, reads on
+   * both tables, `default.transactions` still Code 497 — runbook §4.2). Set it
+   * `false` wherever the grants are not verified live (a new environment, a BE
+   * change that drops them): the Lambda, rule and alarms still deploy, but
+   * nothing invokes the probe, so it does not fail with Code 497 every Monday.
+   *
+   * Config rather than `aws events disable-rule`, because CDK re-enables a rule
+   * on the next deploy of the stack; a flag survives it.
+   */
+  readonly coverageSweepEnabled: boolean;
 
   /**
    * Public base URL of the deployed API, passed to the api-handler as
@@ -113,12 +170,13 @@ export interface EnvironmentConfig {
    * not a resource under it.
    *
    * Why the portal needs it at all: the bundle is served from another
-   * application's distribution (`portalWebOrigin`), whose `/api/*` behaviour
-   * is a static SPA — every extensionless path under it, `/api/config`
-   * included, is rewritten to `/api/index.html` at the edge and answered
-   * `200 text/html`. There is nothing on that host for a same-origin call to
-   * reach, so the bundle calls this hostname directly, cross-origin and
-   * same-site — the pattern the explorer's own SPA uses for its API.
+   * application's distribution (`portalWebOrigin`), whose `/prices-api/*`
+   * behaviour is a static SPA — every extensionless path under it is rewritten
+   * to `/prices-api/index.html` at the edge and answered `200 text/html`, and
+   * `/api/config` there is a `301` into it (task 0326). There is nothing on
+   * that host for a same-origin call to reach, so the bundle calls this
+   * hostname directly, cross-origin and same-site — the pattern the explorer's
+   * own SPA uses for its API.
    *
    * `hostedZoneName` must be a suffix of `domainName`, and the zone must live
    * in this account: the certificate's validation record and the alias records
@@ -218,6 +276,17 @@ export interface EnvironmentConfig {
      * Daily is ample for a 30-day threshold.
      */
     readonly mtlsNotafterProbe: string;
+    /**
+     * Coverage sweep probe (task 0100, layer 3 of the coverage model). Weekly
+     * sweep over a trailing 14-day ledger window of BE's `soroban_events` for
+     * swap/trade-shaped emitters in neither `prices.pool_registry` nor the
+     * committed allow-list → `Prices/Coverage` `UnclassifiedSwapEvents`
+     * (published on every run, `0` when clean; task 0323).
+     * Weekly and off-peak; not coarse-sweep's minute 30.
+     */
+    readonly coverageSweepProbe: string;
+    /** Weekly backfill claim reconcile (task 0272); ~1.08 GB scan, so not every 15 min. */
+    readonly backfillReconcileProbe: string;
   };
 
   // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
@@ -275,6 +344,29 @@ export interface EnvironmentConfig {
      * alarm without any test failing. Change both, or neither.
      */
     readonly rollupLagSeconds: Readonly<Record<string, number>>;
+    /**
+     * Age threshold in seconds for the `current_prices` writer-liveness alarm
+     * (task 0243). The rollup-freshness-probe publishes
+     * `now() - max(updated_at)` of `prices.current_prices` as `Prices/Rollup`
+     * `RollupLagSeconds` with `Table=current_prices`; the alarm fires when it
+     * exceeds this.
+     *
+     * `updated_at` is stamped at the START of every refresh of
+     * `mv_current_prices` (REFRESH EVERY 1 MINUTE), so this watches the WRITER,
+     * not its input: stale candles still read fresh here — that is
+     * `rollupLagSeconds.price_ohlcv_1m`'s job.
+     *
+     * Derivation: the healthy peak is the 60 s interval plus the 40 s refresh
+     * the rollout runbook treats as its stop line, 100 s
+     * (`CURRENT_PRICES_HEALTHY_PEAK_SECONDS`, enforced by `validateConfig`).
+     * 900 s is 15 missed refreshes, the bound the `1m` tier uses at the same
+     * 15-minute probe cadence — and that cadence dominates detection anyway:
+     * a stall under 15 min never pages, one of 30 min or more always does.
+     * Mirrored as `AGE_BOUND_SECONDS` in
+     * `packages/rollup-freshness-probe/src/current_prices.rs`; this config is
+     * authoritative. Change both, or neither.
+     */
+    readonly currentPricesFreshnessSeconds: number;
     /**
      * Ingestion-lag threshold (seconds) for the live ledger-processor alarm
      * (task 0056 finding B). Watches the `prices-ingest-{env}` SQS queue's
@@ -351,6 +443,16 @@ export interface EnvironmentConfig {
      * were still pegged at $1) and `UsdtStrandedCandles` (left at
      * `close_usd = 0` past a 48 h grace despite a representable `close`). Each
      * threshold here becomes one alarm on each metric.
+     *
+     * ⚠️ **Since task 0151 these rungs drive a THIRD ladder too**:
+     * `CandleZeroInvariantViolations` (ADR 0292), which is **not** scoped to a
+     * quote leg and reads a 48 h window of `price_ohlcv_1m`, not 7 days. Its
+     * healthy value is exactly 0, so only the first rung carries meaning there
+     * and the rationale below for `100` / `10000` is about the USDT metrics, not
+     * about it. That ladder therefore pins its first rung at `1` in the stack
+     * and borrows only the rungs above it from here, so raising the first rung
+     * to quiet a USDT ladder cannot hide a violation there. **Changing the
+     * higher rungs still re-tunes all three ladders.**
      *
      * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
      * **standing condition** — it stays wrong until a person repairs it — so it
@@ -429,6 +531,23 @@ export interface EnvironmentConfig {
      * Max contiguous ledgers walked per reconcile run (`MAX_ITERATIONS`).
      * Bounds one invocation's S3 fetch + decode budget against the Lambda
      * timeout; the Rust default is 16.
+     *
+     * ⚠️ **Task 0282 made this load-bearing for correctness, not just latency.**
+     * A run may only write a minute once it has walked PAST the end of it, so
+     * the budget must fit `ledgers-per-minute + 1`. If one minute ever holds
+     * `maxIterations` ledgers the run can never see past it, and without the
+     * `forced_progress` escape hatch ingestion would stop dead with every
+     * external signal reading healthy (the doorbell is consumed, the queue
+     * drains, no error). The hatch flushes a PARTIAL minute instead — which
+     * re-creates the 0282 loss for that minute — and raises
+     * `ForcedPartialFlushes`.
+     *
+     * Raised 16 → 32 deliberately: this is a CAP, not a target, so a run that
+     * needs 13 ledgers still stops at 13 and the extra headroom costs nothing.
+     * Measured 2026-09-15 over 7 days / 10,560 minutes, pubnet produced 10
+     * ledgers/min 24.2%, 11 ledgers 75.7%, 12 ledgers 0.05% and never more —
+     * so the worst walk is 13. Timeout headroom is ample: p99 invocation
+     * duration is 452 ms against a 60 s timeout.
      */
     readonly maxIterations: number;
     /**
@@ -473,10 +592,24 @@ export const ROLLUP_HEALTHY_PEAK_SECONDS: Readonly<Record<string, number>> = {
   price_ohlcv_4h: 4 * 60 * 60 + 60 * 60, // + mv_ohlcv_1h_to_4h  EVERY 1 HOUR
   price_ohlcv_1d: 86_400 + 4 * 60 * 60, // + mv_ohlcv_4h_to_1d  EVERY 4 HOUR
   price_ohlcv_1w: 7 * 86_400 + 86_400, // + mv_ohlcv_1d_to_1w  EVERY 1 DAY
-  // + mv_ohlcv_1w_to_1M EVERY 1 DAY, + 6 d alignment slack: a month's bucket
-  // does not exist until a week actually STARTS inside that month.
+  // + mv_ohlcv_1d_to_1M EVERY 1 DAY, + 6 d alignment slack. The month rolls
+  // from the DAY since task 0286 (BRIEF F10), so its bucket now exists as
+  // soon as a DAY starts in the month and the 6 d slack is wider than it
+  // needs to be. Kept: a wider bound is the conservative direction (it can
+  // only delay an alarm, never fire a false one), and tightening it is a
+  // deliberate follow-up rather than part of the 0286 rollout.
   price_ohlcv_1M: 31 * 86_400 + 86_400 + 6 * 86_400,
 };
+
+/**
+ * The oldest a **healthy** `prices.current_prices` reads (task 0243): one full
+ * `REFRESH EVERY 1 MINUTE` interval since the last refresh started, plus the
+ * 40 s refresh the rollout runbook treats as its stop line
+ * (docs/runbooks/0072-current-prices-mv-rollout.md). Mirrors
+ * `HEALTHY_PEAK_SECONDS` in `packages/rollup-freshness-probe/src/current_prices.rs`.
+ * `opsAlarms.currentPricesFreshnessSeconds` must exceed it.
+ */
+export const CURRENT_PRICES_HEALTHY_PEAK_SECONDS = 60 + 40;
 
 /**
  * Validates an EnvironmentConfig at synth time. Throws on missing
@@ -542,6 +675,71 @@ export function validateConfig(config: EnvironmentConfig): void {
   ) {
     errors.push(
       `pricingApiFreePlanMonthlyQuota must be a positive integer, got: ${config.pricingApiFreePlanMonthlyQuota}`,
+    );
+  }
+  // The paid plans (task 0311): the same three checks as the free plan, per
+  // tier, with the same `< 1` on the burst for the same reason — errors are
+  // accumulated, not short-circuited, so an invalid rate must not let an
+  // invalid burst through unreported.
+  const paid = config.pricingApiPaidPlans as
+    | Readonly<Record<string, PlanLimits | undefined>>
+    | undefined;
+  if (!paid || typeof paid !== 'object') {
+    errors.push('pricingApiPaidPlans missing or not an object');
+  } else {
+    for (const tier of PAID_PLAN_TIERS) {
+      const plan = paid[tier];
+      const field = `pricingApiPaidPlans.${tier}`;
+      if (!plan || typeof plan !== 'object') {
+        errors.push(`${field} missing or not an object`);
+        continue;
+      }
+      if (!Number.isInteger(plan.rateLimit) || plan.rateLimit < 1) {
+        errors.push(
+          `${field}.rateLimit must be a positive integer, got: ${plan.rateLimit}`,
+        );
+      }
+      if (
+        !Number.isInteger(plan.burstLimit) ||
+        plan.burstLimit < 1 ||
+        plan.burstLimit < plan.rateLimit
+      ) {
+        errors.push(
+          `${field}.burstLimit must be a positive integer >= ${field}.rateLimit (${plan.rateLimit}), got: ${plan.burstLimit}`,
+        );
+      }
+      if (!Number.isInteger(plan.monthlyQuota) || plan.monthlyQuota < 1) {
+        errors.push(
+          `${field}.monthlyQuota must be a positive integer, got: ${plan.monthlyQuota}`,
+        );
+      }
+      // A plan above the stage's per-method default cannot be delivered: the
+      // stage throttle 429s the key before the plan's own limit is reached
+      // (docs/runbooks/manual-api-key-tier.md). A plain `<=`, deliberately not
+      // the one-tenth guard below — see `planVsStage`.
+      if (
+        Number.isInteger(plan.rateLimit) &&
+        Number.isInteger(config.apiGatewayThrottleRate) &&
+        plan.rateLimit > config.apiGatewayThrottleRate
+      ) {
+        errors.push(
+          `${field}.rateLimit (${plan.rateLimit}) exceeds apiGatewayThrottleRate (${config.apiGatewayThrottleRate}): the stage default would throttle the key first`,
+        );
+      }
+      if (
+        Number.isInteger(plan.burstLimit) &&
+        Number.isInteger(config.apiGatewayThrottleBurst) &&
+        plan.burstLimit > config.apiGatewayThrottleBurst
+      ) {
+        errors.push(
+          `${field}.burstLimit (${plan.burstLimit}) exceeds apiGatewayThrottleBurst (${config.apiGatewayThrottleBurst}): the stage default would throttle the key first`,
+        );
+      }
+    }
+  }
+  if (typeof config.coverageSweepEnabled !== 'boolean') {
+    errors.push(
+      `coverageSweepEnabled must be a boolean, got: ${config.coverageSweepEnabled}`,
     );
   }
   if (typeof config.apiGatewayCacheEnabled !== 'boolean') {
@@ -663,6 +861,11 @@ export function validateConfig(config: EnvironmentConfig): void {
     }
   }
 
+  // Only the free plan is listed. The paid plans (`pricingApiPaidPlans`, task
+  // 0311) are deliberately absent: this guard is about keys anybody can mint by
+  // signing in, and a paid key is placed on its plan by an operator. Held to it,
+  // Lite and Pro could not exist at all (Pro's 25 req/s x 10 = 250 > 200). They
+  // are checked against the stage default with a plain `<=` above instead.
   const planVsStage: ReadonlyArray<readonly [string, number, string, number]> =
     [
       [
@@ -739,6 +942,8 @@ export function validateConfig(config: EnvironmentConfig): void {
       'backfillFreshnessProbe',
       'rollupFreshnessProbe',
       'mtlsNotafterProbe',
+      'coverageSweepProbe',
+      'backfillReconcileProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];
@@ -863,6 +1068,18 @@ export function validateConfig(config: EnvironmentConfig): void {
           );
         }
       }
+    }
+    if (
+      !Number.isInteger(ops.currentPricesFreshnessSeconds) ||
+      ops.currentPricesFreshnessSeconds <= CURRENT_PRICES_HEALTHY_PEAK_SECONDS
+    ) {
+      // The same sawtooth trap as the rollup tiers: a healthy table's age climbs
+      // to a full refresh interval (plus the refresh itself) before the next
+      // rewrite, so a threshold at or below that fires on a healthy table and
+      // gets muted.
+      errors.push(
+        `opsAlarms.currentPricesFreshnessSeconds must be an integer above the healthy peak of ${CURRENT_PRICES_HEALTHY_PEAK_SECONDS}s (60 s refresh interval + 40 s worst accepted refresh), or the alarm fires on a healthy table; got: ${ops.currentPricesFreshnessSeconds}`,
+      );
     }
     if (
       !Number.isInteger(ops.ledgerProcessorLagSeconds) ||

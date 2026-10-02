@@ -379,6 +379,43 @@ mod tests {
         assert_eq!(value_of(&m, MV_DRIFT_UNREADABLE_METRIC), 0.0);
     }
 
+    /// Task 0143/0203: a live MV that lost its `DEPENDS ON` (or names the wrong
+    /// dependency) but kept `APPEND` is ordinary drift — wrong, static, morning
+    /// work — and must not page as history destruction.
+    #[test]
+    fn a_lost_depends_on_that_keeps_append_is_ordinary_drift_not_critical() {
+        let lost_dependency = MvReport {
+            name: "prices.mv_ohlcv_1d_to_1w".into(),
+            status: MvStatus::Drifted(vec![Difference {
+                field: DriftField::Refresh,
+                declared: "EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_4h_to_1d APPEND".into(),
+                live: "EVERY 1 DAY APPEND".into(),
+            }]),
+            live: Some(MvFingerprint {
+                name: "prices.mv_ohlcv_1d_to_1w".into(),
+                refresh: "EVERY 1 DAY APPEND".into(),
+                target: "prices.price_ohlcv_1w".into(),
+                body: "SELECT 1".into(),
+            }),
+        };
+        let m = drift_metrics(&[lost_dependency], 32);
+        assert_eq!(value_of(&m, MV_DRIFT_METRIC), 1.0);
+        assert_eq!(value_of(&m, MV_DRIFT_CRITICAL_METRIC), 0.0);
+    }
+
+    /// The new shape in sync — six fast plus six reconcile MVs — reads clean.
+    #[test]
+    fn twelve_in_sync_mvs_publish_zeroes() {
+        let reports: Vec<MvReport> = prices_clickhouse::rollup_sql::rollup_views()
+            .iter()
+            .map(|(name, _)| in_sync(name))
+            .collect();
+        assert_eq!(reports.len(), 12);
+        let m = drift_metrics(&reports, 32);
+        assert_eq!(value_of(&m, MV_DRIFT_METRIC), 0.0);
+        assert_eq!(value_of(&m, MV_DRIFT_CRITICAL_METRIC), 0.0);
+    }
+
     #[test]
     fn the_visible_objects_query_is_scoped_to_the_probes_database() {
         assert_eq!(

@@ -39,17 +39,13 @@ export function createApp({ config }: CreateAppOptions): void {
     env,
     config,
     apiHandlerFunction: compute.apiHandlerFunction,
-    // The role, so ApiGatewayStack can grant the one control-plane action that
-    // needs the usage-plan id (task 0187). Same direction as the Function
-    // above, so it adds no new dependency and cannot create a cycle.
-    apiHandlerRole: compute.apiHandlerRole,
   });
 
   // No hosting stack for the portal. `PortalHostingStack` (task 0184) — a
   // private bucket and a CloudFront distribution fronting both the bundle
   // and this API — was retired by task 0195 on 2026-09-01: since task 0194
   // the page is served from the block explorer's distribution at
-  // `https://sorobanscan.rumblefish.dev/api/` (its bucket, synced by
+  // `https://sorobanscan.rumblefish.dev/prices-api/` (its bucket, synced by
   // `make -C infra sync-portal-explorer`) and calls this API on
   // `config.apiDomain` directly, so the distribution had become a second,
   // ungated front door to the same portal. Constructing `ApiGatewayStack` is
@@ -66,11 +62,21 @@ export function createApp({ config }: CreateAppOptions): void {
   // rule.addTarget()).
   new EventBridgeStack(app, `${prefix}-EventBridge`, { env, config });
 
-  // ObservabilityStack is independent of every other stack at the
-  // skeleton stage. Task 0056 attaches widgets/alarms that reference
-  // ComputeStack log groups and ApiGatewayStack metrics; the
-  // cross-stack dependency arrives then.
-  new ObservabilityStack(app, `${prefix}-Observability`, { env, config });
+  // ObservabilityStack carries no CloudFormation reference to any other
+  // stack: alarms key on function names, queue names and log-group names
+  // as plain strings, so it stays deployable on its own. One of its
+  // resources still needs another stack's resource to EXIST: the
+  // portal-load-failed metric filter (tasks 0249, 0311) is created on the api-handler
+  // log group ComputeStack owns, and `fromLogGroupName` emits no
+  // dependency for it. `addDependency` orders Compute first under
+  // `deploy --all` without adding a reference; the `--exclusively` target
+  // (`make deploy-production-observability`) has to find the log group
+  // already there — see the note on that target.
+  const observability = new ObservabilityStack(app, `${prefix}-Observability`, {
+    env,
+    config,
+  });
+  observability.addDependency(compute);
 
   app.synth();
 }

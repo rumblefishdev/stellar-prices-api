@@ -24,9 +24,9 @@ use crate::state::AppState;
      mean the stream is making progress.",
     responses(
         (status = 200, description = "Backfill progress", body = BackfillStatus),
-        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
-        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`", body = crate::common::errors::GatewayMessage),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`", body = crate::common::errors::GatewayMessage),
         (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]

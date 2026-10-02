@@ -2,6 +2,7 @@ pub mod budget;
 pub mod candidates;
 pub mod ch_enrich;
 pub mod enrich;
+pub mod external_rate;
 pub mod frontier;
 pub mod live_window;
 pub mod metrics;

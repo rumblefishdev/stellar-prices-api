@@ -1,5 +1,6 @@
 //! Single-pass Soroban extraction from the same `LedgerCloseMeta` the SDEX path
-//! already parses. Produces AMM OHLCV ticks (Phoenix/Soroswap/Aquarius) and
+//! already parses. Produces AMM OHLCV ticks (Phoenix/Soroswap/Aquarius/
+//! SushiSwap/Comet) and
 //! oracle price samples (REFLECTOR/REDSTONE) — no dependency on a pre-populated
 //! `soroban_events` table.
 //!
@@ -14,10 +15,10 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use stellar_xdr::{LedgerCloseMeta, TransactionMeta};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
-use ledger_processor::dispatch::dispatch;
+use ledger_processor::dispatch::{PairRegistries, dispatch};
 use phoenix_extractor::PhoenixPoolRegistry;
 use soroswap_extractor::SoroswapPoolRegistry;
 use xdr_parser::extract_events;
@@ -27,6 +28,7 @@ use xdr_parser::types::EventSource;
 // arm from `reflector_key_to_identity`, so this module must not resolve that
 // identity in non-test code. The tests import it directly to assert the drop.
 use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, canonicalise};
+use crate::price::{price_forming_i128, price_survives_column_scale};
 use crate::tick::TradeTick;
 use crate::writer::OracleSample;
 
@@ -38,14 +40,18 @@ const AMM_AMOUNT_SCALE: u32 = 7;
 ///
 /// Oracle assets are NOT kept here: they are resolved through the same
 /// `AssetRegistry` as trades (task 0061 §5) so a Reflector `USDC`/`XLM` row
-/// carries the identical canonical `asset_id` used as a candle's
-/// `quote_asset_id`. The previous synthetic `>= 1_000_000` oracle id space made
+/// carries the identical canonical identity, and so `asset_id`, as a candle's
+/// quote (task 0139: ClickHouse derives both). The previous synthetic `>= 1_000_000` oracle id space made
 /// the enrichment ASOF join (`o.asset_id = p.quote_asset_id`) match nothing for
 /// backfilled data.
 pub struct Registries {
     pub venue: VenueRegistry,
     pub phoenix: PhoenixPoolRegistry,
     pub soroswap: SoroswapPoolRegistry,
+    /// SushiSwap V3 pools (task 0290). Same type as `soroswap` — both are
+    /// pair-backed — but a SEPARATE instance, so a contract_id can never
+    /// resolve to the other venue's tokens.
+    pub sushiswap: SoroswapPoolRegistry,
 }
 
 impl Default for Registries {
@@ -54,6 +60,7 @@ impl Default for Registries {
             venue: VenueRegistry::new(),
             phoenix: PhoenixPoolRegistry::new(),
             soroswap: SoroswapPoolRegistry::new(),
+            sushiswap: SoroswapPoolRegistry::new(),
         }
     }
 }
@@ -64,7 +71,19 @@ impl Registries {
     }
 
     pub fn pool_count(&self) -> usize {
-        self.soroswap.pool_count() + self.phoenix.pool_count()
+        self.soroswap.pool_count() + self.phoenix.pool_count() + self.sushiswap.pool_count()
+    }
+
+    /// The two pair-backed registries, wired to their venues by name.
+    ///
+    /// `soroswap` and `sushiswap` are the same type, so this is the ONE place
+    /// the two can be crossed; every dispatch goes through it instead of
+    /// passing them as adjacent positional arguments (task 0290 review).
+    pub fn pair_registries(&self) -> PairRegistries<'_> {
+        PairRegistries {
+            soroswap: &self.soroswap,
+            sushiswap: &self.sushiswap,
+        }
     }
 }
 
@@ -141,10 +160,12 @@ pub struct UnresolvedPoolSwap {
 /// Output of processing one ledger's Soroban events.
 #[derive(Default)]
 pub struct LedgerSoroban {
-    /// (source, tick) pairs; source ∈ {phoenix, soroswap, aquarius}.
+    /// (source, tick) pairs; source ∈ {phoenix, soroswap, aquarius, sushiswap,
+    /// comet}.
     pub amm_ticks: Vec<(&'static str, TradeTick)>,
     pub oracle: Vec<OracleSample>,
-    /// Contracts that emitted a `swap` but were not in the venue registry.
+    /// Contracts that emitted a `swap` (or Comet's `POOL/swap`) but were not in
+    /// the venue registry.
     pub unresolved: Vec<UnresolvedPoolSwap>,
     /// `(source, swap_events_in_group)` for every group whose dispatch FAILED.
     ///
@@ -159,6 +180,21 @@ pub struct LedgerSoroban {
     /// recorded, so routine non-swap traffic (liquidity events, which dispatch
     /// also rejects) does not inflate it.
     pub dispatch_errors: Vec<(&'static str, u32)>,
+    /// `(source, trades)` for every contract the registry does not hold whose
+    /// events have the shape of a pool we index — trades the registry makes us
+    /// drop (task 0291). See [`unregistered_pool_venue`].
+    ///
+    /// Separate from `unresolved`, which counts any pool-level `swap` and is the
+    /// backfills' fatal guard: that set also holds routers and venues we do not
+    /// index at all, so it can never be expected to read zero on the live path.
+    /// This one can — a non-zero value means a pool we could price is missing
+    /// from `prices.pool_registry`.
+    pub unregistered_pool_events: Vec<(&'static str, u32)>,
+    /// The contracts behind `unregistered_pool_events`, one entry per contract
+    /// per transaction. The caller logs them: this decoder runs again for every
+    /// re-read ledger and in callers that never read the count, so it only
+    /// logs at debug level.
+    pub unregistered_pool_contracts: Vec<String>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -310,7 +346,15 @@ pub fn process_ledger(
             }
         }
 
-        classify_amm_groups(amm_groups, reg, assets, ledger_seq, closed_at, &mut out);
+        classify_amm_groups(
+            amm_groups,
+            tx_index as u16,
+            reg,
+            assets,
+            ledger_seq,
+            closed_at,
+            &mut out,
+        );
     }
 
     out
@@ -332,6 +376,14 @@ pub fn process_ledger(
 pub struct RawSorobanEvent {
     pub contract_id: String,
     pub transaction_id: String,
+    /// Position of this event's transaction in the ledger's apply order (task
+    /// 0286 D1). The live path takes it from `process_ledger`'s enumeration;
+    /// the events-backfill path reads BE's `soroban_events.application_order`
+    /// straight off the event row — there is no join and so no "not found"
+    /// state (task 0304). The column is `Int16`, and a NEGATIVE value is not a
+    /// position, so that one case falls back to 0, counted and warned: a run
+    /// reporting any of those has ordered those fills wrong.
+    pub transaction_index: u16,
     pub ledger_sequence: u32,
     pub event_index: u32,
     pub topics: Value,
@@ -354,8 +406,16 @@ pub struct RawSorobanEvent {
 /// path is unchanged. Appends AMM ticks and unresolved-pool records to `out`.
 ///
 /// `events` MUST all belong to `ledger_seq` and be pre-ordered by
-/// `(transaction_id, event_index)` — the run layer's `ORDER BY` guarantees this,
-/// so factory events register a pool before that pool's swaps within the window.
+/// `(transaction_index, transaction_id, event_index)` — the run layer's
+/// `ORDER BY` guarantees this (task 0286 put the transaction's apply order
+/// ahead of its id), so a transaction's events stay CONTIGUOUS and factory
+/// events register a pool before that pool's swaps within the window.
+///
+/// Second precondition, introduced with that ordering: every event of one
+/// transaction carries the SAME `transaction_index`. It holds because the
+/// producer reads the apply order per transaction, but if a mixed
+/// resolved/fallback pair ever reached one `transaction_id` the whole group
+/// would silently take the first row's value — so it is asserted in debug.
 pub fn process_soroban_event_rows(
     ledger_seq: u32,
     closed_at: i64,
@@ -398,7 +458,26 @@ pub fn process_soroban_event_rows(
                 .push(row);
         }
 
-        classify_amm_groups(amm_groups, reg, assets, ledger_seq, closed_at, out);
+        // Every event of a transaction carries the same apply order; the group
+        // is contiguous by construction, so the first row's value is the
+        // group's. Asserted rather than assumed: a mixed group would silently
+        // order half a transaction's fills wrong (task 0286 WR-09).
+        let transaction_index = events[tx_start].transaction_index;
+        debug_assert!(
+            events[tx_start..tx_end]
+                .iter()
+                .all(|e| e.transaction_index == transaction_index),
+            "events of transaction {tx_id} disagree on transaction_index"
+        );
+        classify_amm_groups(
+            amm_groups,
+            transaction_index,
+            reg,
+            assets,
+            ledger_seq,
+            closed_at,
+            out,
+        );
         tx_start = tx_end;
     }
 }
@@ -416,6 +495,7 @@ pub fn process_soroban_event_rows(
 /// unit-testable without a full XDR `LedgerCloseMeta` AMM fixture (none exist).
 fn classify_amm_groups(
     amm_groups: HashMap<String, Vec<SorobanEventRow>>,
+    transaction_index: u16,
     reg: &Registries,
     assets: &mut AssetRegistry,
     ledger_seq: u32,
@@ -433,15 +513,43 @@ fn classify_amm_groups(
         // pool `trade` — and must NOT be flagged as a gap, or it fatal-trips the
         // unresolved-pools guard. A genuine pool `swap` carries no address `Vec`
         // at topic[1] and is still counted here.
+        //
+        // Comet (task 0300): its swap's topic[0] is "POOL", not "swap", so it
+        // has its own arm — without it a Comet decode failure would be
+        // invisible. `is_pool_swap` is the predicate its extractor decodes by.
         let swaps: Vec<&SorobanEventRow> = rows
             .iter()
-            .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
+            .filter(|r| {
+                r.topics.first().and_then(|t| t.as_str()) == Some("swap")
+                    || comet_extractor::is_pool_swap(r)
+            })
             .filter(|r| !is_aquarius_router_swap(r))
             .collect();
 
         let venue = match reg.venue.get(&contract_id) {
             Some(v) => v.clone(),
             None => {
+                // Unknown contract that looks like a pool we index: its trades
+                // are dropped only because the registry lacks it (task 0291).
+                // Counted apart from `unresolved` — see
+                // `LedgerSoroban::unregistered_pool_events`.
+                let mut by_venue: Vec<(&'static str, u32)> = Vec::new();
+                for venue in rows.iter().filter_map(unregistered_pool_venue) {
+                    let source = venue.as_source();
+                    match by_venue.iter_mut().find(|(s, _)| *s == source) {
+                        Some((_, n)) => *n += 1,
+                        None => by_venue.push((source, 1)),
+                    }
+                }
+                if !by_venue.is_empty() {
+                    debug!(
+                        contract_id,
+                        ?by_venue,
+                        "pool events from a contract missing from pool_registry"
+                    );
+                    out.unregistered_pool_events.extend(by_venue);
+                    out.unregistered_pool_contracts.push(contract_id.clone());
+                }
                 // Unknown contract. Most are not AMM pools and are correctly
                 // ignored — but if this one emitted a pool-level `swap`, its
                 // volume is being dropped. Record it for the post-run re-check
@@ -454,10 +562,11 @@ fn classify_amm_groups(
         };
 
         let source = venue.as_source();
-        match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
+        match dispatch(&rows, &reg.venue, &reg.phoenix, reg.pair_registries()) {
             Ok(trades) => {
                 for t in trades {
-                    if let Some(tick) = amm_trade_to_tick(&t, closed_at, assets) {
+                    if let Some(tick) = amm_trade_to_tick(&t, transaction_index, closed_at, assets)
+                    {
                         out.amm_ticks.push((source, tick));
                     }
                 }
@@ -490,10 +599,16 @@ fn classify_amm_groups(
         // deliberately not recorded here. Inferring the gap from "no tick" would
         // flood `unresolved_pools` with false positives on healthy pools and
         // grow the run's in-memory `unresolved` unboundedly.
-        if matches!(venue, Venue::Soroswap) && !reg.soroswap.contains(&contract_id) {
-            if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
-                out.unresolved.push(rec);
-            }
+        let pair_unresolved = match venue {
+            Venue::Soroswap => !reg.soroswap.contains(&contract_id),
+            // SushiSwap is pair-backed too (task 0290), so the same miss is
+            // possible and must be just as loud.
+            Venue::Sushiswap => !reg.sushiswap.contains(&contract_id),
+            Venue::Aquarius | Venue::Phoenix | Venue::Comet => false,
+        };
+        if pair_unresolved && let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq)
+        {
+            out.unresolved.push(rec);
         }
     }
 }
@@ -514,6 +629,69 @@ fn unresolved_from_swaps(
         swap_count: swaps.len() as u32,
         sample_topics: format!("{:?}", first.topics),
     })
+}
+
+/// The venue whose POOL emits an event of this shape — one match per trade — or
+/// `None`. Used only for contracts absent from the registry, to count the
+/// trades a registry gap drops (task 0291). Mirrors what each extractor reads:
+///
+/// - Aquarius pool `trade`: `[Symbol("trade"), Address(sold), Address(bought), …]`
+///   (all three pool kinds, `concentrated` included — task 0291 checked a
+///   concentrated pool's `trade` against `AquariusPoolExtractor`);
+/// - Soroswap pair `swap`: `[String("SoroswapPair"), Symbol("swap")]`;
+/// - Phoenix XYK swap: a group of `[String("swap"), String(<field>)]` rows, of
+///   which exactly one carries `sell_token`, so that row stands for the swap.
+///
+/// - SushiSwap V3 pool `swap`: `[Symbol("swap")]` **with `amount0`/`amount1` in
+///   the data** (task 0290).
+///
+/// - Comet pool swap: `[Symbol("POOL"), Symbol("swap")]` (task 0300). Its
+///   other `POOL/*` topics (`deposit`, `join_pool`, `exit_pool`, `withdraw`)
+///   are liquidity and never counted; the newer Comet wasm's
+///   `[swap_event, POOL, swap]` is out of scope and not counted either.
+///
+/// The router `swap` summaries match none of these, so on a complete registry
+/// this counts nothing.
+///
+/// ⚠️ The SushiSwap arm CANNOT key on the topic alone: its two routers
+/// (`CDMIM23W…`, `CAUF4DFY…`) emit the identical `[Symbol("swap")]` topic and
+/// differ only in the data — `{ amount_in, amount_out }` against the pool's
+/// `{ amount0, amount1, liquidity, sqrt_price_x96, tick }`. Matching the topic
+/// alone would count every router swap as a missing pool, which is the
+/// double-counting shape task 0285 warned about.
+fn unregistered_pool_venue(row: &SorobanEventRow) -> Option<Venue> {
+    let t0 = row.topics.first().and_then(|t| t.as_str())?;
+    let is_address = |i: usize| row.topics.get(i).and_then(|t| t.as_address()).is_some();
+    match t0 {
+        "trade" if is_address(1) && is_address(2) => Some(Venue::Aquarius),
+        "SoroswapPair" if topic_str(row, 1) == Some("swap") => Some(Venue::Soroswap),
+        "swap" if topic_str(row, 1) == Some("sell_token") => Some(Venue::Phoenix),
+        // Ordered after Phoenix's `swap`: both start at the same topic, and
+        // Phoenix's is decided by topic[1] before the data is consulted.
+        "swap" if has_data_key(row, "amount0") && has_data_key(row, "amount1") => {
+            Some(Venue::Sushiswap)
+        }
+        "POOL" if comet_extractor::is_pool_swap(row) => Some(Venue::Comet),
+        _ => None,
+    }
+}
+
+/// Whether the event's data map carries `key`. Used to tell a CLMM pool `swap`
+/// from a router `swap` that shares its topic shape.
+fn has_data_key(row: &SorobanEventRow, key: &str) -> bool {
+    match &row.data {
+        TaggedValue::Map(m) => m.iter().any(|(k, _)| k.as_str() == Some(key)),
+        _ => false,
+    }
+}
+
+/// The Symbol/String value of topic `i`. `TaggedValue::as_str` also answers for
+/// an Address, which must not pass for an action or field name.
+fn topic_str(row: &SorobanEventRow, i: usize) -> Option<&str> {
+    match row.topics.get(i)? {
+        TaggedValue::Symbol(s) | TaggedValue::String(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// Recognise the Aquarius-router `swap` *summary* event by its topic shape.
@@ -538,6 +716,17 @@ fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
         .unwrap_or_default()
 }
 
+/// Grow `reg` from one factory event, without pricing anything — the discovery
+/// half of [`process_soroban_event_rows`] on its own (task 0291). `topics` /
+/// `data` are the same typed-JSON SCVal trees [`RawSorobanEvent`] carries. A
+/// non-factory event is ignored, so a caller may feed any event through it.
+///
+/// This is how `events-backfill --discover-pools` fills `prices.pool_registry`
+/// with the exact classification the live processor would have learned.
+pub fn learn_factory_event(topics: &Value, data: &Value, reg: &mut Registries) {
+    learn_factory(topics, data, reg);
+}
+
 /// Recognise factory events and register the created pool. Detected by event
 /// signature (only factories emit these), independent of emitter address.
 ///
@@ -559,11 +748,11 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
 
     // Phoenix factory: [Symbol("create"), Symbol("liquidity_pool")], data Address(pool)
     if sig0 == Some("create") {
-        if sig1 == Some("liquidity_pool") {
-            if let Some(pool) = address_value(data) {
-                reg.venue.insert(pool.clone(), Venue::Phoenix);
-                reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
-            }
+        if sig1 == Some("liquidity_pool")
+            && let Some(pool) = address_value(data)
+        {
+            reg.venue.insert(pool.clone(), Venue::Phoenix);
+            reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
         }
         return;
     }
@@ -582,6 +771,31 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
                 reg.soroswap.register(pair.clone(), t0, t1);
                 reg.venue.insert(pair, Venue::Soroswap);
             }
+        }
+        return;
+    }
+
+    // SushiSwap V3 factory: [Symbol("pool_created")], data
+    // { fee, pool_address, sender, tick_spacing, token0, token1 } (task 0290).
+    //
+    // Matched by SHAPE, like every arm here — no factory address is hardcoded —
+    // which is what makes all four deployed factory generations (three on wasm
+    // FC9B0DF0, the live one on 9F94C577) register through this one arm. All
+    // three addresses are required, so a differently-shaped `pool_created` from
+    // some other protocol cannot register a pool with empty tokens.
+    if sig0 == Some("pool_created")
+        && let TaggedValue::Map(m) = json_to_tagged(data)
+    {
+        let get = |k: &str| {
+            m.iter()
+                .find(|(key, _)| key.as_str() == Some(k))
+                .and_then(|(_, v)| v.as_address().map(String::from))
+        };
+        if let (Some(pool), Some(t0), Some(t1)) =
+            (get("pool_address"), get("token0"), get("token1"))
+        {
+            reg.sushiswap.register(pool.clone(), t0, t1);
+            reg.venue.insert(pool, Venue::Sushiswap);
         }
     }
 }
@@ -614,6 +828,7 @@ fn resolve_amm_token(contract_addr: &str, assets: &AssetRegistry) -> AssetIdenti
 /// Convert a venue `TradeRow` into a `TradeTick` for the candle accumulator.
 fn amm_trade_to_tick(
     trade: &extractors_core::TradeRow,
+    transaction_index: u16,
     closed_at: i64,
     assets: &mut AssetRegistry,
 ) -> Option<TradeTick> {
@@ -622,7 +837,24 @@ fn amm_trade_to_tick(
     // its contract-address identity.
     let sold = resolve_amm_token(&trade.token_in, assets);
     let bought = resolve_amm_token(&trade.token_out, assets);
+
+    // Task 0300 D1: a swap of a token for itself carries no price, on ANY
+    // venue. Compared on the RESOLVED identities (`AssetIdentity: Eq`, and a
+    // SAC address is deterministic per asset, so a SAC and its classic form
+    // compare equal). It sits BEFORE `canonicalise`, which interns both
+    // identities into the registry that is persisted to `prices.assets`. It is
+    // not a dispatch error: a `None` tick is consumed in dispatch's `Ok` arm.
+    if sold == bought {
+        return None;
+    }
+
     let pair = canonicalise(&sold, &bought, assets);
+
+    // Classified on the RAW i128 amounts, in each token's own decimals, BEFORE
+    // the scaling below (task 0286, ADR 0287 §1): `AMM_AMOUNT_SCALE` turns them
+    // into a Decimal, and after that the integer unit the rounding bound reasons
+    // about is gone — every fill would look equally precise.
+    let bound_holds = price_forming_i128(trade.amount_in, trade.amount_out);
 
     let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, AMM_AMOUNT_SCALE).ok()?;
     let amount_out = Decimal::try_from_i128_with_scale(trade.amount_out, AMM_AMOUNT_SCALE).ok()?;
@@ -636,16 +868,25 @@ fn amm_trade_to_tick(
         (amount_out / amount_in, amount_in, amount_out)
     };
 
+    // The bound clears a fill whose two legs are both enormous and says nothing
+    // about where their quotient lands. A quotient under the candle's
+    // `Decimal(38, 14)` resolution stores as 0, and a fill that cannot print a
+    // price does not form one (task 0286, VERIFY-0286-local discrepancy 4) —
+    // the same rule the classic path applies in `tick.rs`.
+    let price_forming = bound_holds && price_survives_column_scale(price);
+
     Some(TradeTick {
         ledger_sequence: trade.ledger_sequence as u32,
         closed_at,
+        transaction_index,
         operation_index: (trade.first_event_index & 0xFFFF) as u16,
         claim_index: 0,
-        base_id: pair.base_id,
-        quote_id: pair.quote_id,
+        base: pair.base,
+        quote: pair.quote,
         price,
         volume_base,
         volume_quote,
+        price_forming,
     })
 }
 
@@ -676,38 +917,32 @@ fn decode_reflector(
         return;
     };
     for entry in entries {
-        if let TaggedValue::Vec(kv) = entry {
-            if kv.len() >= 2 {
-                let key = kv[0].as_str().map(String::from);
-                let price = kv[1].as_i128();
-                if let (Some(key), Some(price)) = (key, price) {
-                    // Resolve to the canonical asset_id (task 0061 §5). Only the
-                    // USD-pegged stables + XLM resolve; every other symbol is
-                    // dropped — either it has no Stellar identity (EUR, BTC, …) or
-                    // it's a tradeable asset we deliberately don't price through
-                    // (EURC). See `reflector_key_to_identity` for the distinction.
-                    let Some(identity) = reflector_key_to_identity(&key) else {
-                        continue;
-                    };
-                    let asset_id = assets.get_or_assign(&identity);
-                    out.oracle.push(OracleSample {
-                        timestamp,
-                        asset_id,
-                        oracle_name: "reflector".to_string(),
-                        price_usd: price, // already 1e14-scaled
-                        raw_data: format!("{{\"asset\":\"{key}\"}}"),
-                    });
-                }
+        if let TaggedValue::Vec(kv) = entry
+            && kv.len() >= 2
+        {
+            let key = kv[0].as_str().map(String::from);
+            let price = kv[1].as_i128();
+            if let (Some(key), Some(price)) = (key, price) {
+                // Resolve to the canonical identity (task 0061 §5). Only the
+                // USD-pegged stables + XLM resolve; every other symbol is
+                // dropped — either it has no Stellar identity (EUR, BTC, …) or
+                // it's a tradeable asset we deliberately don't price through
+                // (EURC). See `reflector_key_to_identity` for the distinction.
+                let Some(identity) = reflector_key_to_identity(&key) else {
+                    continue;
+                };
+                assets.intern(&identity);
+                out.oracle.push(OracleSample {
+                    timestamp,
+                    identity: Some(identity),
+                    oracle_name: "reflector".to_string(),
+                    price_usd: price, // already 1e14-scaled
+                    raw_data: format!("{{\"asset\":\"{key}\"}}"),
+                });
             }
         }
     }
 }
-
-/// Reserved `asset_id` for an oracle feed that is not a tradeable asset (e.g. the
-/// REDSTONE emitter contract). Never assigned by the [`AssetRegistry`] (its ids
-/// start at 1), so it maps to no `prices.assets` row — the feed stays out of the
-/// asset read surface while its `oracle_prices` row is still recorded.
-const ORACLE_FEED_NO_ASSET_ID: u32 = 0;
 
 /// REDSTONE carries a base64 XDR `bytes` payload (updated_feeds map). Full XDR
 /// decode is deferred; we capture one row per event with the raw payload so the
@@ -719,8 +954,9 @@ const ORACLE_FEED_NO_ASSET_ID: u32 = 0;
 /// it to `prices.assets` and leak it into the contract-keyed read surface
 /// (`identity_by_contract`, `current_price_usd`), where a consumer resolving a
 /// pool-leg contract address could match an oracle feed as if it were a token.
-/// Instead the row carries the reserved [`ORACLE_FEED_NO_ASSET_ID`] sentinel — its
-/// `asset_id` is functionally dead anyway (price_usd = 0, oracle_name =
+/// Instead the row carries no identity, which `oracle_prices` stores under the
+/// sentinel id 0 (task 0139) — no asset's id, so it maps to no `prices.assets`
+/// row. That id is functionally dead anyway (price_usd = 0, oracle_name =
 /// 'redstone'; never read by the `reflector` ASOF join), and the raw payload is
 /// preserved for the byte-footprint measurement.
 fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSoroban) {
@@ -731,13 +967,19 @@ fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSorob
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    out.oracle.push(OracleSample {
-        timestamp: ev.created_at.max(0) as u32,
-        asset_id: ORACLE_FEED_NO_ASSET_ID,
+    out.oracle
+        .push(redstone_sample(ev.created_at.max(0) as u32, raw));
+}
+
+/// The REDSTONE row: no identity, no price, the raw payload.
+fn redstone_sample(timestamp: u32, raw_data: String) -> OracleSample {
+    OracleSample {
+        timestamp,
+        identity: None,
         oracle_name: "redstone".to_string(),
         price_usd: 0,
-        raw_data: raw,
-    });
+        raw_data,
+    }
 }
 
 #[cfg(test)]
@@ -780,6 +1022,67 @@ mod tests {
         ]);
         assert_eq!(signature(&topics), Some("SoroswapFactory"));
         assert_eq!(topic_symbol(&topics, 1), Some("new_pair"));
+    }
+
+    /// Task 0290. The SushiSwap V3 factory's `pool_created` carries the token
+    /// pair in the EVENT, so a pool is learned exactly like a Soroswap
+    /// `new_pair` — no contract-storage read.
+    ///
+    /// Payload is a real production event from the live factory
+    /// `CD3KRKGD…GLYF` at ledger 64,116,662. Because `learn_factory` matches on
+    /// SHAPE and never on a factory address, this one arm also covers the three
+    /// earlier factory generations (wasm `FC9B0DF0`) whose pools still trade.
+    #[test]
+    fn sushiswap_factory_pool_created_learns_the_pair() {
+        let topics = json!([{"type":"sym","value":"pool_created"}]);
+        let data = json!({"type":"map","value":[
+            {"key":{"type":"sym","value":"fee"},"value":{"type":"u32","value":500}},
+            {"key":{"type":"sym","value":"pool_address"},
+             "value":{"type":"address","value":"CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U"}},
+            {"key":{"type":"sym","value":"sender"},
+             "value":{"type":"address","value":"CD3KRKGDRVWPXVB3VXLUMQKMX6XZ6Q2H334IVZD4XXNAMKSRVQL5GLYF"}},
+            {"key":{"type":"sym","value":"tick_spacing"},"value":{"type":"i32","value":10}},
+            {"key":{"type":"sym","value":"token0"},
+             "value":{"type":"address","value":"CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"}},
+            {"key":{"type":"sym","value":"token1"},
+             "value":{"type":"address","value":"CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}
+        ]});
+
+        let mut reg = Registries::new();
+        learn_factory(&topics, &data, &mut reg);
+
+        let pool = "CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U";
+        assert_eq!(reg.venue.get(pool), Some(&Venue::Sushiswap));
+        let pair = reg.sushiswap.lookup(pool).expect("pair registered");
+        assert_eq!(
+            pair.token0,
+            "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"
+        );
+        assert_eq!(
+            pair.token1,
+            "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+        );
+        // It must not leak into the Soroswap registry — separate instances.
+        assert!(!reg.soroswap.contains(pool));
+    }
+
+    /// A `pool_created` missing an address registers nothing, rather than a
+    /// pool with empty tokens that would later price against asset "".
+    #[test]
+    fn sushiswap_pool_created_without_tokens_registers_nothing() {
+        let topics = json!([{"type":"sym","value":"pool_created"}]);
+        let data = json!({"type":"map","value":[
+            {"key":{"type":"sym","value":"pool_address"},
+             "value":{"type":"address","value":"CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U"}},
+            {"key":{"type":"sym","value":"token0"},
+             "value":{"type":"address","value":"CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"}}
+        ]});
+
+        let mut reg = Registries::new();
+        learn_factory(&topics, &data, &mut reg);
+
+        assert_eq!(reg.pool_count(), 0);
+        assert!(reg.venue.is_empty());
     }
 
     #[test]
@@ -859,36 +1162,37 @@ mod tests {
     }
 
     #[test]
-    fn reflector_usdc_matches_trade_quote_id() {
+    fn reflector_usdc_matches_trade_quote_identity() {
         // The load-bearing guarantee (task 0061 §5): a Reflector USDC oracle row
-        // and a candle whose quote is USDC must land on the SAME asset_id, so the
-        // enrichment ASOF join `o.asset_id = p.quote_asset_id` matches.
-        let mut assets = AssetRegistry::from_existing(vec![]);
+        // and a candle whose quote is USDC carry the SAME identity, so ClickHouse
+        // gives them the same asset_id (task 0139) and the enrichment ASOF join
+        // `o.asset_id = p.quote_asset_id` matches.
         let usdc = AssetIdentity::Credit {
             code: "USDC".to_string(),
             issuer: USDC_ISSUER.to_string(),
         };
-        // Trade path interns USDC as a quote.
-        let trade_quote_id = assets.get_or_assign(&usdc);
-        // Oracle path resolves the Reflector "USDC" symbol.
-        let oracle_id = assets.get_or_assign(&reflector_key_to_identity("USDC").unwrap());
-        assert_eq!(trade_quote_id, oracle_id);
+        assert_eq!(reflector_key_to_identity("USDC"), Some(usdc.clone()));
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        // Trade path interns USDC as a quote; the oracle path finds it known.
+        assert!(assets.intern(&usdc));
+        assert!(!assets.intern(&reflector_key_to_identity("USDC").unwrap()));
+        assert_eq!(assets.assets().count(), 1);
     }
 
     #[test]
-    fn oracle_feed_sentinel_never_collides_with_a_real_asset_id() {
-        // The REDSTONE sentinel (task 0061 review #2) must be disjoint from every
-        // id the registry assigns, so an oracle-feed `oracle_prices` row maps to
-        // NO `prices.assets` row and cannot leak into the contract read surface
-        // (`identity_by_contract` / `current_price_usd`). Registry ids start at 1,
-        // leaving 0 reserved.
-        let mut reg = AssetRegistry::from_existing(vec![]);
-        let native = reg.get_or_assign(&AssetIdentity::Native);
-        assert_ne!(native, ORACLE_FEED_NO_ASSET_ID);
-        assert!(native >= 1, "registry ids must start at 1");
-        // A Contract identity — what REDSTONE used to intern — also never hits 0.
-        let contract = reg.get_or_assign(&AssetIdentity::Contract("CORACLEFEED".to_string()));
-        assert_ne!(contract, ORACLE_FEED_NO_ASSET_ID);
+    fn a_redstone_sample_names_no_asset() {
+        // An oracle feed is not an asset (task 0061 review #2): its row must map
+        // to NO `prices.assets` row, so it cannot leak into the contract read
+        // surface (`identity_by_contract` / `current_price_usd`). It carries no
+        // identity, which `oracle_prices` stores under the sentinel id 0, never
+        // an asset's id (task 0139). `decode_redstone` takes no registry, so it
+        // cannot intern the emitting contract either.
+        let sample = redstone_sample(1_700_000_000, "AAAA".to_string());
+        assert_eq!(sample.identity, None);
+        assert_eq!(
+            (sample.oracle_name.as_str(), sample.price_usd),
+            ("redstone", 0)
+        );
     }
 
     #[test]
@@ -918,7 +1222,7 @@ mod tests {
         let empty = Registries::new();
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(group(), &empty, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(group(), 0, &empty, &mut assets, SEQ, CLOSED_AT, &mut out);
         assert!(out.amm_ticks.is_empty(), "unseeded pool must not price");
         assert_eq!(
             out.unresolved.len(),
@@ -937,7 +1241,7 @@ mod tests {
             .register_with_wasm(XLM_USDC_POOL.to_string(), 0, common_xyk_wasm_hash());
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(group(), &seeded, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(group(), 0, &seeded, &mut assets, SEQ, CLOSED_AT, &mut out);
         assert!(
             out.unresolved.is_empty(),
             "seeded pool must not fall to unresolved"
@@ -947,6 +1251,280 @@ mod tests {
             out.amm_ticks[0].0, "phoenix",
             "tick tagged with the phoenix source"
         );
+    }
+
+    fn event(contract: &str, topics: Vec<TaggedValue>, index: u32) -> SorobanEventRow {
+        SorobanEventRow {
+            contract_id: contract.to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: 64_000_000,
+            event_index: index,
+            topics,
+            data: TaggedValue::Vec(vec![]),
+        }
+    }
+
+    fn addr(s: &str) -> TaggedValue {
+        TaggedValue::Address(s.to_string())
+    }
+
+    #[test]
+    fn unregistered_pool_events_are_counted_per_venue_one_per_trade() {
+        // Task 0291: pool-shaped events from contracts the registry does not
+        // hold. Each venue's shape is counted once per TRADE — a Phoenix swap is
+        // a group of field rows, of which only `sell_token` counts.
+        use phoenix_extractor::test_fixtures::{XLM_USDC_POOL, make_phoenix_xyk_events};
+
+        const AQUA: &str = "CDQ4OYM3RPLEWNZFVAJQGEYLSDMPHEZYMHVOQBKI767UWV5XV5ISAJE2";
+        const PAIR: &str = "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD";
+        let trade = |i| {
+            event(
+                AQUA,
+                vec![
+                    TaggedValue::Symbol("trade".into()),
+                    addr("CTOKENA"),
+                    addr("CTOKENB"),
+                    addr("GTRADER"),
+                ],
+                i,
+            )
+        };
+        let pair_swap = event(
+            PAIR,
+            vec![
+                TaggedValue::String("SoroswapPair".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+
+        // Task 0300: a Comet pool swap, beside a liquidity event of the same
+        // pool that must not count.
+        const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+        let comet_swap = event(
+            COMET,
+            vec![
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+        let comet_deposit = event(
+            COMET,
+            vec![
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("deposit".into()),
+            ],
+            1,
+        );
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(AQUA.to_string(), vec![trade(0), trade(1)]);
+        groups.insert(PAIR.to_string(), vec![pair_swap]);
+        groups.insert(COMET.to_string(), vec![comet_swap, comet_deposit]);
+        groups.insert(
+            XLM_USDC_POOL.to_string(),
+            make_phoenix_xyk_events(XLM_USDC_POOL, 0),
+        );
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, 0, &Registries::new(), &mut assets, 1, 1, &mut out);
+
+        let mut counted = out.unregistered_pool_events.clone();
+        counted.sort();
+        assert_eq!(
+            counted,
+            vec![
+                ("aquarius", 2),
+                ("comet", 1),
+                ("phoenix", 1),
+                ("soroswap", 1)
+            ]
+        );
+        let mut contracts = out.unregistered_pool_contracts.clone();
+        contracts.sort();
+        let mut expected = vec![AQUA, COMET, PAIR, XLM_USDC_POOL];
+        expected.sort();
+        assert_eq!(contracts, expected);
+        assert!(out.amm_ticks.is_empty());
+    }
+
+    #[test]
+    fn routers_and_unindexed_venues_are_not_counted_as_unregistered_pools() {
+        // Shapes that are NOT a pool we index. Counting them would keep the
+        // task-0291 alarm permanently red.
+        let aquarius_router = event(
+            "CROUTER",
+            vec![
+                TaggedValue::Symbol("swap".into()),
+                TaggedValue::Vec(vec![addr("CTOKENA"), addr("CTOKENB")]),
+                addr("GTRADER"),
+            ],
+            0,
+        );
+        let soroswap_router = event(
+            "CSOROSWAPROUTER",
+            vec![
+                TaggedValue::String("SoroswapRouter".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+        // ⚠️ A SushiSwap V3 ROUTER (task 0290): the SAME bare `swap` topic its
+        // pools use, told apart only by the data — routers carry
+        // `amount_in`/`amount_out`, pools carry `amount0`/`amount1`. Counting
+        // this would double-count every routed swap alongside the pool swap it
+        // wraps, which is the hazard task 0285 flagged.
+        let sushiswap_router = SorobanEventRow {
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_in".into()),
+                    TaggedValue::I128(2_539_492_571),
+                ),
+                (
+                    TaggedValue::Symbol("amount_out".into()),
+                    TaggedValue::I128(13_410_007_617),
+                ),
+            ]),
+            ..event(
+                "CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E",
+                vec![TaggedValue::Symbol("swap".into())],
+                0,
+            )
+        };
+        // A bare `swap` carrying no amounts at all resolves to nothing either.
+        let clmm = event("CCLMM", vec![TaggedValue::Symbol("swap".into())], 0);
+        // A `trade` whose topics are not token addresses.
+        let other_trade = event(
+            "COTHER",
+            vec![
+                TaggedValue::Symbol("trade".into()),
+                TaggedValue::Symbol("buy".into()),
+            ],
+            0,
+        );
+        // A Phoenix-looking row that names an address, not a field.
+        let odd_swap = event(
+            "CODD",
+            vec![TaggedValue::String("swap".into()), addr("CSELL_TOKEN")],
+            0,
+        );
+
+        // Task 0300: a Comet pool's liquidity event, and the newer Comet
+        // wasm's three-symbol swap (out of scope — it must not alarm).
+        let comet_deposit = event(
+            "CCOMET",
+            vec![
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("deposit".into()),
+            ],
+            0,
+        );
+        let newer_comet_swap = event(
+            "CCOMETNEW",
+            vec![
+                TaggedValue::Symbol("swap_event".into()),
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+
+        for row in [
+            aquarius_router,
+            soroswap_router,
+            sushiswap_router,
+            clmm,
+            other_trade,
+            odd_swap,
+            comet_deposit,
+            newer_comet_swap,
+        ] {
+            assert_eq!(unregistered_pool_venue(&row), None, "{:?}", row.topics);
+        }
+    }
+
+    /// The counterpart of the row above: the SushiSwap V3 POOL shape, which
+    /// shares the router's `[Symbol("swap")]` topic and is distinguished only
+    /// by `amount0`/`amount1`, must be counted (task 0290).
+    ///
+    /// Payload is a real production event — pool
+    /// `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` (XLM/USDC) at
+    /// ledger 64,488,316.
+    #[test]
+    fn a_sushiswap_pool_swap_is_counted_but_its_router_twin_is_not() {
+        let pool_swap = SorobanEventRow {
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount0".into()),
+                    TaggedValue::I128(-10_002_738_052),
+                ),
+                (
+                    TaggedValue::Symbol("amount1".into()),
+                    TaggedValue::I128(1_886_660_000),
+                ),
+                (
+                    TaggedValue::Symbol("liquidity".into()),
+                    TaggedValue::I128(22_083_689_118_901),
+                ),
+            ]),
+            ..event(
+                "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ",
+                vec![TaggedValue::Symbol("swap".into())],
+                0,
+            )
+        };
+        assert_eq!(
+            unregistered_pool_venue(&pool_swap),
+            Some(Venue::Sushiswap),
+            "a pool swap carrying amount0/amount1 must be counted"
+        );
+
+        // Same topic, router data — must stay uncounted.
+        let router_swap = SorobanEventRow {
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_in".into()),
+                    TaggedValue::I128(2_539_492_571),
+                ),
+                (
+                    TaggedValue::Symbol("amount_out".into()),
+                    TaggedValue::I128(13_410_007_617),
+                ),
+            ]),
+            ..event(
+                "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL",
+                vec![TaggedValue::Symbol("swap".into())],
+                0,
+            )
+        };
+        assert_eq!(
+            unregistered_pool_venue(&router_swap),
+            None,
+            "the router shares the topic and must NOT be counted"
+        );
+    }
+
+    #[test]
+    fn a_registered_pool_is_not_counted_as_unregistered() {
+        use phoenix_extractor::test_fixtures::{
+            XLM_USDC_POOL, common_xyk_wasm_hash, make_phoenix_xyk_events,
+        };
+        let mut reg = Registries::new();
+        reg.venue.insert(XLM_USDC_POOL.to_string(), Venue::Phoenix);
+        reg.phoenix
+            .register_with_wasm(XLM_USDC_POOL.to_string(), 0, common_xyk_wasm_hash());
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(
+            XLM_USDC_POOL.to_string(),
+            make_phoenix_xyk_events(XLM_USDC_POOL, 0),
+        );
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, 0, &reg, &mut assets, 1, 1, &mut out);
+        assert!(out.unregistered_pool_events.is_empty());
+        assert_eq!(out.amm_ticks.len(), 1);
     }
 
     #[test]
@@ -984,7 +1562,7 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         assert!(
             out.amm_ticks.is_empty(),
@@ -1051,7 +1629,7 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         assert_eq!(
             out.amm_ticks.len(),
@@ -1118,7 +1696,7 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         assert!(
             out.amm_ticks.is_empty(),
@@ -1181,7 +1759,7 @@ mod tests {
         let reg = Registries::new(); // neither contract registered
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         // Router swap must NOT double-count and must NOT be flagged.
         assert!(out.amm_ticks.is_empty(), "router swap must not price");
@@ -1225,6 +1803,7 @@ mod tests {
         let swap = RawSorobanEvent {
             contract_id: POOL.to_string(),
             transaction_id: "tx".to_string(),
+            transaction_index: 0,
             ledger_sequence: SEQ,
             event_index: 5,
             topics: json!([
@@ -1258,6 +1837,110 @@ mod tests {
         assert!(out.unresolved.is_empty(), "a priced pool is not unresolved");
     }
 
+    /// Task 0290, acceptance criterion "its routers stay unindexed". A routed
+    /// SushiSwap trade emits TWO `[Symbol("swap")]` events in one transaction:
+    /// the pool's, and the router's summary of the same trade. Only the pool's
+    /// may become a tick, or every routed trade is counted twice.
+    ///
+    /// Real production transaction, ledger 64,481,111: pool `CCR2CH4G…H2MQ`
+    /// (XLM/USDC) at event 4, router `CDMIM23W…ZCHL` at event 5 carrying the
+    /// same amounts as `amount_in`/`amount_out`.
+    #[test]
+    fn a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router() {
+        const SEQ: u32 = 64_481_111;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+        const ROUTER: &str = "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL";
+        const XLM: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const USDC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+
+        let event = |contract_id: &str, event_index: u32, data: Value| RawSorobanEvent {
+            contract_id: contract_id.to_string(),
+            transaction_id: "4737599797939127393".to_string(),
+            transaction_index: 0,
+            ledger_sequence: SEQ,
+            event_index,
+            topics: json!([{"type":"sym","value":"swap"}]),
+            data,
+        };
+        let pool_swap = event(
+            POOL,
+            4,
+            json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount0"},"value":{"type":"i128","value":"10951822930"}},
+                {"key":{"type":"sym","value":"amount1"},"value":{"type":"i128","value":"-2000561352"}},
+                {"key":{"type":"sym","value":"liquidity"},"value":{"type":"u128","value":"22083689118901"}},
+                {"key":{"type":"sym","value":"recipient"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}},
+                {"key":{"type":"sym","value":"sender"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}},
+                {"key":{"type":"sym","value":"sqrt_price_x96"},"value":{"type":"u256","value":"00000000000000000000000000000000000000006d911cd1319d4706470e4080"}},
+                {"key":{"type":"sym","value":"tick"},"value":{"type":"i32","value":-16974}}
+            ]}),
+        );
+        let router_swap = event(
+            ROUTER,
+            5,
+            json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount_in"},"value":{"type":"i128","value":"10951822930"}},
+                {"key":{"type":"sym","value":"amount_out"},"value":{"type":"i128","value":"2000561352"}},
+                {"key":{"type":"sym","value":"recipient"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}}
+            ]}),
+        );
+
+        let registry = || {
+            let mut reg = Registries::new();
+            reg.venue.insert(POOL.to_string(), Venue::Sushiswap);
+            reg.sushiswap
+                .register(POOL.to_string(), XLM.to_string(), USDC.to_string());
+            reg
+        };
+
+        // As in production: the pool is registered, the router is not.
+        let mut reg = registry();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[pool_swap.clone(), router_swap.clone()],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(out.amm_ticks.len(), 1, "one routed trade, one tick");
+        assert_eq!(out.amm_ticks[0].0, "sushiswap");
+        assert!(
+            !reg.venue.contains_key(ROUTER),
+            "nothing in a routed trade may register the router"
+        );
+        assert_eq!(
+            out.unregistered_pool_events,
+            Vec::<(&str, u32)>::new(),
+            "the router's swap is not a missing pool"
+        );
+
+        // Second line of defence: even a router wrongly registered as a
+        // SushiSwap pool prices nothing, because its summary has no
+        // amount0/amount1 to decode.
+        let mut reg = registry();
+        reg.venue.insert(ROUTER.to_string(), Venue::Sushiswap);
+        reg.sushiswap
+            .register(ROUTER.to_string(), XLM.to_string(), USDC.to_string());
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[pool_swap, router_swap],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(
+            out.amm_ticks.len(),
+            1,
+            "a registered router must still add no tick"
+        );
+    }
+
     #[test]
     fn seam_learns_factory_and_skips_oracle_across_transactions() {
         // The seam's own responsibilities beyond classify: (1) group by
@@ -1275,6 +1958,7 @@ mod tests {
         let oracle = RawSorobanEvent {
             contract_id: "CBKGPWGKSKZF52CFHMTRR23TBWTPMRDIYZ4O2P5VS65BMHYH4DXMCJZC".to_string(),
             transaction_id: "tx-oracle".to_string(),
+            transaction_index: 0,
             ledger_sequence: SEQ,
             event_index: 0,
             topics: json!([
@@ -1286,6 +1970,7 @@ mod tests {
         let factory = RawSorobanEvent {
             contract_id: "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK".to_string(),
             transaction_id: "tx-factory".to_string(),
+            transaction_index: 0,
             ledger_sequence: SEQ,
             event_index: 1,
             topics: json!([
@@ -1324,4 +2009,296 @@ mod tests {
             "an oracle + factory batch produces no AMM tick and no unresolved gap"
         );
     }
+
+    /// Task 0286, VERIFY-0286-local discrepancy 4 — an AMM swap of two huge
+    /// legs clears the rounding bound and can still quote a price under the
+    /// candle's `Decimal(38, 14)` resolution, which stores as 0. The AMM path
+    /// applies the same rule as the classic one: no printable price, no price
+    /// forming — and the volumes are kept, because the swap happened.
+    #[test]
+    fn an_amm_price_under_the_column_resolution_forms_no_price() {
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        // 1 622 units in for 3.34e17 out — the pair canonicalises inverted, so
+        // this is the 2026-04-02 row's shape at AMM scale: a quotient of
+        // ~4.86e-15 in the candle's own orientation.
+        const AMOUNT_IN: i128 = 1_622;
+        const AMOUNT_OUT: i128 = 333_878_401_106_300_000;
+
+        assert!(
+            price_forming_i128(AMOUNT_IN, AMOUNT_OUT),
+            "the bound passes both legs — the fixture proves nothing otherwise"
+        );
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let tick = amm_trade_to_tick(
+            &extractors_core::TradeRow {
+                venue: Venue::Soroswap,
+                contract_id: POOL.to_string(),
+                transaction_id: "tx".to_string(),
+                ledger_sequence: 100,
+                first_event_index: 0,
+                token_in: T0.to_string(),
+                token_out: T1.to_string(),
+                amount_in: AMOUNT_IN,
+                amount_out: AMOUNT_OUT,
+                fee: None,
+                trader: None,
+            },
+            0,
+            1_700_000_000,
+            &mut assets,
+        )
+        .expect("the swap still produces a tick");
+        // T0 is XLM's SAC: the tick carries the collapsed identity (D6).
+        assert_eq!(
+            (&tick.base, &tick.quote),
+            (
+                &AssetIdentity::Contract(T1.to_string()),
+                &AssetIdentity::Native
+            )
+        );
+
+        assert!(
+            !crate::price::price_survives_column_scale(tick.price),
+            "the fixture's quotient really is below 1e-14"
+        );
+        assert!(
+            !tick.price_forming,
+            "a price that stores as 0 cannot price a candle"
+        );
+        assert!(
+            tick.volume_base > Decimal::ZERO && tick.volume_quote > Decimal::ZERO,
+            "the swap keeps its volumes"
+        );
+    }
+
+    /// Review WR-03: the AMM arm draws the same line as the classic one. A
+    /// quotient AT `1e-12` forms a price; one just below it does not. Both
+    /// fixtures clear the rounding bound on the raw amounts by orders of
+    /// magnitude, so the floor is what decides.
+    #[test]
+    fn the_amm_arm_draws_the_line_at_the_precision_floor() {
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        // This pair canonicalises INVERTED, so the candle's price is
+        // amount_in / amount_out (see the fixture above).
+        const AMOUNT_OUT: i128 = 2_000_000_000_000_000;
+
+        fn trade(amount_in: i128, amount_out: i128) -> extractors_core::TradeRow {
+            extractors_core::TradeRow {
+                venue: Venue::Soroswap,
+                contract_id: POOL.to_string(),
+                transaction_id: "tx".to_string(),
+                ledger_sequence: 100,
+                first_event_index: 0,
+                token_in: T0.to_string(),
+                token_out: T1.to_string(),
+                amount_in,
+                amount_out,
+                fee: None,
+                trader: None,
+            }
+        }
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+
+        assert!(price_forming_i128(2_000, AMOUNT_OUT));
+        let at_floor = amm_trade_to_tick(&trade(2_000, AMOUNT_OUT), 0, 1_700_000_000, &mut assets)
+            .expect("the swap prices");
+        assert_eq!(at_floor.price, Decimal::new(1, 12), "the fixture is 1e-12");
+        assert!(at_floor.price_forming, "the floor itself is a price");
+
+        assert!(price_forming_i128(1_980, AMOUNT_OUT));
+        let under = amm_trade_to_tick(&trade(1_980, AMOUNT_OUT), 0, 1_700_000_000, &mut assets)
+            .expect("the swap still produces a tick");
+        assert_eq!(under.price, Decimal::new(99, 14), "the fixture is 9.9e-13");
+        assert!(
+            !under.price_forming,
+            "under the floor a stored price is quantisation noise, not a swap price"
+        );
+        assert!(
+            under.volume_base > Decimal::ZERO && under.volume_quote > Decimal::ZERO,
+            "the swap keeps its volumes"
+        );
+    }
+
+    /// Task 0286 / ADR 0287 §1 — an AMM fill is classified on the RAW i128
+    /// amounts the swap event carries, in each token's own decimals, BEFORE
+    /// `AMM_AMOUNT_SCALE` turns them into `Decimal`s. Once scaled they are
+    /// fractions and every fill looks equally precise, so the bound has to be
+    /// evaluated on the way in or not at all.
+    #[test]
+    fn amm_ticks_are_classified_on_the_raw_amounts_before_scaling() {
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        const CLOSED_AT: i64 = 1_700_000_000;
+
+        fn trade(amount_in: i128, amount_out: i128) -> extractors_core::TradeRow {
+            extractors_core::TradeRow {
+                venue: Venue::Soroswap,
+                contract_id: POOL.to_string(),
+                transaction_id: "tx".to_string(),
+                ledger_sequence: 100,
+                // 0x1_0005: the low sixteen bits are the operation index the
+                // tick keeps; the high bits are masked off.
+                first_event_index: 0x1_0005,
+                token_in: T0.to_string(),
+                token_out: T1.to_string(),
+                amount_in,
+                amount_out,
+                fee: None,
+                trader: None,
+            }
+        }
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+
+        let ordinary = amm_trade_to_tick(&trade(1_000_000, 914_145), 4, CLOSED_AT, &mut assets)
+            .expect("an ordinary swap prices");
+        assert!(
+            ordinary.price_forming,
+            "a million units against ~914k clears the bound by orders of magnitude"
+        );
+
+        let dust = amm_trade_to_tick(&trade(34, 5), 4, CLOSED_AT, &mut assets)
+            .expect("a dust swap still produces a tick");
+        assert!(
+            !dust.price_forming,
+            "34 units against 5 prints the exact fraction 5/34 and must not price"
+        );
+        assert_eq!(
+            dust.volume_base + dust.volume_quote,
+            Decimal::try_from_i128_with_scale(39, AMM_AMOUNT_SCALE).unwrap(),
+            "the dust fill keeps its volumes: it is a real trade"
+        );
+
+        // The apply order is a PARAMETER — `TradeRow` has no such field, and
+        // adding one would change a type shared with the extractor crates.
+        assert_eq!(dust.transaction_index, 4);
+        assert_eq!(
+            dust.operation_index, 5,
+            "operation_index stays the masked first_event_index"
+        );
+        assert_eq!(dust.claim_index, 0);
+        assert_eq!(dust.lex_key(), (100, 4, 5, 0));
+    }
+
+    // ---- task 0286 WR-09: the apply order the seam reads off a group --------
+
+    const SEAM_POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+    const SEAM_T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+    const SEAM_T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+    const SEAM_SEQ: u32 = 50_688_800;
+    const SEAM_CLOSED_AT: i64 = 1_700_000_000;
+
+    /// A SoroswapPair swap in the typed-JSON shape BE persists.
+    fn seam_swap(tx_id: &str, transaction_index: u16, event_index: u32) -> RawSorobanEvent {
+        RawSorobanEvent {
+            contract_id: SEAM_POOL.to_string(),
+            transaction_id: tx_id.to_string(),
+            transaction_index,
+            ledger_sequence: SEAM_SEQ,
+            event_index,
+            topics: json!([
+                {"type":"string","value":"SoroswapPair"},
+                {"type":"sym","value":"swap"}
+            ]),
+            data: json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount_0_in"},"value":{"type":"i128","value":"1000000"}},
+                {"key":{"type":"sym","value":"amount_0_out"},"value":{"type":"i128","value":"0"}},
+                {"key":{"type":"sym","value":"amount_1_in"},"value":{"type":"i128","value":"0"}},
+                {"key":{"type":"sym","value":"amount_1_out"},"value":{"type":"i128","value":"914145"}}
+            ]}),
+        }
+    }
+
+    fn seam_registries() -> Registries {
+        let mut reg = Registries::new();
+        reg.venue.insert(SEAM_POOL.to_string(), Venue::Soroswap);
+        reg.soroswap.register(
+            SEAM_POOL.to_string(),
+            SEAM_T0.to_string(),
+            SEAM_T1.to_string(),
+        );
+        reg
+    }
+
+    /// The events-backfill seam carries BE's apply order onto the tick, so a
+    /// repriced candle orders its fills exactly like the live path does.
+    #[test]
+    fn the_seam_carries_the_groups_apply_order_onto_its_ticks() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            &[seam_swap("tx-a", 7, 0)],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(out.amm_ticks.len(), 1);
+        assert_eq!(
+            out.amm_ticks[0].1.transaction_index, 7,
+            "the tick takes the group's apply order, not 0"
+        );
+    }
+
+    /// Task 0286 WR-09. The seam reads ONE `transaction_index` off the first
+    /// event of each contiguous group, so a group whose rows disagree would
+    /// silently order half a transaction's fills wrong. Debug builds refuse.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "disagree on transaction_index")]
+    fn a_group_disagreeing_on_its_apply_order_is_refused_in_debug() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            // One transaction id, two apply orders — a mixed resolved/fallback
+            // pair is the only way this reaches production.
+            &[seam_swap("tx-a", 7, 0), seam_swap("tx-a", 0, 1)],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+    }
+
+    /// Task 0300 D1, venue-neutral: a swap of a token for itself carries no
+    /// price on ANY venue. It yields no tick, and the token is not interned
+    /// into the asset registry (which is persisted to `prices.assets`).
+    #[test]
+    fn a_self_swap_prices_nothing_and_interns_nothing_for_any_venue() {
+        // A pure Soroban token, NOT a SAC — it would be a new identity.
+        const TOKEN: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        let trade = extractors_core::TradeRow {
+            venue: Venue::Aquarius,
+            contract_id: "CDE57N6XTUPBKYYDGQMXX7E7SLNOLFY3JEQB4MULSMR2AKTSAENGX2HC".to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: 100,
+            first_event_index: 0,
+            token_in: TOKEN.to_string(),
+            token_out: TOKEN.to_string(),
+            amount_in: 930_000_000,
+            amount_out: 423_899_086_439,
+            fee: None,
+            trader: None,
+        };
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let before = assets.assets().count();
+        assert!(amm_trade_to_tick(&trade, 0, 1_700_000_000, &mut assets).is_none());
+        assert_eq!(assets.assets().count(), before, "nothing interned");
+    }
 }
+
+/// Task 0300: the Comet venue, pinned on real production payloads.
+#[cfg(test)]
+mod comet_tests;

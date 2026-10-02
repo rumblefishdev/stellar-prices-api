@@ -10,7 +10,7 @@ use crate::oracles::dto::OracleEntry;
 /// asset has no oracle rows (table is retention-capped).
 pub async fn oracles_for_asset(
     ch: &Client,
-    asset_id: u32,
+    asset_id: u64,
 ) -> Result<Vec<OracleEntry>, clickhouse::error::Error> {
     let sql = "SELECT \
                  oracle_name AS name, \

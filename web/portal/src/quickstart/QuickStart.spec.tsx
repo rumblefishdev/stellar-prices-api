@@ -1,7 +1,17 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { render } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import { RESPONSE_FIELDS, RESPONSE_TEXT, SNIPPET_TABLES } from './QuickStart';
+import {
+  DOCUMENTED_PATHS,
+  EXAMPLES,
+  EXAMPLE_PATHS,
+  RESPONSE_FIELDS,
+  RESPONSE_TEXT,
+  SNIPPET_TABLES,
+} from './QuickStart';
 
 /**
  * Every snippet on the quick start is authored twice — as the coloured JSX a
@@ -64,6 +74,44 @@ describe('quick-start example response', () => {
     (_key, field) => {
       const { container } = render(<pre>{field.value}</pre>);
       expect(collapse(container.textContent ?? '')).toBe(collapse(field.raw));
+    },
+  );
+});
+
+/**
+ * The paths this page documents, against the OpenAPI document the API serves
+ * (`public/openapi.json`, which CI keeps equal to the live bytes). Task 0233's
+ * first criterion: a page that named a route the spec did not have once sent a
+ * reader's first request to `403 Missing Authentication Token`, and only a
+ * mechanical comparison notices the next time.
+ */
+describe('documented paths', () => {
+  const spec = JSON.parse(
+    readFileSync(
+      join(import.meta.dirname, '../../public/openapi.json'),
+      'utf8',
+    ),
+  ) as { paths: Record<string, unknown> };
+  // The page writes `{id}` where the spec writes `{asset_identifier}`; the
+  // placeholder's name is not the claim.
+  const shape = (p: string) => p.replace(/\{[^}]+\}/g, '{}');
+  const specShapes = new Set(Object.keys(spec.paths).map(shape));
+
+  it.each(DOCUMENTED_PATHS)('%s is in the OpenAPI document', (path) => {
+    expect(specShapes.has(shape(path))).toBe(true);
+  });
+
+  it.each(Object.entries(EXAMPLE_PATHS))(
+    'the %s example calls its declared path',
+    (key, template) => {
+      const url =
+        EXAMPLES[key as keyof typeof EXAMPLES].text.match(
+          /"(https:\/\/[^"]+)"/,
+        )?.[1];
+      const pattern = new RegExp(
+        `^${template.replace(/\{[^}]+\}/g, '[^/]+')}$`,
+      );
+      expect(new URL(url ?? '').pathname).toMatch(pattern);
     },
   );
 });

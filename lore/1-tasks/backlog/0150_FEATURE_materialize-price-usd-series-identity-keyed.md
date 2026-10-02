@@ -4,7 +4,7 @@ title: "Materialize price_usd_series* as an identity-keyed table (BE 0199 §6 re
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0144", "0139", "0147", "0142", "0095", "0090", "0143", "0061"]
+related_tasks: ["0144", "0139", "0147", "0142", "0095", "0090", "0143", "0061", "0171", "0198"]
 tags:
   ["priority-low", "effort-large", "clickhouse", "performance", "be-interop", "milestone-M2"]
 milestone: 2
@@ -30,6 +30,13 @@ history:
       pools have both legs priceable on the window their headline TVL uses, so
       *coverage*, not latency, is what limits them. Still worth building; no
       longer worth building soon. Ordering unchanged (still last).
+  - date: "2026-09-14"
+    status: backlog
+    who: akot
+    note: >
+      Added §4 and an acceptance criterion from [[0171]]/[[0198]]: the
+      `volume_base > 0` predicate on every weighted-average surface must not
+      be lost when the series is materialised. No other change.
 ---
 
 > ⚠️ **The requester deprioritised this on 2026-08-06.** BE can cache the slow
@@ -100,8 +107,24 @@ coverage gate first, then materialize under it.
 **A plain scheduled rebuild of a bounded recent window may be the cheaper,
 safer answer than an MV.** Decide explicitly; do not default.
 
+### 4. The zero-weight predicate must survive materialisation ([[0171]]/[[0198]])
+
+Since 2026-09-14 arm A of both grains admits a candle only with
+`close_usd > 0 AND volume_base > 0`, and `usd_reference*` only with
+`close > 0 AND volume_base > 0`. That is what keeps
+`CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))` from ever seeing NULL —
+which on 26.3.10.60 either raises code 349 (interpreted) or publishes
+Decimal128::MIN (JIT-compiled). A materialised table that re-derives the
+population from the candles instead of reading the views **must carry the same
+predicate**, or it re-opens both bugs in stored data. Prod had zero such
+candles on 2026-09-14, so the omission changes no row today; that is not a
+reason to drop it.
+
 ## Acceptance Criteria
 
+- [ ] The population rule carries `volume_base > 0` on every weighted-average
+      surface (series arm A, reference), asserted by **value**
+      (`countIf(toFloat64(close_usd) <= 0) = 0`), never by `IS NULL` — see §4.
 - [ ] [[0139]] fixed and confirmed on prod before any table is built.
 - [ ] [[0147]]'s population rule settled and the table built under it.
 - [ ] Identity-keyed exactly as BE requested.

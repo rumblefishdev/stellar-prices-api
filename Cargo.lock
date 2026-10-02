@@ -163,7 +163,6 @@ dependencies = [
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
- "prices-ledger-processor",
  "reqwest",
  "serde",
  "serde_json",
@@ -390,6 +389,32 @@ dependencies = [
  "sha2 0.11.0",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-sns"
+version = "1.104.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bee49fd44878fcbf4db4cc4f45da9d3f1d7541a20e901767ab8e66bdd824a195"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -1190,6 +1215,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "comet-extractor"
+version = "0.1.0"
+dependencies = [
+ "extractors-core",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1218,6 +1250,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "coverage-sweep-probe"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-cloudwatch",
+ "clickhouse",
+ "lambda_runtime 0.13.0",
+ "prices-clickhouse",
+ "serde",
+ "serde_json",
+ "stellar-strkey",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1240,6 +1290,17 @@ name = "crate-git-revision"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c521bf1f43d31ed2f73441775ed31935d77901cb3451e44b38a1c1612fcbaf98"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
+name = "crate-git-revision"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54851b5b3f24621804b1cded2820975623c205e3055d2d44031cdb1237339ac8"
 dependencies = [
  "serde",
  "serde_derive",
@@ -1430,7 +1491,7 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.1.0"
-source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#d61b359f39994c7ef5f5bde8a0d709cf81a1026c"
+source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#31be5f747abadb2e0cc0d2ae4f59702604519bd5"
 dependencies = [
  "chrono",
  "serde",
@@ -2390,6 +2451,7 @@ name = "ledger-processor"
 version = "0.1.0"
 dependencies = [
  "aquarius-extractor",
+ "comet-extractor",
  "extractors-core",
  "phoenix-extractor",
  "soroswap-extractor",
@@ -2529,6 +2591,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-cloudwatch",
+ "aws-sdk-sns",
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "serde_json",
@@ -2834,6 +2897,7 @@ name = "prices-clickhouse"
 version = "0.1.0"
 dependencies = [
  "clickhouse",
+ "extractors-core",
  "hyper-rustls 0.27.9",
  "hyper-util",
  "reqwest",
@@ -2855,6 +2919,7 @@ version = "0.1.0"
 dependencies = [
  "aquarius-extractor",
  "clickhouse",
+ "comet-extractor",
  "extractors-core",
  "hex",
  "ledger-processor",
@@ -2889,11 +2954,13 @@ dependencies = [
  "prices-ingest-core",
  "serde",
  "serde_json",
+ "stellar-xdr",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
@@ -3642,6 +3709,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3849,17 +3925,17 @@ version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee1832fb50c651ad10f734aaf5d31ca5acdfb197a6ecda64d93fcdb8885af913"
 dependencies = [
- "crate-git-revision",
+ "crate-git-revision 0.0.6",
  "data-encoding",
 ]
 
 [[package]]
 name = "stellar-xdr"
-version = "27.0.0"
+version = "28.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05ff843326969bdf1ef673dcdba94c08f4a3c8f1e58d6e6ef39b1bd4f749179a"
+checksum = "f93d09ff8b9f919b084f664003c4c546ac66a76affd5429460dbe29f4b326f8e"
 dependencies = [
- "crate-git-revision",
+ "crate-git-revision 0.0.9",
  "escape-bytes",
  "ethnum",
  "hex",
@@ -4135,6 +4211,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4157,12 +4248,18 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tower"
@@ -4742,7 +4839,7 @@ dependencies = [
 [[package]]
 name = "xdr-parser"
 version = "0.1.0"
-source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#d61b359f39994c7ef5f5bde8a0d709cf81a1026c"
+source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#31be5f747abadb2e0cc0d2ae4f59702604519bd5"
 dependencies = [
  "base64",
  "domain",

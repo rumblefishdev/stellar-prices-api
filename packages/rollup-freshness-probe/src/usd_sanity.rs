@@ -218,9 +218,11 @@ pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 ///
 /// # Why the stranded direction is correct on a derived tier
 ///
-/// A zero rolls up as a zero: `argMaxIf(close_usd, …, close_usd > 0)` has
-/// nothing to select, so an unpriced `_1m` row surfaces as an unpriced `_1h`
-/// row. Reading the coarse tier therefore detects the condition faithfully —
+/// A zero rolls up as a zero: the coarse `close_usd` is the bucket's own `close`
+/// re-priced by the latest rate-bearing child's rate (`close_usd / close`, both
+/// legs at the precision floor — `rollup_sql::RATE_BEARING_CHILD`, task 0286),
+/// and with no such child that rate is 0, so an unpriced `_1m` row surfaces as
+/// an unpriced `_1h` row. Reading the coarse tier therefore detects the condition faithfully —
 /// which is how task 0209 was found at all. ⛔ **Do not move this direction to
 /// `_1m` alongside the peg direction.** The 48 h grace is calibrated to BE's
 /// loss window *on the hourly tier*, and the tier swap would silently change
@@ -899,6 +901,10 @@ mod tests {
     /// Two rows for one identity means the registry is ambiguous — the counts
     /// would be a union across legs and the alarm would be reading something
     /// nobody designed. Refuse that too, rather than picking one.
+    ///
+    /// `assets FINAL` cannot produce it: it keeps one row per identity, and
+    /// since task 0139 that row's id is derived from the identity, so no other
+    /// identity can share it either. The guard stays as a cheap assertion.
     #[test]
     fn an_ambiguous_usdt_identity_is_refused() {
         assert_eq!(
@@ -915,8 +921,8 @@ mod tests {
 
     /// The guard `resolved_legs` cannot provide. The identity resolves cleanly,
     /// so the first guard passes — but the `asset_id` it resolves to is not the
-    /// `quote_asset_id` the candles carry (task 0139 renumbering, a registry
-    /// rewrite), so the scan matches nothing. The count is zero because nothing
+    /// `quote_asset_id` the candles carry (candles left in an old id space by
+    /// task 0139's migration, a registry rewrite), so the scan matches nothing. The count is zero because nothing
     /// was examined, and `NOT_BREACHING` would score that healthy.
     #[test]
     fn a_resolved_leg_that_matches_no_candles_is_refused() {

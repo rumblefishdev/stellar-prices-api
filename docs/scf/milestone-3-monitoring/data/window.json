@@ -1,0 +1,124 @@
+{
+  "MetricDataResults": [
+    {
+      "Id": "gw_count",
+      "Label": "requests",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [65806.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "gw_4xx",
+      "Label": "4XX",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [8791.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "gw_5xx",
+      "Label": "5XX",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [0.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "lat_p50",
+      "Label": "Latency p50 (ms)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [25.887051651852484],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "lat_p95",
+      "Label": "Latency p95 (ms)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [145.1747604154078],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "lat_p99",
+      "Label": "Latency p99 (ms)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [795.725433368564],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "ilat_p50",
+      "Label": "IntegrationLatency p50 (ms)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [38.715778149788854],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "ilat_p95",
+      "Label": "IntegrationLatency p95 (ms)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [254.39368820124244],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "ilat_p99",
+      "Label": "IntegrationLatency p99 (ms)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [896.7344879508748],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "cache_hit",
+      "Label": "cache hits",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [22401.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "cache_miss",
+      "Label": "cache misses",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [29917.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "api_inv",
+      "Label": "api-handler invocations",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [33308.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "api_err",
+      "Label": "api-handler errors",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [0.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "api_thr",
+      "Label": "api-handler throttles",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [0.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "lp_err",
+      "Label": "ledger-processor errors",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [0.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "portal_closed",
+      "Label": "portal closed at cold start (until 09-25 14:47)",
+      "Timestamps": ["2026-09-23T09:40:00+02:00"],
+      "Values": [11.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "portal_failed",
+      "Label": "portal sources failed to load (from 09-25 14:47)",
+      "Timestamps": [],
+      "Values": [],
+      "StatusCode": "Complete"
+    }
+  ],
+  "Messages": []
+}

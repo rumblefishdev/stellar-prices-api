@@ -275,19 +275,35 @@ ORDER BY (account_id, ledger_sequence, transaction_id);
 -- soroban_events: full-content per-event row (ADR 0044 §4a unfold).
 -- ZSTD codecs on the ScVal-decoded JSON columns. `signature` is the
 -- first-topic Symbol, lifted for cheap `WHERE signature = 'transfer'`.
+--
+-- ⚠️ ALTERED BY BE ON 2026-09-17 11:49:23 (task 0304). `transaction_id` was
+-- DROPPED; `transaction_index`, `operation_index` and `application_order` were
+-- added and `event_index` was widened Int16 -> UInt32. The columns below are
+-- the measured live set. Pick Rust field types from THIS list, not from the
+-- pre-alter one: the reader frames rows as bare RowBinary, so a field narrower
+-- than its column shifts every field after it and decodes garbage rather than
+-- erroring (packages/events-backfill/src/source.rs::EventRow).
+--
+-- The codecs and the sort key were NOT re-measured after the alter — the old
+-- sort key named transaction_id, so it must have changed. Re-measure with
+-- `SHOW CREATE TABLE default.soroban_events` before relying on either.
 CREATE TABLE IF NOT EXISTS soroban_events (
-    contract_id     Int64,
-    transaction_id  Int64,
-    ledger_sequence Int64,
-    event_index     Int16,
-    event_type      Int16,
-    signature       LowCardinality(Nullable(String)),
-    topics_xdr      String CODEC(ZSTD(3)),
-    data_xdr        String CODEC(ZSTD(3))
+    contract_id       Int64,
+    ledger_sequence   Int64,
+    transaction_index UInt32,
+    operation_index   UInt16,
+    event_index       UInt32,
+    application_order Int16,   -- the transaction's position in the ledger's
+                               -- apply order (ADR 0287 D1); negative is not a
+                               -- position, it is a corrupt row
+    event_type        Int16,
+    signature         LowCardinality(Nullable(String)),
+    topics_xdr        String CODEC(ZSTD(3)),
+    data_xdr          String CODEC(ZSTD(3))
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY intDiv(ledger_sequence, 500000)
-ORDER BY (contract_id, ledger_sequence, transaction_id, event_index);
+ORDER BY (contract_id, ledger_sequence, transaction_index, event_index); -- UNVERIFIED since the alter
 
 CREATE TABLE IF NOT EXISTS soroban_invocations_appearances (
     contract_id          Int64,

@@ -1,7 +1,7 @@
 //! Pre-roll `close_usd` guard regression test (task 0145).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test preroll_close_usd_guard_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test preroll_close_usd_guard_it -- --ignored --test-threads=1
 //!
 //! `close_usd` is baked by a separate, LAGGING enrichment pass onto a
 //! non-nullable `Decimal(38,14) DEFAULT 0` column, so "not yet enriched" and
@@ -16,6 +16,16 @@
 //! incomplete *by definition*, at backfill scale, and the rows they zero then
 //! age out of the MV re-aggregation windows where only the 0114 sweep can still
 //! reach them.
+//!
+//! Task 0286 / ADR 0287 §5 SUPERSEDED the guard with something stronger: the
+//! coarse `close_usd` is now this bucket's own `close` re-priced by the latest
+//! priced child's RATE (`close_usd / close`). The un-enriched sentinel is
+//! skipped exactly as before — that is what the rate predicate does (both legs at
+//! or above the precision floor, `rollup_sql::RATE_BEARING_CHILD`) —
+//! but `close` and `close_usd` are no longer allowed to come from different
+//! sub-buckets, which is the consequence task 0145 had to accept. The
+//! expectation below is therefore the rate-derived product, recomputed rather
+//! than deleted.
 //!
 //! This test pins the fix end-to-end through the real shipped `preroll.sql`
 //! chain, and — critically — first proves the fixture actually reproduces the
@@ -89,7 +99,7 @@ async fn scalar(client: &Client, sql: &str) -> f64 {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn preroll_carries_the_latest_priced_close_usd_not_the_unenriched_zero() {
     let db = "it_preroll_close_usd_guard";
     let admin = Client::default().with_url(ch_url());
@@ -171,18 +181,24 @@ async fn preroll_carries_the_latest_priced_close_usd_not_the_unenriched_zero() {
             &format!("SELECT toFloat64(argMax(close_usd, timestamp)) FROM {db}.{target} FINAL"),
         )
         .await;
-        assert_eq!(
-            close_usd, 7.0,
-            "{target}: pre-roll must carry the latest PRICED close_usd (7.0). \
-             A 0 here is the task 0145 defect: the bucket inherited its newest \
-             sub-bucket's un-enriched sentinel and discarded the priced rows \
-             underneath it."
+        // The latest PRICED child is t-13: close 1.20, close_usd 7.0, so a rate
+        // of 7.0 / 1.20. This bucket closes at 1.30, so its USD close is
+        // 1.30 x (7.0 / 1.20) = 7.5833…. A 0 here is the task 0145 defect (the
+        // bucket inherited its newest sub-bucket's un-enriched sentinel and
+        // discarded the priced rows underneath it); a flat 7.0 is the carried
+        // product task 0286 replaced — a USD value for a price this candle no
+        // longer reports.
+        let want = 1.30 * (7.0 / 1.20);
+        assert!(
+            (close_usd - want).abs() < 1e-6,
+            "{target}: pre-roll must re-price its own close at the latest \
+             priced child's rate ({want}), got {close_usd}"
         );
 
-        // The deliberately accepted consequence, pinned so it cannot regress
-        // silently into an assumption: `close` and `close_usd` now come from
-        // DIFFERENT sub-buckets. close is the true last-by-time (1.30, the
-        // un-enriched row); close_usd is the last PRICED one (7.0, at t-13).
+        // The consequence task 0145 accepted — `close` and `close_usd` from
+        // DIFFERENT sub-buckets — is what the rate form ENDS: the two are
+        // same-bucket again by construction. `close` itself is untouched by
+        // either: it is still the true last-by-time price-forming value.
         let close = scalar(
             &admin,
             &format!("SELECT toFloat64(argMax(close, timestamp)) FROM {db}.{target} FINAL"),
@@ -191,7 +207,7 @@ async fn preroll_carries_the_latest_priced_close_usd_not_the_unenriched_zero() {
         assert_eq!(
             close, 1.30,
             "{target}: `close` must still be the true last-by-time value — the \
-             guard applies to close_usd only and must not perturb OHLC"
+             close_usd rule must not perturb OHLC"
         );
     }
 
@@ -209,7 +225,7 @@ async fn preroll_carries_the_latest_priced_close_usd_not_the_unenriched_zero() {
 /// which is the representational problem task 0151 owns. Pinned here so nobody
 /// later reads the guard as a stronger promise than it makes.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn preroll_still_writes_zero_when_no_sub_bucket_was_ever_priced() {
     let db = "it_preroll_close_usd_all_unpriced";
     let admin = Client::default().with_url(ch_url());

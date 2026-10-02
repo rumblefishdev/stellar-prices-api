@@ -71,6 +71,22 @@ docker exec <ch-container> clickhouse-client -q \
   "SELECT count() FROM system.tables WHERE database='prices'"
 ```
 
+## Integration tests
+
+The `tests/*_it.rs` targets tagged `#[ignore = "requires ClickHouse …"]` — here
+and across the workspace — run in CI on every Rust PR against the
+`docker-compose.yml` pin (task 0275). Locally, with the schema applied as above
+(`--rollups` included) and the proxy one of them needs:
+
+```bash
+scripts/ch-proxy-0281.sh up
+CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_PROXY_URL=http://localhost:8124 \
+  tools/scripts/ignored-tests.sh
+```
+
+Never run two of these against one server at once — several targets share the
+`prices` database. The script's header explains the inventory it derives.
+
 ## Remote (mTLS) connection
 
 The default build is plaintext-only (`Config` + `client()`, for local Docker /

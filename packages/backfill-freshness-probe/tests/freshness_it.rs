@@ -10,8 +10,8 @@
 //! IS NOT NULL` gate (finding A: no live-only false-fire) and that `FINAL`
 //! returns the latest version, not a stale pre-merge `running` row.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p backfill-freshness-probe --test freshness_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p backfill-freshness-probe --test freshness_it -- --ignored --nocapture --test-threads=1
 //!
 //! Destructive to the local `prices.backfill_progress` table (truncates it);
 //! never run against a shared/prod cluster.
@@ -54,7 +54,7 @@ async fn insert_row(c: &Client, task: &str, status: &str, last_push_sql: &str, u
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn age_query_executes_deserializes_and_gates() {
     let c = client();
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)

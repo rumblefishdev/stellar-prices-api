@@ -97,10 +97,10 @@ Use whatever your team uses for account `750702271865`. With AWS SSO that is:
 
 ```bash
 aws configure sso            # first time only; set the start URL + region
-aws sso login --profile soroban-explorer
+aws sso login --profile soroban-admin
 ```
 
-(`soroban-explorer` is the conventional profile name — use yours if different.)
+(`soroban-admin` is the conventional profile name — use yours if different.)
 
 ### 2b. Fetch the writer mTLS bundle → three PEM files
 
@@ -112,7 +112,7 @@ three files (the commands below **never print** the key to your terminal):
 mkdir -p ~/prices-mtls && cd ~/prices-mtls
 
 aws secretsmanager get-secret-value \
-  --profile soroban-explorer \
+  --profile soroban-admin \
   --region eu-central-1 \
   --secret-id prices/production/clickhouse-mtls-prices-ingestion-production \
   --query SecretString --output text > bundle.json
@@ -310,6 +310,14 @@ feeds the next).
 > but it competes for RAM/CPU with the BE tenant). See
 > [[flag-container-restarts]] / [[feedback-prepare-not-deploy]].
 
+> ⚠️ **If the target holds the `prices.mv_reconcile_*` MVs (tasks 0143 + 0203),
+> STOP all six before the optional `TRUNCATE` and the pre-roll and START them after**, exactly as
+> [0286-reingest-history §1a](0286-reingest-history.md#1a-stop-the-reconcile-mvs-tasks-0143--0203) and §7f do. While the coarse tables are
+> half-rebuilt, an hourly reconcile pass would re-roll the last 7 days from
+> whatever the tier below holds at that moment. `SYSTEM STOP VIEW` is lost on a
+> server restart, and `prices-production-mv-refresh-disabled` fires while they
+> are stopped (expected; it clears after START).
+
 **Optional — clean rebuild.** For a from-scratch coarse build (recommended the
 first time, since prod's coarse tables are currently near-empty), truncate them
 first. Safe: the pre-roll rebuilds every row from `1m`.
@@ -365,7 +373,7 @@ history while this backfill runs. **Do not re-enable it until §9's pre-roll has
 captured the history into the coarse tables** — otherwise the `1m` partitions
 drop at the next 02:00 UTC and the history is lost again (the exact 0090 bug).
 
-Confirm the current state first (read-only; profile `soroban-explorer`, region
+Confirm the current state first (read-only; profile `soroban-admin`, region
 `eu-central-1`):
 
 ```bash
@@ -432,3 +440,7 @@ let it run to `=== sdex-backfill complete ===`.
 
 See also: `docs/runbooks/running-ingestion-components.md` (full flag reference,
 minute-seam rules) and `docs/runbooks/seed-pool-registry.md` (registry seeding).
+
+For the task-0286 phase-3 re-ingest — the same binary, but over months already
+indexed, so the partition is DROPPED and the resume markers CLEARED first —
+see [`0286-reingest-history.md`](0286-reingest-history.md).

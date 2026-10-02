@@ -9,15 +9,20 @@
 
 ## Revision History
 
-| Date       | Sections                                    | Driver                                                                                                                                                                                                                                                                                                                                                                                                              | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-09-01 | §2, §3.0, §3.10a (new), §5, §13, App. A     | [Task 0210](../../lore/1-tasks/active/0210_BUG_soroban-assets-empty-code-in-listing.md)                                                                                                                                                                                                                                                                                                                             | **Added §3.10a `asset_symbol`** — the single-writer table holding a Soroban token's `symbol()`, read over RPC by the asset-discovery worker and composed into the API's `asset_code` / `code` at read time. Documents why the symbol can live in neither `assets.asset_code` (sort-key column of a `ReplacingMergeTree`, so a write adds a second row — task 0139's fan-out) nor `asset_metadata` (whole-row replace, so it would clobber `home_domain` — the task-0067 hazard), and why it is keyed on `contract_address` rather than `asset_id` (10 of the 52 Soroban rows share an `asset_id`). Records two semantics a consumer cannot infer from the DDL: an empty `symbol` is a resolved-as-absent **sentinel**, not missing data, and resolution triggers on absence rather than staleness, so an empty queue is the healthy steady state. Flags that `symbol()` is contract-controlled and therefore not an identity claim, which is why `?search=` and `sort=code` stay on the stored `assets.asset_code`. Extended the §2 engine summary, the §3.0 scope note, the §5 sort-key table, the §13 at-a-glance table, and both Appendix A mermaid blocks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 2026-08-04 | §2, §3.0, §3.5, §3.7–§3.12, §5, §13, App. A | [Task 0075](../../lore/1-tasks/archive/0075_DOCS_update-db-schema-overview-newer-tables.md) · [Task 0053](../../lore/1-tasks/archive/0053_FEATURE_soroban-amm-backfill-cli-stream-1-impl/README.md) · [Task 0054](../../lore/1-tasks/archive/0054_FEATURE_asset-discovery-lambda-tranche-1-minimal.md) · [Task 0073](../../lore/1-tasks/archive/0073_FEATURE_store-earliest-data-available-in-backfill-progress.md) | **Closed the gap between the doc and `schema/init.sql`.** The overview documented 6 of the 13 `prices.*` tables; it now documents all of them. Added §3.7 `unresolved_pools` (drop-reason alarm table; `still_unresolved` triage semantics), §3.8 `discovery_state` (asset-discovery high-water-mark), §3.9 `asset_metadata` and §3.10 `asset_supply` (the two single-writer splits that keep a full-row-replace RMT re-emit from clobbering enrichment/supply), §3.11 `backfill_sdex_ledgers` (per-ledger done-marks), §3.12 `ingest_cursor` (live resume point; versions on `ledger`, not `updated_at`, so a stray lower write cannot rewind it). Refreshed §3.5 `backfill_progress` with `earliest_data_available` + `newest_data_available` and the covered-time-window semantics (direction-agnostic, unlike `current_ledger`; read O(1), never a live `MIN`/`MAX` scan). Extended the §5 sort-key and §13 at-a-glance tables and the §2 engine summary to match, and made Appendix A live up to its "every table" claim. §3.0 stays core-path-only, now stated explicitly. **Also corrected claims this revision had inherited from `init.sql` comments and older task files, each re-checked against the writers/readers:** `unresolved_pools` is written by the two _backfills_ (`'backfill'` / `'events-backfill'`), never by the live processor — a live unclassified swap leaves no row, so an empty table is not evidence of a healthy live path; unknown supply yields `market_cap_usd = 0`, not `NULL`; `/backfill/status` exposes only `earliest_data_available` and the `?timeframe=all` note reads neither window column; `pool_registry` has a third writer (Asset Discovery); `asset_metadata` is read by `GET /assets` and `GET /assets/{id}`, not by any view; and the `pool_registry → unresolved_pools` ER edge is zero-or-one on the left. Aligned `backfill/dto.rs`'s OpenAPI description of `earliest_data_available` (docs only) with the writer's actual semantics — the DTO had asserted the opposite meaning. |
-| 2026-07-06 | §3.6 (`pool_registry`)                      | [Task 0053](../../lore/1-tasks/active/0053_FEATURE_soroban-amm-backfill-cli-stream-1-impl/README.md) · [Task 0078](../../lore/1-tasks/archive/0078_BUG_live-processor-preload-pool-registry.md)                                                                                                                                                                                                                     | **Explained why `pool_registry` is load-bearing.** Added a `swap`-event anatomy table (three payload shapes: concentrated `amount0`/`amount1`+`sqrt_price_x96`, simple-map `amount_in`/`amount_out`, router/path with embedded token addresses) showing that two of three shapes name no assets at all — so the pool→venue/token/pool-math classification (announced once, in the factory-create event) can only come from the persisted registry, not the swap. Updated the "Read by" line: the live Ledger Processor now preloads the registry at cold start (task 0078, `ClickHouseSink::load_pool_registry`), and noted the Soroswap `/pools` direct seed (task 0079).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| 2026-06-22 | §3.2 (`close_usd` col + views), §13         | [Task 0061](../../lore/1-tasks/archive/0061_FEATURE_historical-usd-close-price-series/README.md)                                                                                                                                                                                                                                                                                                                    | **Documented the historical USD close surface.** Added the `close_usd Decimal(38,14) DEFAULT 0` column (`= oracle_usd × close`, baked in at enrichment time) to the `price_ohlcv_*` DDL, and a new §3.2 subsection covering the BE-facing read-surface VIEWs — `prices.price_usd_series` / `_1h` (volume-weighted `close_usd` per natural identity + bucket), `prices.usd_reference` / `_1h` (per-bucket XLM/USDC "reference is up at T" signal), and `prices.identity_by_contract` (SAC read-seam resolver) — with the read-time `ok` / `no_asset_price` / `no_reference` status discriminator, caller-owned grain selection, and the load-bearing USDC-issuer literal. Source of truth: `packages/prices-clickhouse/schema/views.sql`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| 2026-06-19 | §1.2, §8.3, §8.5                            | [Task 0063](../../lore/1-tasks/active/0063_FEATURE_provision-prices-db-on-hetzner-ch-self-served/README.md)                                                                                                                                                                                                                                                                                                         | **Sizing + cost-share corrected from measurement.** Fresh 64k-ledger backfill (62016000-62079999) measured **114 MiB / ~1,872 B/ledger**; combined with task 0060's 10k+100k runs the real footprint is **~1.9-3.7 KB/ledger / ~3.5-6 GB/yr** (activity-dependent), superseding the 0046 ~74 B/ledger / ~0.45 GB/yr estimate. Cost-share raised ~$1-2 → **~$8-11/env/mo** (~10-15% pro-rata). Added a shared-vs-dedicated-container cost table; dedicated container ~2× cost **and** breaks BE's in-cluster `price_usd_series` JOIN — shared stays correct. See task 0063 `notes/G-64k-sizing-remeasure.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs      | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                                                                                                                                                                                                                                                      | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| 2026-05-20 | All sections + Appendices A & B             | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md)                                                                                                                                                                                                                                    | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Date       | Sections                                         | Driver                                                                                                                                                                                                                                                                                                                                                                                                              | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-01 | §3.1, §3.2, §3.3, §3.4, §3.9, §3.10, App. A      | [Task 0139](../../lore/1-tasks/active/0139_BUG_current-price-usd-fans-out-on-duplicate-asset-id.md)                                                                                                                                                                                                                                                                                                                 | **`asset_id` is derived by ClickHouse from the identity** — `xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))`, `UInt64`, rendered once by `prices_clickhouse::asset_id`. `assets.asset_id` is `MATERIALIZED` (a writer naming it is refused); candle tiers and `oracle_prices` take the identity in `EPHEMERAL` columns and derive the ids as `DEFAULT` (the rollup MVs and enrichment still copy ids with `INSERT … SELECT`); `current_prices`, `asset_supply` and `asset_metadata` hold plain `UInt64`. A `CHECK` refuses 0 and the id of a blank identity; on `oracle_prices` a blank identity is the REDSTONE sentinel 0. Two identities can no longer share an id, which closes the fan-out of every `asset_id` join.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 2026-09-21 | §3.0 note, §3.6, §3.8 (removed), §13, App. A     | [Task 0256](../../lore/1-tasks/active/0256_BUG_asset-discovery-ledger-scan-never-runs.md)                                                                                                                                                                                                                                                                                                                           | **`prices.discovery_state` removed** together with asset-discovery's ledger scan, which never ran on production. §3.8 is kept as a numbered tombstone so §3.9 onwards do not shift; the table leaves the storage-engine list (§3.0), the §13 at-a-glance table, and App. A's index and ER diagram. `init.sql` no longer creates it — a database created earlier keeps the (always empty) table until an operator drops it. The Asset Discovery Lambda is no longer listed as a `pool_registry` writer (§3.6, §13): the live Ledger Processor maintains that table (task 0291).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 2026-09-17 | §3.6 (`pool_registry`), App. A                   | [Task 0291](../../lore/1-tasks/active/0291_BUG_pool-registry-is-stale-since-the-backfill-ended.md)                                                                                                                                                                                                                                                                                                                  | **`pool_registry` has two new writers.** The live Ledger Processor persists pools it learns from factory events (new rows only), and `events-backfill --discover-pools` fills a range's missing pools. Corrected the Asset Discovery claim: its scan has never run on production (task 0256).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-09-16 | §3.0, §3.2 (DDL + rollup chain), §13, App. A & B | [Task 0286](../../lore/1-tasks/active/0286_BUG_candles-are-built-from-dust-fills-in-the-wrong-order.md) · [ADR 0287](../../lore/2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md)                                                                                                                                                                                                    | **A candle's prices come only from the price-forming trades of its own bucket.** A fill's price is the ratio of the two integer amounts exchanged, so a fill of a few stroops prints an exact small fraction (1/17, 5/34) that is arithmetically right and can sit hundreds of percent off the market; landing last in the bucket it became the `close`, and through the pivot tier the USD reference for every XLM-quoted asset. Added `pf_trade_count` / `pf_volume` / `pf_price_volume` to all seven `price_ohlcv_*` tables (idempotent per-table `ALTER`, DEFAULTs carrying the pre-0286 meaning so history keeps reading as before), and rewrote the rollup sketch to the shipped generator's form: every price aggregate conditional on `t.pf_trade_count > 0`, `close_usd` as the bucket's own close re-priced by the latest priced child's **rate**, both derived Decimals through the never-throwing Float64 conversion, and the **month rolled from the day** (`mv_ohlcv_1d_to_1M`) because a week straddling a month sent the month's close and extremes to whichever month owned that week. Recorded the non-negotiable deploy order (schema → enrichment + sweep + API → MV re-CREATE → ingest **last**) and pointed at the rollout runbook.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 2026-09-14 | §3.2 (USD read-surface views)                    | [Task 0171](../../lore/1-tasks/archive/0171_BUG_price-usd-series-publishes-decimal-min-at-zero-volume.md) · [Task 0198](../../lore/1-tasks/archive/0198_BUG_price-usd-series-raises-on-a-zero-weight-group.md)                                                                                                                                                                                                      | **Zero-weight groups are absent.** `price_usd_series` / `_1h` admit a candle only with `close_usd > 0 AND volume_base > 0`; `usd_reference` / `_1h` only with `close > 0 AND volume_base > 0`. A bucket whose only priced candles carry zero volume has no computable weighted mean and is now a missing row (previously the `CAST` either raised code 349 or published `Decimal128::MIN`, depending on the expression JIT). Read-time classification unchanged: such an asset row reads `no_asset_price`; such a reference bucket reads `no_reference`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 2026-09-01 | §2, §3.0, §3.10a (new), §5, §13, App. A          | [Task 0210](../../lore/1-tasks/active/0210_BUG_soroban-assets-empty-code-in-listing.md)                                                                                                                                                                                                                                                                                                                             | **Added §3.10a `asset_symbol`** — the single-writer table holding a Soroban token's `symbol()`, read over RPC by the asset-discovery worker and composed into the API's `asset_code` / `code` at read time. Documents why the symbol can live in neither `assets.asset_code` (sort-key column of a `ReplacingMergeTree`, so a write adds a second row — task 0139's fan-out) nor `asset_metadata` (whole-row replace, so it would clobber `home_domain` — the task-0067 hazard), and why it is keyed on `contract_address` rather than `asset_id` (10 of the 52 Soroban rows share an `asset_id`). Records two semantics a consumer cannot infer from the DDL: an empty `symbol` is a resolved-as-absent **sentinel**, not missing data, and resolution triggers on absence rather than staleness, so an empty queue is the healthy steady state. Flags that `symbol()` is contract-controlled and therefore not an identity claim, which is why `?search=` and `sort=code` stay on the stored `assets.asset_code`. Extended the §2 engine summary, the §3.0 scope note, the §5 sort-key table, the §13 at-a-glance table, and both Appendix A mermaid blocks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 2026-08-04 | §2, §3.0, §3.5, §3.7–§3.12, §5, §13, App. A      | [Task 0075](../../lore/1-tasks/archive/0075_DOCS_update-db-schema-overview-newer-tables.md) · [Task 0053](../../lore/1-tasks/archive/0053_FEATURE_soroban-amm-backfill-cli-stream-1-impl/README.md) · [Task 0054](../../lore/1-tasks/archive/0054_FEATURE_asset-discovery-lambda-tranche-1-minimal.md) · [Task 0073](../../lore/1-tasks/archive/0073_FEATURE_store-earliest-data-available-in-backfill-progress.md) | **Closed the gap between the doc and `schema/init.sql`.** The overview documented 6 of the 13 `prices.*` tables; it now documents all of them. Added §3.7 `unresolved_pools` (drop-reason alarm table; `still_unresolved` triage semantics), §3.8 `discovery_state` (asset-discovery high-water-mark), §3.9 `asset_metadata` and §3.10 `asset_supply` (the two single-writer splits that keep a full-row-replace RMT re-emit from clobbering enrichment/supply), §3.11 `backfill_sdex_ledgers` (per-ledger done-marks), §3.12 `ingest_cursor` (live resume point; versions on `ledger`, not `updated_at`, so a stray lower write cannot rewind it). Refreshed §3.5 `backfill_progress` with `earliest_data_available` + `newest_data_available` and the covered-time-window semantics (direction-agnostic, unlike `current_ledger`; read O(1), never a live `MIN`/`MAX` scan). Extended the §5 sort-key and §13 at-a-glance tables and the §2 engine summary to match, and made Appendix A live up to its "every table" claim. §3.0 stays core-path-only, now stated explicitly. **Also corrected claims this revision had inherited from `init.sql` comments and older task files, each re-checked against the writers/readers:** `unresolved_pools` is written by the two _backfills_ (`'backfill'` / `'events-backfill'`), never by the live processor — a live unclassified swap leaves no row, so an empty table is not evidence of a healthy live path; unknown supply yields `market_cap_usd = 0`, not `NULL`; `/backfill/status` exposes only `earliest_data_available` and the `?timeframe=all` note reads neither window column; `pool_registry` has a third writer (Asset Discovery); `asset_metadata` is read by `GET /assets` and `GET /assets/{id}`, not by any view; and the `pool_registry → unresolved_pools` ER edge is zero-or-one on the left. Aligned `backfill/dto.rs`'s OpenAPI description of `earliest_data_available` (docs only) with the writer's actual semantics — the DTO had asserted the opposite meaning. |
+| 2026-07-06 | §3.6 (`pool_registry`)                           | [Task 0053](../../lore/1-tasks/active/0053_FEATURE_soroban-amm-backfill-cli-stream-1-impl/README.md) · [Task 0078](../../lore/1-tasks/archive/0078_BUG_live-processor-preload-pool-registry.md)                                                                                                                                                                                                                     | **Explained why `pool_registry` is load-bearing.** Added a `swap`-event anatomy table (three payload shapes: concentrated `amount0`/`amount1`+`sqrt_price_x96`, simple-map `amount_in`/`amount_out`, router/path with embedded token addresses) showing that two of three shapes name no assets at all — so the pool→venue/token/pool-math classification (announced once, in the factory-create event) can only come from the persisted registry, not the swap. Updated the "Read by" line: the live Ledger Processor now preloads the registry at cold start (task 0078, `ClickHouseSink::load_pool_registry`), and noted the Soroswap `/pools` direct seed (task 0079).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 2026-06-22 | §3.2 (`close_usd` col + views), §13              | [Task 0061](../../lore/1-tasks/archive/0061_FEATURE_historical-usd-close-price-series/README.md)                                                                                                                                                                                                                                                                                                                    | **Documented the historical USD close surface.** Added the `close_usd Decimal(38,14) DEFAULT 0` column (`= oracle_usd × close`, baked in at enrichment time) to the `price_ohlcv_*` DDL, and a new §3.2 subsection covering the BE-facing read-surface VIEWs — `prices.price_usd_series` / `_1h` (volume-weighted `close_usd` per natural identity + bucket), `prices.usd_reference` / `_1h` (per-bucket XLM/USDC "reference is up at T" signal), and `prices.identity_by_contract` (SAC read-seam resolver) — with the read-time `ok` / `no_asset_price` / `no_reference` status discriminator, caller-owned grain selection, and the load-bearing USDC-issuer literal. Source of truth: `packages/prices-clickhouse/schema/views.sql`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 2026-06-19 | §1.2, §8.3, §8.5                                 | [Task 0063](../../lore/1-tasks/active/0063_FEATURE_provision-prices-db-on-hetzner-ch-self-served/README.md)                                                                                                                                                                                                                                                                                                         | **Sizing + cost-share corrected from measurement.** Fresh 64k-ledger backfill (62016000-62079999) measured **114 MiB / ~1,872 B/ledger**; combined with task 0060's 10k+100k runs the real footprint is **~1.9-3.7 KB/ledger / ~3.5-6 GB/yr** (activity-dependent), superseding the 0046 ~74 B/ledger / ~0.45 GB/yr estimate. Cost-share raised ~$1-2 → **~$8-11/env/mo** (~10-15% pro-rata). Added a shared-vs-dedicated-container cost table; dedicated container ~2× cost **and** breaks BE's in-cluster `price_usd_series` JOIN — shared stays correct. See task 0063 `notes/G-64k-sizing-remeasure.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs           | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                                                                                                                                                                                                                                                      | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 2026-05-20 | All sections + Appendices A & B                  | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md)                                                                                                                                                                                                                                    | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ---
 
@@ -144,16 +149,16 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 
 ## 2. Database Tech Stack
 
-| Component              | Technology                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Storage engines        | `ReplacingMergeTree(version)` for OHLCV and `unresolved_pools`; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `asset_metadata` / `backfill_progress` / `pool_registry` / `discovery_state`; `ReplacingMergeTree(fetched_at)` for `asset_supply` / `asset_symbol`; `ReplacingMergeTree(ledger)` for `ingest_cursor` (highest-ledger-wins, §3.12); bare `ReplacingMergeTree` for `oracle_prices` / `backfill_sdex_ledgers`; `ReplacingMergeTree(version)` for `usd_rate` |
-| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                                                                                                                                                                                                                                                                                                                                                    |
-| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                                                                                                                                                                                                                                                                                                                                                  |
-| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                                                                                                                                                                                                                                                                                                                                                |
-| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                                                                                                                                                                                                                                                                                                                                                  |
-| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes                                                                                                                                                                                                                                                                                                                                   |
-| Credentials            | AWS Secrets Manager — per-env client `{cert,key,ca}` as a single JSON bundle secret per identity (one secret per identity per env, named by `MTLS_SECRET_NAME`; ADR 0007 / task 0063)                                                                                                                                                                                                                                                                                                       |
+| Component              | Technology                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                                                                                                                                                                                                                                                                                                                                    |
+| Storage engines        | `ReplacingMergeTree(version)` for OHLCV and `unresolved_pools`; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `asset_metadata` / `backfill_progress` / `pool_registry`; `ReplacingMergeTree(fetched_at)` for `asset_supply` / `asset_symbol`; `ReplacingMergeTree(ledger)` for `ingest_cursor` (highest-ledger-wins, §3.12); bare `ReplacingMergeTree` for `oracle_prices` / `backfill_sdex_ledgers`; `ReplacingMergeTree(version)` for `usd_rate` |
+| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                                                                                                                                                                                                                                                                                                                                |
+| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                                                                                                                                                                                                                                                                                                                              |
+| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                                                                                                                                                                                                                                                                                                                            |
+| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                                                                                                                                                                                                                                                                                                                              |
+| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes                                                                                                                                                                                                                                                                                                               |
+| Credentials            | AWS Secrets Manager — per-env client `{cert,key,ca}` as a single JSON bundle secret per identity (one secret per identity per env, named by `MTLS_SECRET_NAME`; ADR 0007 / task 0063)                                                                                                                                                                                                                                                                                   |
 
 **Why ClickHouse on a BE-shared cluster (ADR 0007):**
 
@@ -210,7 +215,7 @@ erDiagram
     price_ohlcv_1w  ||--o{ price_ohlcv_1M : "MV: 1w → 1M"
 
     assets {
-        UInt32         asset_id PK "app-assigned surrogate"
+        UInt64         asset_id PK "MATERIALIZED xxh3 of the identity"
         FixedString12  asset_code
         Enum8          asset_type "classic | soroban"
         FixedString56  issuer_address "G-address, empty for XLM"
@@ -225,8 +230,8 @@ erDiagram
 
     price_ohlcv_1m {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id
-        UInt32             quote_asset_id "ADR 0003 — PK includes quote leg"
+        UInt64             asset_id "DEFAULT xxh3 of the EPHEMERAL base identity"
+        UInt64             quote_asset_id "ADR 0003 — PK includes quote leg"
         LowCardinality_S   source "sdex|soroswap|aquarius|phoenix|..."
         Decimal_38_14      open
         Decimal_38_14      high
@@ -237,13 +242,16 @@ erDiagram
         Decimal_38_14      vwap "single-source bucket VWAP"
         UInt32             trade_count
         UInt64             version "ledger seq × 1000 + intra-ledger order"
+        UInt32             pf_trade_count "fills that formed the price; 0 = no price"
+        Decimal_38_14      pf_volume "base volume of those fills"
+        Decimal_38_14      pf_price_volume "Σ price × volume_base of those fills"
         ENGINE             engine "ReplacingMergeTree(version)"
         PARTITION_BY       partition "toYYYYMM(timestamp)"
         ORDER_BY           sort_key "asset_id, quote_asset_id, source, timestamp"
     }
 
     current_prices {
-        UInt32             asset_id "natural FK to assets (logical)"
+        UInt64             asset_id "natural FK to assets (logical)"
         Decimal_38_14      price_usd
         Decimal_38_14      price_xlm
         Decimal_10_4       change_24h_pct
@@ -259,7 +267,7 @@ erDiagram
 
     oracle_prices {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id
+        UInt64             asset_id "DEFAULT xxh3 of the identity; 0 = no asset"
         LowCardinality_S   oracle_name "reflector|chainlink|redstone|band"
         Decimal_38_14      price_usd
         String             raw_data "JSON blob, unparsed"
@@ -303,7 +311,7 @@ erDiagram
 
 > **Scope of this diagram.** §3.0 shows the **core** price-path tables only.
 > The registry, bookkeeping, and enrichment side tables — `pool_registry`
-> (§3.6), `unresolved_pools` (§3.7), `discovery_state` (§3.8), `asset_metadata`
+> (§3.6), `unresolved_pools` (§3.7), `asset_metadata`
 > (§3.9), `asset_supply` (§3.10), `asset_symbol` (§3.10a),
 > `backfill_sdex_ledgers` (§3.11), and
 > `ingest_cursor` (§3.12) — are omitted here to keep the price path legible.
@@ -335,7 +343,7 @@ SEP-41 contract deployments and UPSERTs into this table.
 
 ```sql
 CREATE TABLE prices.assets (
-    asset_id         UInt32,            -- application-assigned surrogate id
+    asset_id         UInt64 MATERIALIZED xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)),  -- task 0139
     asset_code       FixedString(12),
     asset_type       Enum8('classic' = 1, 'soroban' = 2),
     issuer_address   FixedString(56),   -- G-address; empty string for XLM
@@ -353,10 +361,13 @@ SETTINGS index_granularity = 8192;
 
 **Notes:**
 
-- `asset_id` is an **application-assigned surrogate** (a small `UInt32` counter
-  materialised in the prices-api write path), not the asset's on-chain identity.
-  ClickHouse does not have `SERIAL` / sequences — the writer assigns the next
-  unused id on UPSERT against the natural key tuple.
+- `asset_id` is **derived by ClickHouse from the natural key** (task 0139):
+  `xxh3` of `code:issuer:contract`, case preserved, absent fields empty (native
+  XLM is `XLM::`). It is `MATERIALIZED`, so no writer sends it and a writer that
+  names it is refused, and `CHECK asset_id_derived` refuses 0 and the id of a
+  blank identity. Two identities cannot share an id, so `assets FINAL` holds one
+  row per id. The id it replaced was a `UInt32` counter in each writer process,
+  which collided when two writers ran at once (3,315 ids on 2026-09-30).
 - `issuer_address` is empty (zero-padded `FixedString(56)`) for XLM (the
   native asset). `FixedString(56)` is preferred over `String` for fixed-width
   strkeys because it stores in column-store as fixed-width slots, with better
@@ -413,8 +424,11 @@ design.
 ```sql
 CREATE TABLE prices.price_ohlcv_1m (
     timestamp        DateTime CODEC(DoubleDelta),
-    asset_id         UInt32,
-    quote_asset_id   UInt32,                  -- ADR 0003: PK includes the quote leg
+    -- Task 0139: derived from the EPHEMERAL identities below; DEFAULT, not
+    -- MATERIALIZED, because the MVs and enrichment copy ids between tiers.
+    asset_id         UInt64 DEFAULT xxh3(concat(base_code, ':', base_issuer, ':', base_contract)),
+    quote_asset_id   UInt64 DEFAULT xxh3(concat(quote_code, ':', quote_issuer, ':', quote_contract)),
+                                              -- ADR 0003: PK includes the quote leg
     source           LowCardinality(String),  -- 'sdex', 'soroswap', 'aquarius', 'phoenix', ...
     open             Decimal(38, 14),
     high             Decimal(38, 14),
@@ -438,9 +452,38 @@ CREATE TABLE prices.price_ohlcv_1m (
                                                -- see §5.5 of the main overview
                                                -- for cross-source weighting
     trade_count      UInt32 DEFAULT 0,
-    version          UInt64                   -- monotonic per-row version for
+    version          UInt64,                  -- monotonic per-row version for
                                                -- ReplacingMergeTree (ledger_seq × 1000
                                                -- + intra-ledger order)
+    -- Task 0286 / ADR 0287. A fill's price is the ratio of the two integer
+    -- amounts exchanged, so a fill of a few stroops prints an exact small
+    -- fraction (1/17, 5/34) that is arithmetically right and can sit hundreds
+    -- of percent off the market. Such a fill is NOT price-forming, and
+    -- open/high/low/close come only from the ones that are. These three columns
+    -- are what every consumer — the rollup MVs, the enrichment worker, /ohlcv —
+    -- reads to tell one case from the other.
+    -- A fill whose price falls below the PRECISION FLOOR of 1e-12 — a hundred
+    -- ticks of Decimal(38, 14) — forms no price either: below that line a
+    -- stored value is quantisation noise, not a measurement. The same floor is
+    -- the gate on every coarse aggregate below and on the /ohlcv read path.
+    pf_trade_count   UInt32          DEFAULT trade_count,   -- 0 = the bucket
+                                               -- traded and formed no price;
+                                               -- its price fields are 0
+    pf_volume        Decimal(38, 14) DEFAULT volume_base,   -- Σ volume_base of
+                                               -- the price-forming fills
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote,  -- Σ price × volume_base
+                                               -- of those fills; the ratio of
+                                               -- the two is the price-forming
+                                               -- VWAP /ohlcv publishes
+    -- Task 0139: what the ingest writer sends instead of ids. Not stored.
+    base_code        String EPHEMERAL,
+    base_issuer      String EPHEMERAL,
+    base_contract    String EPHEMERAL,
+    quote_code       String EPHEMERAL,
+    quote_issuer     String EPHEMERAL,
+    quote_contract   String EPHEMERAL,
+    CONSTRAINT asset_ids_derived CHECK asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', ''))
+        AND quote_asset_id != 0 AND quote_asset_id != xxh3(concat('', ':', '', ':', ''))
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -455,6 +498,25 @@ CREATE TABLE prices.price_ohlcv_1d  AS prices.price_ohlcv_1m;
 CREATE TABLE prices.price_ohlcv_1w  AS prices.price_ohlcv_1m;
 CREATE TABLE prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
 ```
+
+> **The three `pf_*` columns are added by an idempotent `ALTER TABLE … ADD
+COLUMN IF NOT EXISTS` per table, not inherited.** `CREATE TABLE … AS` copies
+> the shape at creation time, so a post-hoc `ALTER` of `price_ohlcv_1m` does
+> **not** reach the six rolled-up tables — the same pattern `close_usd` already
+> follows. `init.sql` therefore carries seven ALTERs, one per grain, and
+> re-applying it is a no-op.
+>
+> Their DEFAULT expressions are the **pre-0286 meaning**, not a placeholder: a
+> row written before the migration read back as "every fill formed a price",
+> which is exactly what the old definition asserted. History is not re-rolled in
+> phase 1; the columns become load-bearing on rows the new ingest writes.
+>
+> **Deploy order is not negotiable:** schema → enrichment + coarse sweep +
+> prices-api → the MV re-CREATE → **ingest last**. A pre-0286 MV meeting a
+> post-0286 ingest turns a dust-only minute into a zero `low` across the whole
+> coarse bucket, and pre-0286 enrichment re-inserts rows without the `pf_*`
+> columns, which then silently take their DEFAULTs. The procedure is
+> [`docs/runbooks/0286-candle-definitions-rollout.md`](../runbooks/0286-candle-definitions-rollout.md).
 
 **Sort key:** `(asset_id, quote_asset_id, source, timestamp)` — places the
 join-cardinality-low columns first so per-(asset, quote, source) time-series
@@ -514,34 +576,70 @@ the chain by construction and there is no partial-block under-count.
 
 Sketch DDL for the first step; the others mirror the same pattern with
 different `toStartOfInterval` durations and source/target table names (each
-reads the _previous_ granularity `FINAL`):
+reads the _previous_ granularity `FINAL`). All six are **rendered by one Rust
+generator**, `packages/prices-clickhouse/src/rollup_sql.rs`, which also renders
+`preroll.sql` and `preroll-live-gap.sql`; unit tests assert each shipped file
+equals that rendering whitespace-normalised, so the three cannot drift apart:
 
 ```sql
-CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m
-REFRESH EVERY 1 MINUTE                    -- coarser grains refresh less often
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1m_to_15m
+REFRESH EVERY 1 MINUTE APPEND             -- coarser grains refresh less often
 TO prices.price_ohlcv_15m AS
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
-    asset_id,
-    quote_asset_id,
-    source,
-    argMin(open,  t.timestamp)      AS open,    -- qualified: the AS-timestamp
-    max(high)                        AS high,   -- alias shadows the source column
-    min(low)                         AS low,
-    argMax(close, t.timestamp)       AS close,
-    sum(volume_base)                 AS volume_base,
-    sum(volume_quote)                AS volume_quote,
-    sum(volume_quote_usd)            AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0) AS vwap,   -- ref aliases, never re-sum(…)
-    sum(trade_count)                 AS trade_count,
-    max(version)                     AS version
+    asset_id, quote_asset_id, source,
+    -- ADR 0287: a candle's prices come only from the PRICE-FORMING trades of
+    -- its own bucket, so one level up every price aggregate is conditional on
+    -- the child having had one. A dust-only child reaches none of them; before
+    -- task 0286 it was the `min(low)` of its bucket and, landing last, the
+    -- close. A bucket with no price-forming child matches nothing, and each
+    -- conditional aggregate returns the type default 0 — the same "no price"
+    -- encoding the 1m tier writes.
+    -- ⚠️ BOTH terms: a row written before task 0286 reads pf_trade_count from
+    -- its DEFAULT (trade_count), so it can claim to be price-forming with a
+    -- stored price of 0 — or of a few ticks, which is the same quantisation
+    -- noise. The floor (1e-12, the same one the ingest and /ohlcv use) is what
+    -- keeps such a row out until the phase-3 re-ingest replaces it.
+    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14))                  AS high,
+    minIf(t.low,  t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14))                  AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base)      AS volume_base,      -- volume and counts are summed
+    sum(t.volume_quote)     AS volume_quote,     -- over EVERY child, dust
+    sum(t.volume_quote_usd) AS volume_quote_usd, -- included: it traded
+    -- close_usd is this bucket's OWN close re-priced by the latest priced
+    -- child's RATE, never a carried product — that is what keeps `close` and
+    -- `close_usd` on the same sub-bucket (ADR 0287 §5). A child lends its rate
+    -- only if BOTH legs clear the 1e-12 precision floor: a ratio of two values a
+    -- few ticks wide (prod: 5e-14 / 4e-14) is quantisation noise, not a rate.
+    ifNull(toDecimal128OrZero(toString(toFloat64(close)
+        * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp,
+                   t.close_usd >= toDecimal128('0.000000000001', 14)
+                   AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    -- Both derived Decimals go through toDecimal128OrZero(toString(Float64)):
+    -- Decimal division SILENTLY overflows past a ~1.7e10 dividend on 26.3.10.60
+    -- (no exception, a wrong number) and divideDecimal throws on a zero divisor.
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote)
+        / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count)     AS trade_count,
+    sum(t.version)         AS version,           -- strictly increasing; see below
+    sum(t.pf_trade_count)  AS pf_trade_count,
+    sum(t.pf_volume)       AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1m AS t FINAL          -- post-dedup, post-enrichment
-WHERE t.timestamp >= now() - INTERVAL 2 HOUR   -- bounded re-scan; widen for coarse grains
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 2 HOUR, INTERVAL 15 MINUTE)
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
--- Repeat for 15m → 1h, 1h → 4h, 4h → 1d, 1d → 1w, 1w → 1M — each FROM the
--- previous granularity FINAL.
+-- Repeat for 15m → 1h, 1h → 4h, 4h → 1d — each FROM the previous granularity
+-- FINAL — then 1d → 1w AND 1d → 1M.
 ```
+
+> **The month rolls from the DAY, not the week** (`mv_ohlcv_1d_to_1M`, task
+> 0286). A week is attributed wholly to the month it _starts_ in, so a
+> week-fed month took its close and extremes from whichever month owned the
+> straddling week: a month whose 1st is not a Monday lost its first days to the
+> previous month and gained the previous month's tail. Re-creating that view is
+> the one rollout step that also TRUNCATEs and re-rolls its target.
 
 Two correctness points task 0059 established (both required of the final DDL):
 
@@ -645,11 +743,31 @@ asset-id reassignment.
 | `prices.usd_reference_1h`     | hourly | `xlm_usd` per hour bucket                       | hourly companion to the above                                                                                    |
 | `prices.identity_by_contract` | —      | contract → natural identity                     | SAC read-seam resolver (§12.4): map a Soroban-DEX pool leg's contract address to the natural identity to look up |
 
+> ⚠️ **The peg fill in both `price_usd_series` views admits an IMPORTED rate**
+> (task 0267). `usd_rate` rows with `method = 'external'` — task 0265's composed
+> USDC/USD history, loaded by `load-external-rate` — count as a measurement
+> alongside `method = 'oracle'`, and where one bucket holds both, **oracle wins
+> outright** by the rank-first `argMax` tuple, never by recency. `rate_method`
+> on the view says which won, so a TVL computation can tell an imported rate
+> from a polled one.
+>
+> ⚠️ These views bucket an imported row exactly like a poll. `/v1/assets/{id}/ohlcv`
+> additionally treats a **lone daily** imported row as valid for its whole UTC
+> day, as a safety net for a daily-only load. The loader runs at **both** grains
+> (`--grain daily|hourly`) and production carries an imported row for every hour
+> of every covered day, so the two surfaces agree; the net is observable only if
+> someone loads the daily file without the hourly one. See the comment block
+> above the rate join in `views.sql`.
+
 ```sql
 -- One volume-weighted USD close per (natural identity, day bucket). The
 -- cross-source/cross-quote collapse: volume-weighted close_usd over every candle
 -- of the asset in the bucket (ADR 0004 per-source rows merge at read time). Only
--- priced rows (close_usd > 0). _1h is identical but reads price_ohlcv_1h.
+-- priced rows that carry weight (close_usd > 0 AND volume_base > 0, task 0171).
+-- _1h is identical but reads price_ohlcv_1h.
+--
+-- ⚠️ Snippet predates the peg-fill arm B (task 0165) and the method column;
+-- the source of truth is packages/prices-clickhouse/schema/views.sql.
 CREATE OR REPLACE VIEW prices.price_usd_series AS
 SELECT
     multiIf(
@@ -664,7 +782,7 @@ SELECT
          / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
 FROM prices.price_ohlcv_1d AS p FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE p.close_usd > 0
+WHERE p.close_usd > 0 AND p.volume_base > 0
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
 -- The XLM/USDC volume-weighted close (XLM's USD price under the USDC≡$1 peg) per
@@ -681,7 +799,7 @@ INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
 WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
   AND quote.asset_code = 'USDC'
   AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-  AND p.close > 0
+  AND p.close > 0 AND p.volume_base > 0
 GROUP BY p.timestamp;
 ```
 
@@ -696,6 +814,19 @@ dropped row. For a lookup of (identity I, bucket T), the consumer LEFT JOINs
   reference is up; partial TVL is valid).
 - `no_reference` — (I, T) absent **and** `usd_reference` has no bucket T
   (systemic blackout — every XLM-pivot asset is NULL).
+
+**A second reason for absence (tasks 0171 / 0198, 2026-09-14).** Both views
+are volume-weighted means, so a bucket whose only priced candles carry
+`volume_base = 0` has no computable value and is **absent**, not published.
+Arm A of `price_usd_series` / `_1h` admits a candle only with
+`close_usd > 0 AND volume_base > 0`; `usd_reference` / `_1h` only with
+`close > 0 AND volume_base > 0`. The classification above is unchanged — an
+asset row missing for this reason reads `no_asset_price`, a reference bucket
+missing for this reason reads `no_reference` — and neither view can publish a
+non-positive `close_usd` / `xlm_usd`. (Before this, the `CAST` over the
+zero-weight group either raised code 349 or published `Decimal128::MIN`
+≈ −1.7e24 flagged `traded`, depending on the ClickHouse expression JIT.)
+Measured on prod on 2026-09-14: no such bucket exists on either grain.
 
 **Grain ownership.** Grain selection is the **caller's** — the consumer JOINs
 whichever grain (`_1h` vs daily) its query needs; the views stay a dumb, fast,
@@ -719,7 +850,7 @@ read path).
 
 ```sql
 CREATE TABLE prices.current_prices (
-    asset_id         UInt32,
+    asset_id         UInt64,
     price_usd        Decimal(38, 14),
     price_xlm        Decimal(38, 14),
     change_24h_pct   Decimal(10, 4),
@@ -831,10 +962,15 @@ asset X"; use `FINAL` (or rely on background merges) for the collapsed view.
 ```sql
 CREATE TABLE prices.oracle_prices (
     timestamp     DateTime CODEC(DoubleDelta),
-    asset_id      UInt32,
+    -- Task 0139: derived from the EPHEMERAL identity; a blank one (REDSTONE,
+    -- a feed with no asset) is the sentinel 0.
+    asset_id      UInt64 DEFAULT if(concat(asset_code, ':', issuer_address, ':', contract_address) = '::', 0, xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))),
     oracle_name   LowCardinality(String),  -- 'reflector', 'chainlink', 'redstone', 'band'
     price_usd     Decimal(38, 14),
-    raw_data      String                   -- JSON blob, unparsed for forensic value
+    raw_data      String,                  -- JSON blob, unparsed for forensic value
+    asset_code       String EPHEMERAL,
+    issuer_address   String EPHEMERAL,
+    contract_address String EPHEMERAL
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)
@@ -877,7 +1013,7 @@ CREATE TABLE prices.usd_rate (
     contract_address  String,
     timestamp         DateTime CODEC(DoubleDelta),
     usd_rate          Decimal(38, 14),
-    method            LowCardinality(String),  -- 'oracle'|'peg'|'pivot'|'pivot2'
+    method            LowCardinality(String),  -- 'oracle'|'external'|'peg'|'pivot'|'pivot2'
     reference_asset   String   DEFAULT '',     -- what it pivoted through
     hops              UInt8    DEFAULT 0,      -- 0 oracle/peg, 1 XLM pivot, 2 hop
     version           UInt64
@@ -895,7 +1031,8 @@ genuine `asset_id` collisions between unrelated assets — measured 2026-08-10 a
 why the population step guards the `asset_id` → identity translation in **both**
 directions and refuses to write when ambiguous: `oracle_prices` is
 `asset_id`-keyed and this table is not, so the copy is the one place the two key
-spaces meet.
+spaces meet. Since 0139 derives the id from the identity, the ambiguity cannot
+be stored; the guard stays as a cheap assertion.
 
 ⚠️ **`method` is part of the sorting key, deliberately.** `ReplacingMergeTree`
 dedups on the sorting key, so without it a `'pivot'` estimate written at the same
@@ -918,6 +1055,19 @@ row**, and the consumer's own peg fallback applies. Synthetic `method = 'peg'`
 rows at `$1` are deliberately **not** written — that would make a fallback
 indistinguishable from a measurement, which is the `close_usd = 0` mistake in a
 new place.
+
+That prohibition stands, and `method = 'external'` does **not** relax it. An
+imported measurement is not a synthetic fill: an `external` row (task 0267) says
+an outside USD series _observed_ this rate at this instant — on 2023-03-11 it
+says **0.9681**, which no `$1` fill could ever say. What the rule forbids is
+inventing a value, not sourcing one elsewhere, so `external` is allowed to reach
+into the deep history a `peg` fill may not. It keeps a word of its own rather
+than riding `oracle` because task 0247 forbids publishing an import as a poll.
+
+⚠️ **`'assumed-par'` is not in this enum and must not be added.** It exists only
+on the `/ohlcv` wire, where task 0268 derives it at read time from a candle's
+`close_usd = close` signature to say "the literal 1.0 was the input". A row here
+asserting that would be exactly the synthetic fill forbidden above.
 
 **Population.** Written by the **Oracle Fetcher** Lambda immediately after it
 writes `oracle_prices`, copying peg-asset observations (USDC/USDT) as
@@ -1083,9 +1233,14 @@ idempotent — `ReplacingMergeTree(updated_at)` on `contract_id` collapses
 re-runs); can also be seeded directly from the Soroswap `/pools` API by the
 `pool-registry-seed` tool (task 0079, see
 [runbook](../runbooks/seed-pool-registry.md)) as a fast alternative to a full
-ledger replay. The **Asset Discovery Lambda** is a third writer, re-emitting
-discovered pools on its hourly scan — relevant to anyone reasoning about which
-components can collapse a row on this RMT. **Read by:** `sdex-backfill` at run
+ledger replay. The **live Ledger Processor** writes the pools it learns from
+factory events — only rows not already in the table, before its cursor passes
+the factory event (task 0291). Until then it only read the table, so the table
+stopped growing when the history backfill ended (2026-07-06) and every cold
+start forgot newer pools. `events-backfill --discover-pools` fills a range's
+missing pools from BE's `soroban_events` (task 0291, see the runbook). The
+**Asset Discovery Lambda** was designed as another writer, but its ledger scan
+never ran on production and task 0256 removed it. **Read by:** `sdex-backfill` at run
 start (preload, so a post-activation window still resolves earlier-created
 pools; empty table on a fresh full run) and the **live Ledger Processor** at
 cold start (task 0078 —
@@ -1190,31 +1345,17 @@ unclassified swap is **dropped silently, leaving no row here**.
 
 ---
 
-### 3.8 `prices.discovery_state` — Asset-discovery high-water-mark (task 0054)
+### 3.8 `prices.discovery_state` — removed (task 0256)
 
-One row per worker holding the highest ledger sequence the hourly asset-discovery
-scan has processed, so the next invocation resumes at `last_ledger + 1` instead
-of re-scanning from the beginning.
+The cursor of asset-discovery's hourly ledger scan (task 0054). The scan never
+ran on production — its activation was a manual deploy step nobody performed —
+and task 0256 removed it: the live Ledger Processor registers new assets as it
+ingests and persists AMM pools as it learns them (task 0291), so a second reader
+of the same ledgers had nothing left to find. `init.sql` no longer creates the
+table. The section number is kept so §3.9 onwards do not shift.
 
-```sql
-CREATE TABLE prices.discovery_state (
-    worker        LowCardinality(String),   -- 'asset-discovery'
-    last_ledger   UInt64,                   -- highest ledger sequence scanned
-    updated_at    DateTime DEFAULT now()    -- RMT version
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (worker)
-SETTINGS index_granularity = 8192;
-```
-
-**Single-writer** by design — only the asset-discovery worker writes here, so the
-`ReplacingMergeTree` row has no second writer to clobber it. Read with `FINAL`.
-The `worker` key means additional scan workers can be added later without a
-schema change: each gets its own row.
-
-Compare with `prices.ingest_cursor` (§3.12), which solves the same
-resume-where-you-left-off problem for the **live candle path** but versions on
-`ledger` rather than `updated_at` so a stray lower write cannot rewind it.
+⚠️ `init.sql` never drops anything, so a database created before the removal
+still has the (always empty) table until an operator drops it.
 
 ---
 
@@ -1226,7 +1367,7 @@ Processor and the discovery worker).
 
 ```sql
 CREATE TABLE prices.asset_metadata (
-    asset_id     UInt32,
+    asset_id     UInt64,
     home_domain  String DEFAULT '',
     updated_at   DateTime DEFAULT now()    -- RMT version
 )
@@ -1263,7 +1404,7 @@ as §3.9: supply is slow (hourly) and price is fast (per-minute), so sharing a
 
 ```sql
 CREATE TABLE prices.asset_supply (
-    asset_id      UInt32,
+    asset_id      UInt64,
     token_supply  Decimal(38, 14),
     fetched_at    DateTime DEFAULT now()   -- RMT version
 )
@@ -1514,7 +1655,6 @@ data by orders of magnitude without the per-row cost of B-tree indexes.
 | `prices.backfill_progress`                         | `(task_name)`                                    | —                                | One row per backfill stream                                                         |
 | `prices.pool_registry`                             | `(contract_id)`                                  | — (small table, no partitioning) | One row per discovered AMM pool; load/preload by contract                           |
 | `prices.unresolved_pools`                          | `(contract_id, source)`                          | — (small table, no partitioning) | One row per unclassified contract per backfill (`'backfill'` / `'events-backfill'`) |
-| `prices.discovery_state`                           | `(worker)`                                       | —                                | One row per scan worker; resume high-water-mark                                     |
 | `prices.asset_metadata`                            | `(asset_id)`                                     | — (small table, no partitioning) | One row per asset; enrichment `LEFT JOIN` target                                    |
 | `prices.asset_supply`                              | `(asset_id)`                                     | — (small table, no partitioning) | One row per asset; supply `LEFT JOIN` for `market_cap_usd`                          |
 | `prices.asset_symbol`                              | `(contract_address)`                             | — (small table, no partitioning) | One row per Soroban contract; symbol `LEFT JOIN` for the displayed `asset_code`     |
@@ -2209,23 +2349,22 @@ criteria from the delivery plan, restated against the canonical
 
 ## 13. Quick Reference — Tables at a Glance
 
-| Table                                                                              | Engine                           | Partitioning          | Sort key                                         | Written by                                                                                                                | Read by                                                                                         |
-| ---------------------------------------------------------------------------------- | -------------------------------- | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `prices.assets`                                                                    | `ReplacingMergeTree(updated_at)` | none                  | `(asset_code, issuer_address, contract_address)` | Asset Discovery Lambda; Prices Ledger Processor (inline)                                                                  | All asset/price endpoints                                                                       |
-| `prices.price_ohlcv_1m`                                                            | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION) | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities       |
-| `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M`                   | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | MV chain on `_1m`; backfill streams (for pre-rolled ranges)                                                               | `GET /ohlcv` (rolled granularities)                                                             |
-| `prices.current_prices`                                                            | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Current Price Updater Lambda                                                                                              | `GET /assets`, `GET /price`, `POST /prices/batch`                                               |
-| `prices.oracle_prices`                                                             | `ReplacingMergeTree`             | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                    | `GET /oracles/{asset}`                                                                          |
-| `prices.backfill_progress`                                                         | `ReplacingMergeTree(updated_at)` | none                  | `(task_name)`                                    | Backfill cloud-push step — one row per stream                                                                             | `GET /backfill/status`; `?timeframe=all` backfill note                                          |
-| `prices.pool_registry`                                                             | `ReplacingMergeTree(updated_at)` | none                  | `(contract_id)`                                  | `sdex-backfill` CLI at run end; `pool-registry-seed` tool (task 0079); Asset Discovery Lambda (hourly)                    | `sdex-backfill` at run start; live Ledger Processor at cold start (task 0078)                   |
-| `prices.unresolved_pools`                                                          | `ReplacingMergeTree(version)`    | none                  | `(contract_id, source)`                          | `sdex-backfill` CLI; `events-backfill` CLI — backfills only, **not** the live processor (§3.7)                            | Operators (backfill triage) — no endpoint                                                       |
-| `prices.discovery_state`                                                           | `ReplacingMergeTree(updated_at)` | none                  | `(worker)`                                       | Asset Discovery worker (sole writer)                                                                                      | Asset Discovery worker at next invocation                                                       |
-| `prices.asset_metadata`                                                            | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Discovery/enrichment worker (sole writer)                                                                                 | `GET /assets`, `GET /assets/{id}` — API queries `LEFT JOIN` it on `asset_id` (no view reads it) |
-| `prices.asset_supply`                                                              | `ReplacingMergeTree(fetched_at)` | none                  | `(asset_id)`                                     | Supply worker (sole writer, hourly)                                                                                       | `current_prices` path, via `LEFT JOIN` for `market_cap_usd`                                     |
-| `prices.asset_symbol`                                                              | `ReplacingMergeTree(fetched_at)` | none                  | `(contract_address)`                             | Asset Discovery worker, symbol stage (sole writer, hourly)                                                                | `GET /assets`, `GET /assets/{id}` — composed into `asset_code` at read time (§3.10a)            |
-| `prices.backfill_sdex_ledgers`                                                     | `ReplacingMergeTree()`           | none                  | `(sequence)`                                     | SDEX backfill stream — one row per processed ledger                                                                       | SDEX backfill at startup (skip already-done ledgers)                                            |
-| `prices.ingest_cursor`                                                             | `ReplacingMergeTree(ledger)`     | none                  | `(id)`                                           | Ledger Processor reconcile loop (written last each run)                                                                   | Ledger Processor at cold start                                                                  |
-| `prices.price_usd_series` / `_1h`, `usd_reference` / `_1h`, `identity_by_contract` | `VIEW` (plain, derived)          | none (read-through)   | n/a (defined over `price_ohlcv_1d` / `_1h`)      | n/a — derived at read time from `close_usd` / `close` on the OHLCV tables (task 0061)                                     | BE historical USD close series (BE task 0199); `price_usd_at` endpoint (task 0040)              |
+| Table                                                                              | Engine                           | Partitioning          | Sort key                                         | Written by                                                                                                                                                               | Read by                                                                                         |
+| ---------------------------------------------------------------------------------- | -------------------------------- | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `prices.assets`                                                                    | `ReplacingMergeTree(updated_at)` | none                  | `(asset_code, issuer_address, contract_address)` | Asset Discovery Lambda; Prices Ledger Processor (inline)                                                                                                                 | All asset/price endpoints                                                                       |
+| `prices.price_ohlcv_1m`                                                            | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION)                                                | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities       |
+| `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M`                   | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | MV chain on `_1m` (`_1M` rolls from `_1d`, not `_1w` — task 0286); backfill streams (for pre-rolled ranges)                                                              | `GET /ohlcv` (rolled granularities)                                                             |
+| `prices.current_prices`                                                            | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Current Price Updater Lambda                                                                                                                                             | `GET /assets`, `GET /price`, `POST /prices/batch`                                               |
+| `prices.oracle_prices`                                                             | `ReplacingMergeTree`             | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                                                                   | `GET /oracles/{asset}`                                                                          |
+| `prices.backfill_progress`                                                         | `ReplacingMergeTree(updated_at)` | none                  | `(task_name)`                                    | Backfill cloud-push step — one row per stream                                                                                                                            | `GET /backfill/status`; `?timeframe=all` backfill note                                          |
+| `prices.pool_registry`                                                             | `ReplacingMergeTree(updated_at)` | none                  | `(contract_id)`                                  | `sdex-backfill` CLI at run end; `pool-registry-seed` tool (task 0079); live Ledger Processor, new pools only (task 0291); `events-backfill --discover-pools` (task 0291) | `sdex-backfill` at run start; live Ledger Processor at cold start (task 0078)                   |
+| `prices.unresolved_pools`                                                          | `ReplacingMergeTree(version)`    | none                  | `(contract_id, source)`                          | `sdex-backfill` CLI; `events-backfill` CLI — backfills only, **not** the live processor (§3.7)                                                                           | Operators (backfill triage) — no endpoint                                                       |
+| `prices.asset_metadata`                                                            | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Discovery/enrichment worker (sole writer)                                                                                                                                | `GET /assets`, `GET /assets/{id}` — API queries `LEFT JOIN` it on `asset_id` (no view reads it) |
+| `prices.asset_supply`                                                              | `ReplacingMergeTree(fetched_at)` | none                  | `(asset_id)`                                     | Supply worker (sole writer, hourly)                                                                                                                                      | `current_prices` path, via `LEFT JOIN` for `market_cap_usd`                                     |
+| `prices.asset_symbol`                                                              | `ReplacingMergeTree(fetched_at)` | none                  | `(contract_address)`                             | Asset Discovery worker, symbol stage (sole writer, hourly)                                                                                                               | `GET /assets`, `GET /assets/{id}` — composed into `asset_code` at read time (§3.10a)            |
+| `prices.backfill_sdex_ledgers`                                                     | `ReplacingMergeTree()`           | none                  | `(sequence)`                                     | SDEX backfill stream — one row per processed ledger                                                                                                                      | SDEX backfill at startup (skip already-done ledgers)                                            |
+| `prices.ingest_cursor`                                                             | `ReplacingMergeTree(ledger)`     | none                  | `(id)`                                           | Ledger Processor reconcile loop (written last each run)                                                                                                                  | Ledger Processor at cold start                                                                  |
+| `prices.price_usd_series` / `_1h`, `usd_reference` / `_1h`, `identity_by_contract` | `VIEW` (plain, derived)          | none (read-through)   | n/a (defined over `price_ohlcv_1d` / `_1h`)      | n/a — derived at read time from `close_usd` / `close` on the OHLCV tables (task 0061)                                                                                    | BE historical USD close series (BE task 0199); `price_usd_at` endpoint (task 0040)              |
 
 ---
 
@@ -2269,7 +2408,7 @@ erDiagram
     pool_registry |o--o{ unresolved_pools : "contract_id — NO registry row at drop time (negative space)"
 
     assets {
-        UInt32         asset_id PK "application-assigned surrogate"
+        UInt64         asset_id PK "MATERIALIZED xxh3 of code:issuer:contract (task 0139)"
         String         asset_code "plain String, not FixedString — writer contract"
         String         asset_type "plain String, not Enum8 — classic | soroban"
         String         issuer_address "DEFAULT '' — G-address, empty for XLM"
@@ -2285,8 +2424,8 @@ erDiagram
 
     price_ohlcv_1m {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id "logical FK to assets"
-        UInt32             quote_asset_id "ADR 0003 — PK includes quote leg"
+        UInt64             asset_id "logical FK to assets; DEFAULT xxh3 of EPHEMERAL identity"
+        UInt64             quote_asset_id "ADR 0003 — PK includes quote leg; DEFAULT xxh3"
         LowCardinality_S   source "sdex | soroswap | aquarius | phoenix | ..."
         Decimal_38_14      open
         Decimal_38_14      high
@@ -2299,6 +2438,9 @@ erDiagram
         Decimal_38_14      vwap "single-source bucket VWAP, volume_quote / volume_base"
         UInt32             trade_count "DEFAULT 0"
         UInt64             version "ledger_seq × 1000 + intra-ledger order"
+        UInt32             pf_trade_count "DEFAULT trade_count — price-forming fills (task 0286)"
+        Decimal_38_14      pf_volume "DEFAULT volume_base — their base volume"
+        Decimal_38_14      pf_price_volume "DEFAULT volume_quote — Σ price × volume_base"
         ENGINE             engine "ReplacingMergeTree(version)"
         PARTITION_BY       partition "toYYYYMM(timestamp)"
         ORDER_BY           sort_key "(asset_id, quote_asset_id, source, timestamp)"
@@ -2334,11 +2476,11 @@ erDiagram
 
     price_ohlcv_1M {
         SAME_AS price_ohlcv_1m "identical shape and engine"
-        SOURCE   populated_by "MV mv_ohlcv_1w_to_1M"
+        SOURCE   populated_by "MV mv_ohlcv_1d_to_1M — the DAY, not the week (task 0286)"
     }
 
     current_prices {
-        UInt32             asset_id "logical FK to assets"
+        UInt64             asset_id "logical FK to assets"
         Decimal_38_14      price_usd
         Decimal_38_14      price_xlm
         Decimal_10_4       change_24h_pct
@@ -2354,7 +2496,7 @@ erDiagram
 
     oracle_prices {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id "logical FK to assets"
+        UInt64             asset_id "logical FK to assets; DEFAULT xxh3, 0 = no asset"
         LowCardinality_S   oracle_name "reflector | chainlink | redstone | band"
         Decimal_38_14      price_usd
         String             raw_data "JSON blob, unparsed"
@@ -2405,16 +2547,8 @@ erDiagram
         ORDER_BY           sort_key "(contract_id, source)"
     }
 
-    discovery_state {
-        LowCardinality_S   worker PK "asset-discovery"
-        UInt64             last_ledger "highest ledger sequence scanned"
-        DateTime           updated_at "DEFAULT now() — RMT version column"
-        ENGINE             engine "ReplacingMergeTree(updated_at)"
-        ORDER_BY           sort_key "(worker)"
-    }
-
     asset_metadata {
-        UInt32             asset_id PK "logical FK to assets"
+        UInt64             asset_id PK "logical FK to assets"
         String             home_domain "DEFAULT ''; single-writer, supersedes assets.home_domain"
         DateTime           updated_at "DEFAULT now() — RMT version column"
         ENGINE             engine "ReplacingMergeTree(updated_at)"
@@ -2422,7 +2556,7 @@ erDiagram
     }
 
     asset_supply {
-        UInt32             asset_id PK "logical FK to assets"
+        UInt64             asset_id PK "logical FK to assets"
         Decimal_38_14      token_supply "circulating supply"
         DateTime           fetched_at "DEFAULT now() — RMT version column"
         ENGINE             engine "ReplacingMergeTree(fetched_at)"
@@ -2587,9 +2721,9 @@ flowchart TB
             subgraph pricesDB["prices.* — prices-api-owned (ADR 0007)"]
                 direction TB
 
-                Assets["<b>prices.assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt32 (surrogate)<br/>asset_code FixedString(12)<br/>asset_type Enum8 classic|soroban<br/>issuer_address FixedString(56)<br/>contract_address FixedString(56)<br/>home_domain String<br/>is_active UInt8 (soft-delete)<br/>created_at / updated_at DateTime<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (code, issuer, contract)"]
+                Assets["<b>prices.assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt64 (xxh3 of identity)<br/>asset_code FixedString(12)<br/>asset_type Enum8 classic|soroban<br/>issuer_address FixedString(56)<br/>contract_address FixedString(56)<br/>home_domain String<br/>is_active UInt8 (soft-delete)<br/>created_at / updated_at DateTime<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (code, issuer, contract)"]
 
-                OHLCV1m["<b>prices.price_ohlcv_1m</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime CODEC(DoubleDelta)<br/>asset_id UInt32<br/>quote_asset_id UInt32 (ADR 0003)<br/>source LowCardinality(String)<br/>open/high/low/close Decimal(38,14)<br/>volume_base / volume_quote_usd Decimal(38,14)<br/>vwap Decimal(38,14) (per-source bucket)<br/>trade_count UInt32<br/>version UInt64 (RMT version)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(version)<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, quote_asset_id, source, timestamp)"]
+                OHLCV1m["<b>prices.price_ohlcv_1m</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime CODEC(DoubleDelta)<br/>asset_id UInt64<br/>quote_asset_id UInt64 (ADR 0003)<br/>source LowCardinality(String)<br/>open/high/low/close Decimal(38,14)<br/>volume_base / volume_quote_usd Decimal(38,14)<br/>vwap Decimal(38,14) (per-source bucket)<br/>trade_count UInt32<br/>version UInt64 (RMT version)<br/>pf_trade_count UInt32 (0 = no price)<br/>pf_volume / pf_price_volume Decimal(38,14)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(version)<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, quote_asset_id, source, timestamp)"]
 
                 OHLCV15m["<b>price_ohlcv_15m</b><br/>(same shape; MV-populated)"]
                 OHLCV1h["<b>price_ohlcv_1h</b>"]
@@ -2598,9 +2732,9 @@ flowchart TB
                 OHLCV1w["<b>price_ohlcv_1w</b>"]
                 OHLCV1M["<b>price_ohlcv_1M</b>"]
 
-                Current["<b>prices.current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt32 (logical FK)<br/>price_usd / price_xlm Decimal(38,14)<br/>change_24h_pct / change_7d_pct Decimal(10,4)<br/>volume_24h_usd / market_cap_usd Decimal(38,14)<br/>vwap_24h Decimal(38,14)<br/>sources String (JSON)<br/>updated_at DateTime (RMT version)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (asset_id)"]
+                Current["<b>prices.current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt64 (logical FK)<br/>price_usd / price_xlm Decimal(38,14)<br/>change_24h_pct / change_7d_pct Decimal(10,4)<br/>volume_24h_usd / market_cap_usd Decimal(38,14)<br/>vwap_24h Decimal(38,14)<br/>sources String (JSON)<br/>updated_at DateTime (RMT version)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (asset_id)"]
 
-                OracleP["<b>prices.oracle_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime<br/>asset_id UInt32<br/>oracle_name LowCardinality(String)<br/>price_usd Decimal(38,14)<br/>raw_data String (JSON)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, oracle_name, timestamp)"]
+                OracleP["<b>prices.oracle_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime<br/>asset_id UInt64<br/>oracle_name LowCardinality(String)<br/>price_usd Decimal(38,14)<br/>raw_data String (JSON)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, oracle_name, timestamp)"]
 
                 BP["<b>prices.backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>task_name LowCardinality(String)<br/>  sdex_archive | soroban_amm<br/>start/target/current_ledger UInt64<br/>status Enum8<br/>last_push_at Nullable(DateTime)<br/>started_at / updated_at DateTime<br/>completed_at Nullable(DateTime)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (task_name)"]
 
@@ -2610,7 +2744,7 @@ flowchart TB
                 OHLCV1h -. "MV ..._1h_to_4h" .-> OHLCV4h
                 OHLCV4h -. "MV ..._4h_to_1d" .-> OHLCV1d
                 OHLCV1d -. "MV ..._1d_to_1w" .-> OHLCV1w
-                OHLCV1w -. "MV ..._1w_to_1M" .-> OHLCV1M
+                OHLCV1d -. "MV ..._1d_to_1M" .-> OHLCV1M
             end
 
             DefaultDB -. "no write path" .- pricesDB

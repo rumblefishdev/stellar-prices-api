@@ -3,6 +3,7 @@ import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -10,10 +11,12 @@ import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
 import {
+  lambdaLogGroupName,
   workerErrorAlarmName,
   workerFunctionName,
   SCHEDULED_WORKERS,
   SCHEDULE_DISABLED_WORKERS,
+  WORKERS_WITHOUT_HEALTH_ALARMS,
 } from '../lambda-baseline.js';
 import {
   ingestDlqName,
@@ -47,8 +50,11 @@ export interface ObservabilityStackProps extends cdk.StackProps {
  * collide on `alarmName` and mask the real defect instead of fixing it.
  */
 export interface WorkerHealthAlarms {
-  /** Duration approaching the configured timeout — warns BEFORE it becomes errors. */
-  readonly duration: cloudwatch.Alarm;
+  /**
+   * Duration approaching the configured timeout — warns BEFORE it becomes
+   * errors. Absent for a worker declared with `noDurationAlarm`.
+   */
+  readonly duration?: cloudwatch.Alarm;
   /** Zero invocations — the worker is not running at all. */
   readonly noInvocations: cloudwatch.Alarm;
 }
@@ -67,6 +73,17 @@ interface WorkerHealthAlarmProps {
   readonly cadence: cdk.Duration;
   /** Appended to each alarm description: what breaks when this worker stops. */
   readonly impact: string;
+  /**
+   * Set — to the REASON — for a worker whose run length is a budget rather
+   * than a symptom, and skip the duration alarm for it. The 80%-of-timeout
+   * threshold assumes a run that grows only when something is wrong; a worker
+   * that deliberately walks until a wall-clock budget sits at that threshold
+   * every single run, and the alarm would fire permanently (task 0223 found
+   * this on supply: budget 240 s, timeout 300 s, threshold 240 000 ms). The
+   * liveness alarm is unaffected — it is the one that matters for such a
+   * worker anyway.
+   */
+  readonly noDurationAlarm?: string;
 }
 
 /**
@@ -114,7 +131,15 @@ function addWorkerHealthAlarms(
   snsAction: cw_actions.SnsAction,
   props: WorkerHealthAlarmProps,
 ): WorkerHealthAlarms {
-  const { name, idPrefix, functionName, timeout, cadence, impact } = props;
+  const {
+    name,
+    idPrefix,
+    functionName,
+    timeout,
+    cadence,
+    impact,
+    noDurationAlarm,
+  } = props;
 
   const metric = (
     metricName: string,
@@ -132,13 +157,15 @@ function addWorkerHealthAlarms(
   // 80% of the timeout. A worker creeping toward its limit is the leading
   // indicator; once it crosses, every run fails and the errors alarm is
   // reporting an outage that already started.
+  //
+  // Skipped, with the reason recorded at the call site, for a worker whose run
+  // length is a budget by design — see `noDurationAlarm`.
   const durationThresholdMs = Math.floor(timeout.toMilliseconds() * 0.8);
-  const duration = new cloudwatch.Alarm(
-    scope,
-    `${idPrefix}WorkerDurationAlarm`,
-    {
+  let duration: cloudwatch.Alarm | undefined;
+  if (noDurationAlarm === undefined) {
+    duration = new cloudwatch.Alarm(scope, `${idPrefix}WorkerDurationAlarm`, {
       alarmName: `prices-${envName}-${name}-duration-near-timeout`,
-      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07.`,
+      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07. OK also means "nothing ran" — liveness is prices-${envName}-${name}-no-invocations (task 0223).`,
       metric: metric('Duration', 'Maximum', cadence),
       threshold: durationThresholdMs,
       evaluationPeriods: 2,
@@ -146,10 +173,10 @@ function addWorkerHealthAlarms(
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    },
-  );
-  duration.addAlarmAction(snsAction);
-  duration.addOkAction(snsAction);
+    });
+    duration.addAlarmAction(snsAction);
+    duration.addOkAction(snsAction);
+  }
 
   // Three cadences of total silence: the schedule rule was disabled, deleted,
   // or is failing to invoke. Lambda publishes NO Invocations datapoint for a
@@ -269,6 +296,9 @@ export class ObservabilityStack extends cdk.Stack {
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   public readonly ammPushFreshnessAlarm: cloudwatch.Alarm;
+  /** Weekly earliest-claim overclaim alarms, one per stream (task 0272). */
+  public readonly sdexEarliestOverclaimAlarm: cloudwatch.Alarm;
+  public readonly ammEarliestOverclaimAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
   /**
@@ -277,12 +307,43 @@ export class ObservabilityStack extends cdk.Stack {
    * specific tier without depending on declaration order.
    */
   public readonly rollupFreshnessAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * `current_prices` writer-liveness alarm (task 0243): fires when
+   * `mv_current_prices` stops rewriting the table.
+   */
+  public readonly currentPricesFreshnessAlarm: cloudwatch.Alarm;
   /** ClickHouse host free-space alarm (task 0204, gap 1). */
   public readonly chDiskFreeAlarm: cloudwatch.Alarm;
   /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
+  /**
+   * api-handler invocation-error alarm (task 0249). One router serves every
+   * route group (ADR 0008), so this is `/v1`'s error metric.
+   */
+  public readonly apiHandlerErrorAlarm: cloudwatch.Alarm;
+  /**
+   * api-handler `portal sources failed to load` alarm (tasks 0249, 0311): a
+   * portal source failed to load for one request, which answered as
+   * unavailable. Nothing stays closed; the first portal request after a
+   * 2 s cooldown retries.
+   */
+  public readonly apiHandlerPortalLoadFailedAlarm: cloudwatch.Alarm;
+  /**
+   * API Gateway 5xx alarm (task 0249): counts router-returned 5xx and Lambda
+   * throttles, which AWS/Lambda `Errors` does not.
+   */
+  public readonly api5xxAlarm: cloudwatch.Alarm;
+  /** Task 0282: the reconcile loop flushed a PARTIAL minute to avoid deadlocking. */
+  public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
+  /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
+  public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
+  /**
+   * Task 0100: the weekly coverage sweep found swap/trade emitters in neither
+   * `pool_registry` nor the committed allow-list (layer 3).
+   */
+  public readonly coverageSweepUnclassifiedAlarm: cloudwatch.Alarm;
   /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). Rung 1. */
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
   /**
@@ -307,6 +368,25 @@ export class ObservabilityStack extends cdk.Stack {
    */
   public readonly usdStrandedAlarms: Record<string, cloudwatch.Alarm>;
   /**
+   * Candles breaking a stored-data invariant of the `close_usd = 0` sentinel
+   * (ADR 0292, task 0151), keyed by count: a candle with no price-forming fill
+   * that carries a price, a USD close without a close, or a candle claiming
+   * price-forming fills it has no price from. Asserted by the probe
+   * on a schedule instead of by a ClickHouse CHECK constraint, which would fail
+   * the insert and stall a rollup tier.
+   */
+  public readonly zeroInvariantAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * More identities than ids on `assets FINAL` (task 0139): two assets share
+   * an `asset_id`, which ClickHouse now derives from the identity. Keyed by count.
+   */
+  public readonly assetIdCollisionAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * `price_ohlcv_1m` candles of the last 2 h on an id `assets` lacks (task
+   * 0139): a writer sent ids, not identities. Keyed by count.
+   */
+  public readonly assetIdOrphanCandleAlarms: Record<string, cloudwatch.Alarm>;
+  /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
    * only drift severity that compounds while nobody looks.
@@ -316,6 +396,24 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly mvDriftAlarm: cloudwatch.Alarm;
   /** The drift check could not see the schema at all (gap 3) — likely a grant. */
   public readonly mvDriftUnreadableAlarm: cloudwatch.Alarm;
+  /**
+   * Closed coarse buckets that still disagree with their source tier after an
+   * hourly reconciliation pass (task 0203), one alarm per coarse table — the
+   * hole behind a healthy tip that the freshness alarms cannot see.
+   */
+  public readonly rollupMismatchAlarms: Record<string, cloudwatch.Alarm>;
+  /** A rollup/reconcile MV stuck `WaitingForDependencies` past its own period (0143/0203). */
+  public readonly mvRefreshWaitingAlarm: cloudwatch.Alarm;
+  /** A rollup/reconcile MV is `SYSTEM STOP VIEW`ed (task 0203). */
+  public readonly mvRefreshDisabledAlarm: cloudwatch.Alarm;
+  /**
+   * A rollup/reconcile MV that fails itself — last refresh errored, or no
+   * success for 2+ own periods (0203, review WR-07). The leaves block nothing,
+   * so {@link mvRefreshWaitingAlarm} cannot see them.
+   */
+  public readonly mvRefreshFailingAlarm: cloudwatch.Alarm;
+  /** The probe cannot read `system.view_refreshes` — the three above are suppressed (0203). */
+  public readonly mvRefreshUnreadableAlarm: cloudwatch.Alarm;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
@@ -328,6 +426,13 @@ export class ObservabilityStack extends cdk.Stack {
    * The cause alarm: it names *why* the feed is going dark.
    */
   public readonly oracleTimestampRejectedAlarm: cloudwatch.Alarm;
+  /**
+   * No fresh canonical-USDC rate reached `prices.usd_rate` for three hours
+   * while the poll kept writing (task 0228, review round 2). The dependency
+   * alarm: since 0228 the enrichment pivot's only post-epoch USDC rate is this
+   * snapshot, and the worker treats its failure as non-fatal.
+   */
+  public readonly oracleUsdcSnapshotStalledAlarm: cloudwatch.Alarm;
   /**
    * Platform-metric health alarms for the scheduled workers whose only other
    * alarm reads a metric the worker itself publishes (task 0112). Keyed by
@@ -652,6 +757,79 @@ export class ObservabilityStack extends cdk.Stack {
     this.oracleTimestampRejectedAlarm.addAlarmAction(snsAction);
     this.oracleTimestampRejectedAlarm.addOkAction(snsAction);
 
+    // The dependency alarm (task 0228, review round 2, finding 1). Since 0228
+    // the enrichment pivot multiplies every XLM- and USDT-quoted candle by the
+    // measured USDC/USD rate from `prices.usd_rate`, resolved at the bucket end
+    // within `max(1 day, bucket width)`. Post-epoch the ONLY supplier of those
+    // rows is the oracle worker's snapshot of canonical USDC — a copy step it
+    // deliberately treats as non-fatal, because failing it would stop the poll
+    // itself. So a stalled snapshot is invisible from every existing signal:
+    // -dark-feed stays OK (rows ARE being written), the enrichment backlog
+    // alarm stays OK (the oracle tier keeps enriching, so EnrichmentRowsEnriched
+    // never reads 0), and the pivot tier's own no-progress branch is a warn!.
+    // 24 hours later every pivot-priced candle lands at close_usd = 0, which
+    // ~130 unguarded argMax(close_usd, …) sites read as a real price.
+    //
+    // The shape is the one `OracleStats::rates_snapshotted` names: the peg-set
+    // snapshot count sustained at zero WHILE OracleRowsWritten climbs. The
+    // second factor is what separates "the copy step stopped" from "the feed
+    // is dark", which is -dark-feed's job. It also catches Reflector's USDC
+    // feed freezing on one lastprice timestamp (the poll still writes, the
+    // ReplacingMergeTree dedups, nothing new to copy) — a different cause with
+    // the same consequence for the pivot, so it belongs here too.
+    //
+    // 1-hour buckets, three in a row: a single pass copying nothing is normal
+    // (the snapshot is incremental by watermark, and a repeated Reflector
+    // timestamp copies nothing), so the sustain has to span many passes. Three
+    // hours is far enough from a 12-pass jitter to be a real stall and leaves
+    // ~21 hours before the pivot's one-day bound starts writing zeros. FILL on
+    // the snapshot count only: a pass that dies before its publish emits no
+    // datapoint for either series, and that is -dark-feed's case, not this
+    // one's — so missing `written` leaves the expression missing and
+    // NOT_BREACHING keeps an idle environment OK.
+    const snapshotBucket = cdk.Duration.hours(1);
+    this.oracleUsdcSnapshotStalledAlarm = new cloudwatch.Alarm(
+      this,
+      'OracleUsdcSnapshotStalledAlarm',
+      {
+        alarmName: `prices-${config.envName}-oracle-usdc-snapshot-stalled`,
+        alarmDescription: `No fresh canonical-USDC rate reached prices.usd_rate for 3 hours (OracleUsdRatesSnapshotted = 0 across 3 hourly buckets) while the Reflector poll kept writing (OracleRowsWritten > 0). Since task 0228 the enrichment pivot prices every XLM- and USDT-quoted candle the oracle tier misses by this rate, resolved within one day of the bucket end: ~21h from the first breach those candles land at close_usd = 0, which rollups and /ohlcv read as a real price, and nothing else fires (the snapshot is non-fatal, -dark-feed sees rows written, the backlog alarm sees the oracle tier enriching). Logs /aws/lambda/prices-${config.envName}-oracle: ERROR "usd_rate snapshot failed" set=peg means the copy step fails (likely the 0139 identity guard, a data condition, or a persistent OOM); "usd_rate snapshot" set=peg rows=0 every pass with no ERROR means Reflector's USDC timestamp is frozen. Fix the supply; the pivot self-heals once fresh rows land.`,
+        metric: new cloudwatch.MathExpression({
+          // 1 when nothing was snapshotted AND the poll wrote rows, else 0.
+          // Comparison operators yield per-datapoint 0/1 series in CW metric
+          // math; the product is the logical AND (same idiom as the
+          // enrichment backlog alarm above).
+          expression: '(FILL(snapshotted, 0) < 1) * (written > 0)',
+          usingMetrics: {
+            snapshotted: new cloudwatch.Metric({
+              namespace: 'Prices/Oracle',
+              metricName: 'OracleUsdRatesSnapshotted',
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Sum',
+              period: snapshotBucket,
+            }),
+            written: new cloudwatch.Metric({
+              namespace: 'Prices/Oracle',
+              metricName: 'OracleRowsWritten',
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Sum',
+              period: snapshotBucket,
+            }),
+          },
+          period: snapshotBucket,
+          label: 'OracleUsdcSnapshotStalled',
+        }),
+        threshold: 1,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.oracleUsdcSnapshotStalledAlarm.addAlarmAction(snsAction);
+    this.oracleUsdcSnapshotStalledAlarm.addOkAction(snsAction);
+
     new cdk.CfnOutput(this, 'OracleDarkFeedAlarmName', {
       value: this.oracleDarkFeedAlarm.alarmName,
       description: `Oracle dark-feed alarm for ${config.envName}`,
@@ -659,6 +837,10 @@ export class ObservabilityStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'OracleTimestampRejectedAlarmName', {
       value: this.oracleTimestampRejectedAlarm.alarmName,
       description: `Oracle timestamp-rejection alarm for ${config.envName}`,
+    });
+    new cdk.CfnOutput(this, 'OracleUsdcSnapshotStalledAlarmName', {
+      value: this.oracleUsdcSnapshotStalledAlarm.alarmName,
+      description: `Oracle USDC usd_rate snapshot stall alarm for ${config.envName}`,
     });
 
     // SDEX push freshness (§5.6 / Tranche-1 AC #5). The backfill-freshness-probe
@@ -766,6 +948,49 @@ export class ObservabilityStack extends cdk.Stack {
     this.ammPushFreshnessAlarm.addAlarmAction(snsAction);
     this.ammPushFreshnessAlarm.addOkAction(snsAction);
 
+    // Earliest-claim overclaim, one alarm per stream (task 0272). IGNORE, not
+    // NOT_BREACHING: the probe publishes weekly, so the empty days between runs
+    // must not clear a latched ALARM. Recovery needs a <= 0 datum in a later hour.
+    const earliestOverclaimAlarm = (
+      id: string,
+      suffix: string,
+      stream: string,
+    ): cloudwatch.Alarm => {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmName: `prices-${config.envName}-backfill-earliest-overclaim-${suffix}`,
+        alarmDescription: `${stream}: backfill_progress.earliest_data_available is earlier than the first price_ohlcv_1h row, so /v1/backfill/status overstates coverage. Value = seconds of overclaim (lower bound). Fix with a deliberate write to backfill_progress (merge_min never moves it later; see task 0264). Clears on the next <= 0 datum: Monday 05:47 UTC run or a manual {"check":"reconcile"} invoke. Task 0272.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Backfill',
+          metricName: 'EarliestOverclaimSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Stream: stream,
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 0,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.IGNORE,
+      });
+      alarm.addAlarmAction(snsAction);
+      alarm.addOkAction(snsAction);
+      return alarm;
+    };
+    this.sdexEarliestOverclaimAlarm = earliestOverclaimAlarm(
+      'SdexEarliestOverclaimAlarm',
+      'sdex',
+      'sdex_archive',
+    );
+    this.ammEarliestOverclaimAlarm = earliestOverclaimAlarm(
+      'AmmEarliestOverclaimAlarm',
+      'amm',
+      'soroban_amm',
+    );
+
     // Rollup freshness, one alarm per OHLCV granularity (task 0137).
     //
     // Task 0136 froze `price_ohlcv_15m` through `_1M` for NINE DAYS and nothing
@@ -838,6 +1063,50 @@ export class ObservabilityStack extends cdk.Stack {
         },
       ),
     );
+
+    // current_prices writer liveness (task 0243).
+    //
+    // `prices.current_prices` has one writer, the refreshable MV
+    // `mv_current_prices`, and nothing watched it: a stopped writer leaves the
+    // last rows in place and GET /price keeps answering 200 with a frozen price.
+    // The probe publishes the table's age (`now() - max(updated_at)`) under the
+    // rollup metric with `Table=current_prices`. It is NOT a rollup tier, so it
+    // gets its own config key, name and description instead of a slot in the
+    // loop above, whose names and wording are bucket-shaped.
+    //
+    // treatMissingData: MISSING, not the NOT_BREACHING the tier alarms use. The
+    // probe publishes this datum on EVERY successful read — the age, or the
+    // empty-table sentinel — so a missing datum only ever means the probe did
+    // not run, which its own worker-health alarms report. Under NOT_BREACHING
+    // that gap would resolve a latched ALARM and post a false "recovered" into
+    // Slack; see the same reasoning at the mv-drift alarms below.
+    this.currentPricesFreshnessAlarm = new cloudwatch.Alarm(
+      this,
+      'CurrentPricesFreshnessAlarm',
+      {
+        alarmName: `prices-${config.envName}-current-prices-freshness`,
+        alarmDescription: `prices.current_prices is stale or empty (over ${config.opsAlarms.currentPricesFreshnessSeconds}s since its last rewrite). STALE, a real age: mv_current_prices, its sole writer (REFRESH EVERY 1 MINUTE), has stopped, fails every refresh, or was dropped, and GET /price still answers HTTP 200 with frozen prices. Diagnose via system.view_refreshes as the ClickHouse default user (view = 'mv_current_prices'); recover with SYSTEM START VIEW / SYSTEM REFRESH VIEW prices.mv_current_prices, or re-apply schema/current.sql if the view is gone (docs/runbooks/0072-current-prices-mv-rollout.md). EMPTY, a value near 315360000 s: the last refresh returned no rows, because the writer is broken OR its input is empty: no 1-minute candle landed in 24 h. Check rollup-freshness-1m first: if it is firing too, ingestion is the fault and restarting this view fixes nothing. Stale candles alone never age this signal: updated_at is the refresh start. Threshold: config.opsAlarms.currentPricesFreshnessSeconds (task 0243).`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'RollupLagSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Table: 'current_prices',
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: config.opsAlarms.currentPricesFreshnessSeconds,
+        // 1 of 2, never 1 of 1: the same reasoning as the tier alarms above.
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
+      },
+    );
+    this.currentPricesFreshnessAlarm.addAlarmAction(snsAction);
+    this.currentPricesFreshnessAlarm.addOkAction(snsAction);
 
     // ClickHouse host free space (task 0204, gap 1). The 2026-08-13 stall ran
     // 11.5 h and was found by reading Lambda panic logs — `asset-discovery`,
@@ -971,8 +1240,10 @@ export class ObservabilityStack extends cdk.Stack {
       'LedgerProcessorErrorAlarm',
       {
         alarmName: `prices-${config.envName}-ledger-processor-errors`,
-        alarmDescription:
-          'The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs.',
+        // Hand-rolled outside createWorkerLambda, so the liveness sentence that
+        // helper appends to every worker's -errors alarm is repeated here by hand
+        // (task 0223) — the third of three builders, easy to miss.
+        alarmDescription: `The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs. OK here means no failing invocation was observed in the last period; a function that is not invoked at all publishes nothing and ALSO reads OK. Liveness is prices-${config.envName}-ledger-processor-no-invocations (task 0223).`,
         metric: new cloudwatch.Metric({
           namespace: 'AWS/Lambda',
           metricName: 'Errors',
@@ -990,6 +1261,260 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
+
+    // Task 0249 — the api-handler had no `Errors` alarm at all. On
+    // 2026-09-02 an init panic (main.rs) failed 7 invocations in one 5-min
+    // window and paged nobody; this alarm would have fired on it. It is
+    // hand-rolled like ledgerProcessorErrorAlarm above, so the liveness
+    // sentence is written by hand (task 0223) rather than appended by a
+    // shared builder.
+    //
+    // compute-stack.ts:755 hard-codes the same function name; there is no
+    // exported helper, and importing ComputeStack's function reference would
+    // create a cross-stack reference this stack refuses everywhere else (see
+    // the alarm-strip comment below) — so a name string only.
+    const apiHandlerFnName = `prices-${config.envName}-api-handler`;
+    this.apiHandlerErrorAlarm = new cloudwatch.Alarm(
+      this,
+      'ApiHandlerErrorAlarm',
+      {
+        alarmName: `prices-${config.envName}-api-handler-errors`,
+        alarmDescription: `The api-handler Lambda is failing invocations (AWS/Lambda Errors ≥ 1 over 5 min): an init failure, a panic under a request, or an error returned by the handler. One router serves every route group (ADR 0008), so this is /v1's invocation-error metric — it does NOT count a 5xx the router returns itself or a throttled request, which is prices-${config.envName}-api-5xx instead. Check the api-handler logs (/aws/lambda/prices-${config.envName}-api-handler). ⚠ OK here also means nothing ran: this Lambda has NO liveness alarm — a quiet API legitimately serves no request for hours (1–7 requests on some days), so zero invocations is not a fault (task 0223).`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Lambda',
+          metricName: 'Errors',
+          dimensionsMap: { FunctionName: apiHandlerFnName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.apiHandlerErrorAlarm.addAlarmAction(snsAction);
+    this.apiHandlerErrorAlarm.addOkAction(snsAction);
+
+    new cdk.CfnOutput(this, 'ApiHandlerErrorAlarmName', {
+      value: this.apiHandlerErrorAlarm.alarmName,
+      description: `api-handler invocation-error alarm for ${config.envName}`,
+    });
+
+    // Tasks 0249, 0311 — the portal-load-failed signal. The line is logged
+    // by `packages/prices-api/src/portal/sources.rs`, once per failed load of
+    // the portal's sources (the first portal request in an execution
+    // environment, or any request after a failure). `main.rs` owns the
+    // subscriber: `tracing_subscriber::fmt().json()` without `flatten_event`,
+    // and the Lambda Text log format passes the line through raw, so the key
+    // is `$.fields.message` — confirmed against a real 2026-09-18 production
+    // line. The prefix wildcard keeps the match independent of the rest of
+    // the sentence. Namespace follows this stack's `Prices/<Component>`
+    // convention. A metric filter publishes on behalf of CloudWatch Logs and
+    // needs no IAM grant.
+    //
+    // The prefix below and the log line in sources.rs are tied together by
+    // `tools/scripts/portal-load-failed-filter-guard.test.mjs` — reword one
+    // without the other and that test fails, instead of the alarm going
+    // quiet. `/v1` cold starts no longer read Parameter Store (task 0311), so
+    // a `/v1` load test should not fire this; portal traffic during SSM
+    // throttling can, and that is a real failure a visitor saw.
+    //
+    // Replaces task 0249's `portal-closed` filter and alarm 1-for-1 under
+    // new logical ids, so CloudFormation replaces both on deploy — expected.
+    //
+    // Log group imported BY NAME, not by ComputeStack construct reference —
+    // ComputeStack creates it (compute-stack.ts:479); a construct reference
+    // would couple the two stacks, which this stack's header already
+    // anticipated this exact use to avoid. The log group must exist before
+    // this stack deploys (Compute first — the existing deploy order).
+    const apiHandlerLogGroup = logs.LogGroup.fromLogGroupName(
+      this,
+      'ApiHandlerLogGroup',
+      lambdaLogGroupName(config.envName, 'api-handler'),
+    );
+    const portalLoadFailedFilter = new logs.MetricFilter(
+      this,
+      'ApiHandlerPortalLoadFailedFilter',
+      {
+        logGroup: apiHandlerLogGroup,
+        filterPattern: logs.FilterPattern.stringValue(
+          '$.fields.message',
+          '=',
+          'portal sources failed to load*',
+        ),
+        metricNamespace: 'Prices/ApiHandler',
+        metricName: 'PortalSourcesLoadFailed',
+        metricValue: '1',
+        // No defaultValue: missing data must stay missing, so the alarm
+        // below reads OK on a quiet log group rather than a false zero.
+      },
+    );
+    this.apiHandlerPortalLoadFailedAlarm = new cloudwatch.Alarm(
+      this,
+      'ApiHandlerPortalLoadFailedAlarm',
+      {
+        alarmName: `prices-${config.envName}-api-handler-portal-load-failed`,
+        // MetricFilter.metric() defaults to statistic 'avg'; pass Sum
+        // explicitly (RESEARCH §2).
+        metric: portalLoadFailedFilter.metric({
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        alarmDescription: `The api-handler logged "portal sources failed to load": a portal request (the first in an execution environment, or /config) could not load a portal source (the Discord OAuth secret, the free-plan id, the API id, the guild id or the min account age) after its retries. That one request answered as unavailable (/config enabled: false; /key, /usage and /me 503; sign-in lands on a failure page) and the first portal request after a 2 s cooldown retries, so no recycle is needed. /v1 is unaffected. Fix: read the line's error field, which names the failing variable. A persistent misconfiguration logs on every load (at most one per environment per cooldown), so the alarm keeps firing while it lasts. Runbook docs/runbooks/portal-oauth-deploy-prep.md; tasks 0249, 0311.`,
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Missing = no failed load logged = OK.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    // Alarm action only, no OK action. OK means no failed load in the last
+    // 5 minutes, and with no portal traffic in that window it proves
+    // nothing: an OK notification would read as "recovered" when nothing
+    // was tried.
+    this.apiHandlerPortalLoadFailedAlarm.addAlarmAction(snsAction);
+
+    new cdk.CfnOutput(this, 'ApiHandlerPortalLoadFailedAlarmName', {
+      value: this.apiHandlerPortalLoadFailedAlarm.alarmName,
+      description: `api-handler portal-load-failed alarm for ${config.envName}`,
+    });
+
+    // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
+    // may only write a minute once it has walked PAST the end of it; if the
+    // whole iteration budget is spent inside ONE minute it can never do so, and
+    // holding back forever would stop ingestion dead with every external signal
+    // reading healthy (doorbell consumed, queue drained, no error, no DLQ). So
+    // it flushes the partial minute instead and keeps moving — deliberately
+    // trading a possibly-undercounted candle for a live pipeline.
+    //
+    // That trade MUST be visible. A WARN line is not observability: this is the
+    // one path where the 0282 fix re-creates the 0282 defect, and the candle it
+    // writes looks entirely plausible. The processor publishes
+    // `ForcedPartialFlushes` only when it fires (never a 0), so NOT_BREACHING +
+    // `>= 1` is the whole alarm and a healthy run puts nothing on the wire.
+    //
+    // Expected to never fire: measured 2026-09-15 over 7 days / 10,560 minutes,
+    // pubnet peaked at 12 ledgers/min against `maxIterations: 32`. That is
+    // precisely why it needs an alarm rather than a log — nobody will be reading
+    // the logs on the day the block rate changes.
+    this.ledgerProcessorForcedPartialFlushAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorForcedPartialFlushAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-forced-partial-flush`,
+        alarmDescription:
+          "The ledger-processor spent its whole MAX_ITERATIONS budget inside ONE minute and flushed a PARTIAL minute to keep the cursor moving (task 0282 forced_progress). That minute's candles are undercounted — the exact loss 0282 fixes — and nothing else can see it: the doorbell is consumed, the queue drains, no error is raised. Means ledgers-per-minute has reached maxIterations (32); raise config.ledgerProcessor.maxIterations above the chain's block rate and redeploy the ComputeStack. Measured 2026-09-15: pubnet peaks at 12 ledgers/min, so this should never fire.",
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'ForcedPartialFlushes',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // The metric is emitted ONLY when the hatch fires, so "missing" is the
+        // healthy steady state and must not breach.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorForcedPartialFlushAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorForcedPartialFlushAlarm.addOkAction(snsAction);
+
+    // Task 0291 — live dropped trades from a pool that is missing from
+    // `prices.pool_registry`. The registry stopped growing when the history
+    // backfill ended (2026-07-06), and until 0291 the live processor learned new
+    // pools in memory only, so every cold start forgot them: 27 Aquarius, 14
+    // Soroswap and 1 Phoenix pool, ~5% of Aquarius trades, dropped with no error
+    // and no row anywhere.
+    //
+    // The processor counts events shaped like a pool we index (Aquarius
+    // `trade`, Soroswap pair `swap`, Phoenix swap) from contracts it cannot
+    // classify, and publishes `UnregisteredPoolEvents` only when non-zero. Routers
+    // and the unindexed Uniswap-v3-style venue (task 0290) do not match those
+    // shapes, so with a complete registry the metric is absent and
+    // NOT_BREACHING + `>= 1` is the whole alarm.
+    this.ledgerProcessorUnregisteredPoolAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorUnregisteredPoolAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-unregistered-pool`,
+        alarmDescription:
+          'The ledger-processor dropped AMM trades from a contract that looks like an Aquarius, Soroswap or Phoenix pool but is missing from prices.pool_registry (task 0291). Those trades produce no candle. The processor now persists pools it learns from factory events, so this means a pool arrived by a path it never saw: a new factory or factory event shape, or a factory event processed before the 0291 deploy. The WARN "dropped trades from pools missing from prices.pool_registry" lists the contracts. Fix: run events-backfill --discover-pools over the range holding its factory event (docs/runbooks/seed-pool-registry.md), then reprice the dropped minutes.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'UnregisteredPoolEvents',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were dropped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorUnregisteredPoolAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorUnregisteredPoolAlarm.addOkAction(snsAction);
+
+    // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
+    // sees only pools shaped like a venue we already index; the weekly coverage
+    // sweep looks at EVERY contract emitting swap/trade-shaped events over a
+    // trailing 14-day window and publishes `UnclassifiedSwapEvents` on every
+    // run: the event count of contracts in neither `prices.pool_registry` nor
+    // the allow-list — the SushiSwap V3 case (task 0290), which traded unseen
+    // for months — and `0` when there are none.
+    //
+    // The alarm follows the latest run (task 0323). Each run's datapoint sets
+    // the state, and IGNORE holds it between runs, so a residual stays in ALARM
+    // until a run finds none. After triage, one manual invoke clears it; the
+    // earlier 1-day × 1-of-7 hold kept it in ALARM for a week whatever was
+    // done. The invoke has to land in a later clock hour than the breaching
+    // run, since Maximum over one period holding both stays >= 1. Same shape
+    // as the earliest-overclaim alarms above (task 0272).
+    // A run that fails publishes nothing and changes nothing — the -errors
+    // alarm is the backstop (review WR-01). While latched, the daily
+    // stuck-alarm digest (task 0214) re-lists it.
+    this.coverageSweepUnclassifiedAlarm = new cloudwatch.Alarm(
+      this,
+      'CoverageSweepUnclassifiedAlarm',
+      {
+        alarmName: `prices-${config.envName}-coverage-sweep-unclassified`,
+        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. The alarm holds the latest run: it returns to OK only when a run reads 0, so after triage deploy EventBridge and invoke the probe once, in a later clock hour than the run that alarmed. A failed run leaves the state as it was: check the -errors alarm. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Coverage',
+          metricName: 'UnclassifiedSwapEvents',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // One datapoint a week, published on every run: "missing" means
+        // "between runs", so the last run's state holds.
+        treatMissingData: cloudwatch.TreatMissingData.IGNORE,
+      },
+    );
+    this.coverageSweepUnclassifiedAlarm.addAlarmAction(snsAction);
+    this.coverageSweepUnclassifiedAlarm.addOkAction(snsAction);
+    new cdk.CfnOutput(this, 'CoverageSweepUnclassifiedAlarmName', {
+      value: this.coverageSweepUnclassifiedAlarm.alarmName,
+      description: `Coverage sweep unclassified-swap-emitter alarm for ${config.envName}`,
+    });
 
     // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
     // handler that keeps failing one item re-drives it (no Lambda Error) until
@@ -1129,9 +1654,10 @@ export class ObservabilityStack extends cdk.Stack {
       idPrefix: string,
       alarmSuffix: string,
       describe: (count: number) => string,
+      counts: readonly number[] = config.opsAlarms.usdSanityEscalationCounts,
     ): Record<string, cloudwatch.Alarm> =>
       Object.fromEntries(
-        config.opsAlarms.usdSanityEscalationCounts.map((count) => {
+        counts.map((count) => {
           const alarm = new cloudwatch.Alarm(this, `${idPrefix}${count}`, {
             alarmName: `prices-${config.envName}-${alarmSuffix}-${count}`,
             alarmDescription: describe(count),
@@ -1169,6 +1695,59 @@ export class ObservabilityStack extends cdk.Stack {
       'usd-stranded',
       (count) =>
         `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h, so this is a value the consumer has already LOST, not one that is merely late. KNOWN CAUSE as of 2026-08-20: the USDT pivot has NEVER priced a price_ohlcv_1m row (measured pivot_written = 0 against 1,564,045 peg-written), so this leg has been dark since 2026-08-13 and this alarm stays latched until that is fixed - tasks 0209 (root cause) and 0212 (the peg-valued rows). Verify on _1m, NEVER on a coarse tier: task 0182 repaired the coarse tables directly, so _1h reads clean over a broken _1m. Do NOT re-run a reset repair - 0182 own reset CREATED 157 stranded candles. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+    );
+
+    // The zero sentinel's stored-data invariants (ADR 0292, task 0151). Same
+    // ladder: a regressed writer keeps adding rows, so the count has depth. Any
+    // non-zero value is a defect — the healthy reading is exactly 0 — so the
+    // first rung is the one that matters and the rest say how fast it is
+    // growing. NOT scoped to a quote leg, unlike the two ladders above. See
+    // packages/rollup-freshness-probe/src/zero_invariants.rs.
+    this.zeroInvariantAlarms = usdSanityRungs(
+      'CandleZeroInvariantViolations',
+      'ZeroInvariantAlarmCount',
+      'zero-invariant',
+      (count) =>
+        `${count} or more price_ohlcv_1m candles whose BUCKET falls in the last 48 h break a stored-data invariant every reader of close / close_usd relies on (ADR 0292): pf_trade_count = 0 with close != 0 (no price formed, yet one is stored - views.sql and current.sql publish it, /ohlcv refuses it); close_usd > 0 with close = 0 (a USD close without a close); or pf_trade_count > 0 with close = 0 (claims price-forming fills it has no price from). A WRITER did this: find it before repairing. Usual cause, which the third condition exists to catch: a statement that omits pf_trade_count and takes its DEFAULT (trade_count) - the Rust writer is name-routed, so the omission is silent (ADR 0287). Check recent INSERT ... SELECT, pre-roll scripts and enrichment statements against docs/database-schema/close-usd-zero-guardrails.md. The window is on bucket time: a backfill into older buckets is NOT covered. Runbook: docs/runbooks/0151-zero-invariant-probe-rollout.md. First rung is fixed at 1.`,
+      // The healthy reading is exactly 0, so a first rung above 1 would hide real
+      // violations — and the shared key exists to be tuned for the USDT ladders,
+      // whose populations are nothing like this one. Pin the rung that carries
+      // the meaning; borrow only the rungs that say how fast it is growing.
+      [
+        1,
+        ...config.opsAlarms.usdSanityEscalationCounts.filter(
+          (count) => count > 1,
+        ),
+      ],
+    );
+
+    // Asset-id uniqueness (task 0139). The id is xxh3 of the identity, so the
+    // healthy reading of both is exactly 0, and a regressed writer keeps adding
+    // to them: the zero-invariant ladder, first rung fixed at 1. Before the
+    // migration window prod read 3,321 collisions (count - uniqExact on
+    // assets FINAL, 2026-10-01); these ship in that window, after the swap.
+    // See packages/rollup-freshness-probe/src/asset_id_uniqueness.rs.
+    const zeroLadder = [
+      1,
+      ...config.opsAlarms.usdSanityEscalationCounts.filter(
+        (count) => count > 1,
+      ),
+    ];
+    this.assetIdCollisionAlarms = usdSanityRungs(
+      'AssetIdCollisions',
+      'AssetIdCollisionsAlarmCount',
+      'asset-id-collisions',
+      (count) =>
+        `${count} or more identities in prices.assets FINAL share an asset_id with another (count() - uniqExact(asset_id)). Since task 0139 ClickHouse derives asset_id = xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)), so this is 0 by construction: a non-zero value means assets.asset_id is no longer MATERIALIZED from the identity (a schema change or a restored old table) or a 64-bit hash collision. Every table keyed on asset_id then blends two assets. Find the shared ids: SELECT asset_id, groupArray((asset_code, issuer_address, contract_address)) FROM prices.assets FINAL GROUP BY asset_id HAVING count() > 1. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
+    );
+    this.assetIdOrphanCandleAlarms = usdSanityRungs(
+      'AssetIdOrphanCandles',
+      'AssetIdOrphanCandlesAlarmCount',
+      'asset-id-orphan-candles',
+      (count) =>
+        `${count} or more price_ohlcv_1m candles of the last 2 h carry an asset_id or quote_asset_id that prices.assets does not hold. Since task 0139 a writer sends the identity and ClickHouse derives both ids; an orphan means a writer sent ids itself (a stale pre-0139 binary or Lambda version: RowBinary is width-exact, so an old u32 writer misaligns rather than failing) or wrote candles before their assets rows. Stop that writer first, then find it from the rows' source column. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
     );
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
@@ -1279,6 +1858,147 @@ export class ObservabilityStack extends cdk.Stack {
     this.mvDriftUnreadableAlarm.addAlarmAction(snsAction);
     this.mvDriftUnreadableAlarm.addOkAction(snsAction);
 
+    // Rollup completeness, one alarm per coarse table (task 0203).
+    //
+    // The freshness alarms above watch the TIP. On 2026-08-13 the tip was
+    // current while eight buckets behind it were missing — a hole behind a
+    // healthy tip is invisible to a staleness check. Six hourly reconciliation
+    // MVs now rebuild any bucket that disagrees with the tier below it, and the
+    // probe publishes, per tier, how many CLOSED buckets (ended at least 2 h
+    // ago) in the 7-day window still disagree. One alarm per table because the
+    // table is the diagnosis: a `_1m` hole shows on `price_ohlcv_15m` first —
+    // each tier is compared only with the tier directly below, so the coarser
+    // tiers agree with their equally-holed sources — and an upper tier
+    // mismatches on its own only when the chain broke part-way.
+    //
+    // 6 of 6 fifteen-minute periods (90 min), not 1 of 2: a back-dated arrival
+    // is EXPECTED to mismatch until the next hourly pass heals it. 90 min
+    // exceeds one 60-min reconcile cycle plus the propagation inside that pass
+    // plus one probe interval, so only a disagreement that survived a whole
+    // pass pages. A shorter hold (the BRIEF's "e.g. 3" = 45 min) would fire on
+    // every self-healing back-fill.
+    //
+    // treatMissingData: MISSING for the reason given at the drift alarms above:
+    // a correctness alarm must not announce a false recovery when the probe
+    // dies; the probe's own -errors alarm covers the dead probe.
+    const rollupMismatchTables = [
+      'price_ohlcv_15m',
+      'price_ohlcv_1h',
+      'price_ohlcv_4h',
+      'price_ohlcv_1d',
+      'price_ohlcv_1w',
+      'price_ohlcv_1M',
+    ] as const;
+    this.rollupMismatchAlarms = Object.fromEntries(
+      rollupMismatchTables.map((table) => {
+        // Same `price_ohlcv_15m` → `PriceOhlcv15m` mapping as rollup freshness.
+        const idSuffix = table
+          .split('_')
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join('');
+        const alarm = new cloudwatch.Alarm(
+          this,
+          `RollupMismatch${idSuffix}Alarm`,
+          {
+            alarmName: `prices-${config.envName}-rollup-mismatch-${table.replace('price_ohlcv_', '')}`,
+            alarmDescription: `${table} holds closed buckets (ended 2 h+ ago, within the last 7 days) that are missing or disagree with the tier below on trade_count/volume_base (extra target rows are not detected), and they survived more than one hourly reconciliation pass (task 0203). The freshness alarm cannot see this: the tip is healthy, the hole is behind it. A _1m hole shows on the 15m table first; a coarser table alone means the chain broke part-way. Check system.view_refreshes (as the ClickHouse admin) for the mv_reconcile_ views and the mv-refresh-waiting/-disabled alarms; check whether a re-ingest is running (its runbook STOPs the reconcile MVs); run prices-clickhouse-drift. A mismatch while a back-fill is still arriving is expected until it lands. For a hole older than 7 days use schema/preroll-live-gap.sql via docs/runbooks/0142-rollup-mv-reapply.md. Latched by design: silence means still wrong, not resolved.`,
+            metric: new cloudwatch.Metric({
+              namespace: 'Prices/Rollup',
+              metricName: 'RollupMismatchBuckets',
+              dimensionsMap: {
+                Environment: config.envName,
+                Table: table,
+              },
+              statistic: 'Maximum',
+              period: cdk.Duration.minutes(15),
+            }),
+            threshold: 1,
+            evaluationPeriods: 6,
+            datapointsToAlarm: 6,
+            comparisonOperator:
+              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treatMissingData: cloudwatch.TreatMissingData.MISSING,
+          },
+        );
+        alarm.addAlarmAction(snsAction);
+        alarm.addOkAction(snsAction);
+        return [table, alarm];
+      }),
+    );
+
+    // Rollup MVs stuck behind a dependency, or switched off (task 0143/0203).
+    //
+    // Since task 0143 the rollup MVs run DEPENDS ON the MV writing their source
+    // tier. The price: a stopped, failing or missing dependency leaves every
+    // dependent WaitingForDependencies FOREVER with no error — verified on
+    // 26.3.10.60 — and a stuck reconcile MV never ages any tip. The probe
+    // counts views waiting longer than their own period, and separately views
+    // that were STOPped, so a deliberate re-ingest STOP cannot mask a real
+    // stall. A view that FAILS itself is a third count (review WR-07): nothing
+    // DEPENDS ON the four leaves (1d_to_1w, 1d_to_1M, fast and reconcile), so a
+    // leaf failing on every slot makes nothing wait, and since the reconcile
+    // MVs repair a dead fast leaf's closed buckets and the freshness alarm
+    // reads only the tip, nothing else sees it. Failing = the last refresh
+    // left an error in `exception` (ClickHouse puts a view that exhausted its
+    // retries back to Scheduled; the next success clears it), or no success
+    // for more than 2 own periods while neither waiting nor stopped (a hung
+    // or slot-skipping pass). 2 periods: a healthy view's last success is at
+    // most one period + its dependency wait + its run old, so one whole period
+    // of slack. system.view_refreshes is DENIED (not filtered) to a SELECT ON
+    // prices.* identity; the probe then publishes only the unreadable flag.
+    // 1 of 2 and MISSING, like the drift alarms above.
+    const refreshAlarm = (
+      id: string,
+      suffix: string,
+      metricName: string,
+      alarmDescription: string,
+    ): cloudwatch.Alarm => {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmName: `prices-${config.envName}-${suffix}`,
+        alarmDescription,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName,
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
+      });
+      alarm.addAlarmAction(snsAction);
+      alarm.addOkAction(snsAction);
+      return alarm;
+    };
+    this.mvRefreshWaitingAlarm = refreshAlarm(
+      'MvRefreshWaitingAlarm',
+      'mv-refresh-waiting',
+      'MvRefreshWaitingCount',
+      `A rollup or reconciliation MV has been WaitingForDependencies for longer than its own refresh period (task 0143/0203): the MV it DEPENDS ON is stopped, failing after its retries, or missing, so it and everything above it in the chain wait forever with NO error — nothing else reports it, and a stuck reconcile MV never ages a freshness tip. Inspect system.view_refreshes as the ClickHouse admin (status, exception, next_refresh_time of the prices mv_ohlcv_/mv_reconcile_ views) to find the blocking dependency; SYSTEM START VIEW it if it was stopped, or re-create it per docs/runbooks/0142-rollup-mv-reapply.md (dependents re-link by name). SYSTEM REFRESH VIEW ignores dependencies, so it is a diagnostic, not a fix. Latched by design: silence means still stuck, not resolved.`,
+    );
+    this.mvRefreshDisabledAlarm = refreshAlarm(
+      'MvRefreshDisabledAlarm',
+      'mv-refresh-disabled',
+      'MvRefreshDisabledCount',
+      `A rollup or reconciliation MV is STOPped (SYSTEM STOP VIEW; status Disabled in system.view_refreshes) (task 0203). Expected ONLY while a re-ingest runbook runs (docs/runbooks/0286-reingest-history.md STOPs the six mv_reconcile_ views and STARTs them after). Otherwise it was forgotten: a stopped view refreshes nothing, and its dependents go WaitingForDependencies. Find it in system.view_refreshes as the ClickHouse admin and SYSTEM START VIEW it once no re-ingest is running. ⚠️ STOP is lost on a server restart, so a restart mid-re-ingest silently re-enables the reconcile MVs — check them after one. Latched by design: silence means still stopped, not resolved.`,
+    );
+    this.mvRefreshFailingAlarm = refreshAlarm(
+      'MvRefreshFailingAlarm',
+      'mv-refresh-failing',
+      'MvRefreshFailingCount',
+      `A rollup or reconciliation MV is failing itself (task 0203): its last refresh left an error in system.view_refreshes.exception, or it has not succeeded for more than 2 of its own periods while neither waiting nor stopped. Nothing depends on the 1w/1M leaves, so no other alarm sees them fail: the reconcile MVs repair a dead fast leaf's closed buckets and the freshness alarm reads only the tip. The probe's log line names the views and errors (mv_refresh_failing_views). As the ClickHouse admin read status, exception, last_success_time of the prices mv_ohlcv_/mv_reconcile_ views; fix the cause (memory limit, schema change: prices-clickhouse-drift), then SYSTEM REFRESH VIEW it and check exception is empty. Re-create per docs/runbooks/0142-rollup-mv-reapply.md if needed. Latched by design: silence means still failing, not resolved.`,
+    );
+    this.mvRefreshUnreadableAlarm = refreshAlarm(
+      'MvRefreshUnreadableAlarm',
+      'mv-refresh-unreadable',
+      'MvRefreshUnreadable',
+      `The probe cannot read system.view_refreshes, or sees none of the 12 rollup/reconcile MVs in it (task 0203), so the mv-refresh-waiting, -disabled and -failing counts are SUPPRESSED, not zero — a stuck, stopped or failing MV would go unreported. system.view_refreshes is DENIED (Code 497 ACCESS_DENIED), not grant-filtered, to an identity holding only SELECT ON prices.*. Check SHOW GRANTS FOR prices_writer (XML-managed on BE's side, BE task 0477) and add SELECT ON system.view_refreshes. If the grant is present, check that the rollup MVs exist in prices (prices-clickhouse-drift).`,
+    );
+
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's
     // S3→SNS→SQS delivery halts, the subscription is deleted, or upstream simply
@@ -1374,22 +2094,56 @@ export class ObservabilityStack extends cdk.Stack {
     // detection window. Neither can silently disarm an alarm. Threading the
     // functions through was judged not worth the stack coupling — see
     // §Design Decisions in task 0112.
-    // Not every scheduled worker has these two platform alarms. The three
-    // without are listed HERE, by name, so the gap is a decision on record and
-    // the assertion below forces one for any worker added later:
-    // - cleanup: its rule is DISABLED (task 0200) — a no-invocations alarm
-    //   would fire forever.
-    // - asset-discovery, supply: run hourly/daily with a cheap, bounded body;
-    //   their `-errors` alarm (createWorkerLambda) is the coverage today.
-    //   asset-discovery is the subject of task 0256 (the ledger scan has never
-    //   run on production) — revisit both there. Recorded in task 0125 Future
-    //   Work.
-    const workersWithoutHealthAlarms: readonly string[] = [
-      'cleanup',
-      'asset-discovery',
-      'supply',
-    ];
+    // Not every scheduled worker has these two platform alarms. The ones
+    // without live in WORKERS_WITHOUT_HEALTH_ALARMS (lambda-baseline.ts), each
+    // with its reason, because createWorkerLambda prints that reason into the
+    // worker's -errors alarm description — the gap has to be visible where an
+    // operator reads it, not only here. The assertion below forces a decision
+    // for any worker added later. Task 0223 moved `supply` OUT of that list:
+    // its earlier exemption ("the -errors alarm is the coverage") was circular,
+    // since -errors reads OK on zero invocations.
+    const workersWithoutHealthAlarms: readonly string[] = Object.keys(
+      WORKERS_WITHOUT_HEALTH_ALARMS,
+    );
     const workerHealth: Array<WorkerHealthAlarmProps> = [
+      {
+        // Task 0223. Exempt until then on the grounds that its -errors alarm
+        // was "the coverage" — which reads OK when nothing runs. The only
+        // writer of prices.asset_supply, and nothing else watches it yet
+        // (its freshness alarm is task 0284).
+        name: 'supply',
+        idPrefix: 'Supply',
+        functionName: workerFunctionName(config.envName, 'supply'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'market_cap_usd in current_prices is price × token_supply from prices.asset_supply, whose only writer is this worker: market caps go stale silently while prices keep moving.',
+        // Measured 2026-09-15 before the first deploy: Duration.Maximum is
+        // ~240.5 s EVERY run, because the Horizon walk stops at
+        // DEFAULT_TIME_BUDGET_SECS = 240 (supply-worker/src/lib.rs, task 0084)
+        // and the timeout is 300 s — exactly the 80% threshold. A duration
+        // alarm here would have latched on its second evaluation and been
+        // re-surfaced by the 0214 digest every day: the failure 0223 exists
+        // to remove, self-inflicted.
+        noDurationAlarm:
+          'run length is a wall-clock budget (240 s of a 300 s timeout), not a symptom',
+      },
+      {
+        // Task 0256 settled the question 0223 parked there: the ledger scan
+        // is gone (removed 2026-09-24), and what remains — the Soroban symbol
+        // stage (0210) and the asset seed — is real hourly work, so it gets
+        // the standard pair. Measured 2026-09-24 before the first deploy:
+        // 1 invocation every hour for 48 h, Duration.Maximum 5.4 s against a
+        // 300 s timeout (threshold 240 s), 0 errors — neither alarm can latch
+        // on a healthy run.
+        name: 'asset-discovery',
+        idPrefix: 'AssetDiscovery',
+        functionName: workerFunctionName(config.envName, 'asset-discovery'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'a Soroban token that starts trading gets no symbol() lookup, so it lists with an empty code until the worker is back; the seed of the major assets stops being re-asserted.',
+      },
       {
         name: 'enrichment',
         idPrefix: 'Enrichment',
@@ -1452,7 +2206,7 @@ export class ObservabilityStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(1),
         cadence: cdk.Duration.minutes(15),
         impact:
-          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported.',
+          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported. Since task 0243 the current-prices-freshness alarm rides on it as well, so a frozen current_prices would go unreported. Since task 0203 also rollup-mismatch and mv-refresh-* (MISSING: frozen).',
       },
       {
         name: 'mtls-notafter-probe',
@@ -1469,6 +2223,18 @@ export class ObservabilityStack extends cdk.Stack {
     // falls through silently (deep review WR-02, PR #280 review finding 2).
     {
       const covered = new Set<string>(workerHealth.map((w) => w.name));
+      // A worker whose schedule is disabled on purpose must also be exempt
+      // here, or its -no-invocations alarm fires forever — and since task
+      // 0214 the daily digest would then re-surface it every single day.
+      // This is the cleanup case (task 0200) made a rule rather than a comment.
+      for (const name of SCHEDULE_DISABLED_WORKERS) {
+        if (!workersWithoutHealthAlarms.includes(name)) {
+          throw new Error(
+            `ObservabilityStack: "${name}" is in SCHEDULE_DISABLED_WORKERS but not in WORKERS_WITHOUT_HEALTH_ALARMS — ` +
+              'its -no-invocations alarm would latch forever; exempt it with a reason (lambda-baseline.ts)',
+          );
+        }
+      }
       for (const name of SCHEDULED_WORKERS) {
         const has = covered.has(name);
         const exempt = workersWithoutHealthAlarms.includes(name);
@@ -1534,6 +2300,51 @@ export class ObservabilityStack extends cdk.Stack {
         label,
         period: cdk.Duration.minutes(5),
       });
+
+    // Task 0249 / Adam 2026-09-21. Lives inside this widget-helper block only
+    // to reuse `apiDims` (the same dimensions object `apiMetric` uses, not a
+    // second copy) — it MUST stay above the strip walk below (`findAll()`)
+    // or the strip silently shrinks.
+    //
+    // Deliberately NOT `apiMetric('5XXError', 'Sum', '5xx')`: `apiMetric`
+    // sets a `label`, and aws-cdk-lib 2.257.0 renders a labeled metric's
+    // alarm as a one-entry `Metrics` math array instead of the plain
+    // Namespace/MetricName/Dimensions/Statistic form every other alarm in
+    // this stack uses (verified by a synth probe at planning).
+    //
+    // On 2026-09-03 a load run exhausted the ClickHouse read quota and the
+    // API returned 28,853 5xx over ~25 minutes while AWS/Lambda Errors stayed
+    // 0 (the router answered 5xx itself); nobody was paged, and
+    // apiHandlerErrorAlarm above could not have caught it.
+    // Lambda throttles are the other blind spot: task 0293's load test on
+    // 2026-09-18 produced 14,865 5xx that were all throttles, Errors 0.
+    // Absolute count, not a rate: traffic is sometimes 1-7 requests/day and
+    // a rate would flap. Threshold 5 sits above every stray window in the
+    // 35 days read on 2026-09-21 (1, 2 and 4).
+    this.api5xxAlarm = new cloudwatch.Alarm(this, 'Api5xxAlarm', {
+      alarmName: `prices-${config.envName}-api-5xx`,
+      alarmDescription: `API Gateway returned >= 5 5xx in 5 min (AWS/ApiGateway 5XXError Sum, ApiName + Stage). Covers what prices-${config.envName}-api-handler-errors cannot see: 5xx the router returns itself (2026-09-03: a load run exhausted the ClickHouse read quota, 28,853 5xx in ~25 min with Errors at 0, nobody paged), and Lambda throttles. An absolute count, not a rate, because traffic is sometimes 1-7 requests a day and a rate would flap; 5 sits above every stray window seen in 35 days (1, 2 and 4). First check the api-handler logs and ClickHouse latency, then Lambda Throttles / ConcurrentExecutions for prices-${config.envName}-api-handler. An init panic fires this alarm and the Errors alarm together. The per-invocation Errors alarm stays for a single init crash or panic at low traffic. Task 0249.`,
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/ApiGateway',
+        metricName: '5XXError',
+        dimensionsMap: apiDims,
+        statistic: 'Sum',
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.api5xxAlarm.addAlarmAction(snsAction);
+    this.api5xxAlarm.addOkAction(snsAction);
+
+    new cdk.CfnOutput(this, 'Api5xxAlarmName', {
+      value: this.api5xxAlarm.alarmName,
+      description: `API Gateway 5xx alarm for ${config.envName}`,
+    });
 
     const chWriteLatency = (statistic: string): cloudwatch.Metric =>
       new cloudwatch.Metric({
@@ -2108,6 +2919,24 @@ export class ObservabilityStack extends cdk.Stack {
             statistic: 'Sum',
             label: 'rows written',
           }),
+          // The two usd_rate snapshot series beside the rows they copy from
+          // (task 0228): the peg set is what -oracle-usdc-snapshot-stalled
+          // watches, and the two are separate so a stalled USDC copy cannot
+          // hide behind XLM's rows.
+          new cloudwatch.Metric({
+            namespace: 'Prices/Oracle',
+            metricName: 'OracleUsdRatesSnapshotted',
+            dimensionsMap: envDims,
+            statistic: 'Sum',
+            label: 'USDC rates snapshotted',
+          }),
+          new cloudwatch.Metric({
+            namespace: 'Prices/Oracle',
+            metricName: 'OracleMeasuredRatesSnapshotted',
+            dimensionsMap: envDims,
+            statistic: 'Sum',
+            label: 'XLM rates snapshotted',
+          }),
         ],
         right: [
           new cloudwatch.Metric({
@@ -2125,54 +2954,21 @@ export class ObservabilityStack extends cdk.Stack {
     );
 
     // -----------------------------------------------------------------
-    // Read-only viewer identity for the Stellar reviewer (Tranche 3 AC 8).
+    // No standing viewer identity for the Stellar reviewer (Tranche 3 AC 8).
     //
-    // An IAM *user*, not a cross-account role: there is no external principal
-    // to trust — none is known. A named substitution, like Decision A above.
-    //
-    // A hand-written read policy, not `CloudWatchReadOnlyAccess`: that managed
-    // policy also grants `logs:FilterLogEvents` / `logs:Get*` and `xray:Get*`
-    // on every log group and trace in the account — which is shared with the
-    // block explorer. The dashboard has no log widgets, so the viewer needs
-    // exactly the dashboard, metric and alarm read calls below and nothing
-    // that can read log contents (task 0125 deep review CR-01). These
-    // CloudWatch read actions do not support resource-level scoping.
-    //
-    // NO password is passed: `iam.User` creates a login profile only when one is
-    // supplied, and a password in the template is precisely what is being
-    // avoided. Creating the console login is an out-of-band operator step
-    // (`aws iam create-login-profile --password-reset-required`).
+    // Task 0125 created `prices-<env>-stellar-viewer` here — an IAM user with
+    // a scoped CloudWatch read policy and an out-of-band console login — as
+    // the substitute for the "read-only IAM role" the criterion names, since
+    // no external principal was known. Task 0295 removed it: access to this
+    // account is granted ON REQUEST, to a named person, with MFA enforced,
+    // and removed after the review — the same model the block explorer
+    // recorded for its D3 AC 3. A standing credential that nobody asked for,
+    // in an account that is otherwise SSO-only, is what AC 6 ("no wildcard
+    // IAM", least privilege) is graded against. The scoped read policy lives
+    // in `docs/runbooks/0295-dashboard-access-on-request.md`, ready to attach
+    // to the user created for that request. `verify-dashboard-synth.mjs`
+    // asserts this template creates no IAM user at all.
     // -----------------------------------------------------------------
-    const stellarViewer = new iam.User(this, 'StellarDashboardViewer', {
-      userName: `prices-${config.envName}-stellar-viewer`,
-    });
-    stellarViewer.attachInlinePolicy(
-      new iam.Policy(this, 'StellarDashboardViewerPolicy', {
-        policyName: `prices-${config.envName}-dashboard-read`,
-        statements: [
-          new iam.PolicyStatement({
-            sid: 'ReadDashboardsMetricsAndAlarms',
-            actions: [
-              'cloudwatch:GetDashboard',
-              'cloudwatch:ListDashboards',
-              'cloudwatch:GetMetricData',
-              'cloudwatch:GetMetricStatistics',
-              'cloudwatch:ListMetrics',
-              'cloudwatch:GetMetricWidgetImage',
-              'cloudwatch:DescribeAlarms',
-              'cloudwatch:DescribeAlarmHistory',
-              'cloudwatch:DescribeAlarmsForMetric',
-            ],
-            resources: ['*'],
-          }),
-        ],
-      }),
-    );
-
-    new cdk.CfnOutput(this, 'StellarViewerUserName', {
-      value: stellarViewer.userName,
-      description: `Read-only CloudWatch viewer IAM user for ${config.envName} (console login is created out of band)`,
-    });
 
     assertAlarmDescriptionsFitCloudWatch(this);
   }

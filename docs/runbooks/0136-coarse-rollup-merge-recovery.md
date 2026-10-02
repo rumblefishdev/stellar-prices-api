@@ -314,6 +314,26 @@ recent window; they do not reach back ten days. Once the tips are advancing
 again, the 07-21..recovery hole must be closed with a **bounded, incremental**
 pre-roll.
 
+> **Since tasks 0143 + 0203** the hourly `prices.mv_reconcile_*` MVs rebuild
+> any closed bucket of the last 7 days whose source disagrees, so a hole younger
+> than 7 days now heals within one to two hourly passes once the chain runs
+> again (buckets that ended at least 2 h ago; a still-open coarse bucket takes
+> the repair on its fast MV's next slot).
+> Only the part older than 7 days needs the bounded pre-roll below. During the
+> `DETACH` window a fast MV fails its refresh, and the MVs that `DEPENDS ON` it
+> wait (`WaitingForDependencies`, no error) meanwhile. After the `ATTACH`, check
+> `system.view_refreshes`: a dependent still waiting past one of its own periods
+> while its dependency is green can be forced with `SYSTEM REFRESH VIEW` (it
+> ignores dependencies). `prices-production-mv-refresh-waiting` may fire.
+
+> ⚠️ **If the target holds the `prices.mv_reconcile_*` MVs (tasks 0143 + 0203),
+> STOP all six before a pre-roll or a `_bak` restore that overlaps the last 7 days and START them after**, exactly as
+> [0286-reingest-history §1a](0286-reingest-history.md#1a-stop-the-reconcile-mvs-tasks-0143--0203) and §7f do. While the coarse tables are
+> half-rebuilt, an hourly reconcile pass would re-roll the last 7 days from
+> whatever the tier below holds at that moment. `SYSTEM STOP VIEW` is lost on a
+> server restart, and `prices-production-mv-refresh-disabled` fires while they
+> are stopped (expected; it clears after START).
+
 ⚠️ **Use `preroll-incremental.sql` or a bounded variant — NEVER `preroll.sql`.**
 The full script expects TRUNCATE-d coarse tables and would wipe every
 already-pre-rolled row: that is precisely the [[0090]] history-loss incident.

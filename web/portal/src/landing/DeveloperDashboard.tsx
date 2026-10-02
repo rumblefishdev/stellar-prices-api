@@ -47,7 +47,7 @@ const CLAIMS: readonly { icon: string; title: string; body: string }[] = [
   {
     icon: quickStartIcon,
     title: 'Quick Start Guide',
-    body: 'Copy-ready curl examples and SDK snippets shown right next to your key.',
+    body: 'Copy-ready curl commands and code snippets shown right next to your key.',
   },
 ];
 

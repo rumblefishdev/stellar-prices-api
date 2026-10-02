@@ -16,8 +16,8 @@
 //! - a **stalled** tier must produce a lag over its bound — the 0136 scenario.
 //!
 //! ```text
-//! docker compose up -d clickhouse
-//! cargo test -p rollup-freshness-probe --test rollup_freshness_it -- --ignored --nocapture
+//! tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//! cargo test -p rollup-freshness-probe --test rollup_freshness_it -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! ⚠️ **Destructive, and to more than the candles.** These tests `TRUNCATE`
@@ -29,6 +29,7 @@
 //! cluster.**
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use rollup_freshness_probe::mv_drift::{
     DriftMetric, MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, MV_DRIFT_UNREADABLE_METRIC, describe,
     drift_metrics, visible_objects_query,
@@ -38,6 +39,7 @@ use rollup_freshness_probe::usd_sanity::{
     stranded_metric, stranded_query,
 };
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
+use std::fmt::Display;
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -46,8 +48,46 @@ fn ch_url() -> String {
 /// The probe binds the client to the `prices` database (`client_from_lambda_env
 /// ("prices")` in `main.rs`), which is why the query references tables
 /// unqualified. The IT must do the same so the exact production query resolves.
-fn client() -> Client {
-    Client::default().with_url(ch_url()).with_database("prices")
+///
+/// ⚠️ **It also STOPs the reconciliation MVs in the shared `prices` database**
+/// (review WR-05) — see [`stop_shared_reconcile`]. Every test here that uses
+/// the shared database comes through this function, so none can run while an
+/// hourly reconcile pass is free to rewrite the rows it seeded.
+async fn client() -> Client {
+    let c = Client::default().with_url(ch_url()).with_database("prices");
+    stop_shared_reconcile(&c).await;
+    c
+}
+
+/// `SYSTEM STOP VIEW` every `prices.mv_reconcile_*` that is not already
+/// stopped (review WR-05).
+///
+/// CI applies `schema/rollups.sql` to the shared `prices` database
+/// (`prices-clickhouse-init --rollups`), so it holds the six hourly
+/// reconciliation MVs on the REAL clock, reaching seven days back. These tests
+/// seed `_1m` and `_1h` independently, with deliberately different values, 3 h
+/// to 5 days old — rows no fast MV window reaches. A reconcile pass firing on a
+/// `:00` crossing mid-suite would roll the `_1m` seed up through every tier and
+/// overwrite or add the `_1h`/coarse rows the stranded, peg, freshness and
+/// zero-invariant assertions count: an hourly flake window.
+///
+/// Found LIVE, so a server without the reconcile MVs (a schema applied before
+/// task 0203) needs nothing. The views stay stopped afterwards: that is the
+/// state the whole shared-database suite wants, and STOP is lost on a server
+/// restart anyway (a fresh CI server, or `SYSTEM START VIEW` by hand locally).
+async fn stop_shared_reconcile(c: &Client) {
+    let views: Vec<String> = c
+        .query(
+            "SELECT view FROM system.view_refreshes \
+             WHERE database = 'prices' AND startsWith(view, 'mv_reconcile_') \
+               AND status != 'Disabled'",
+        )
+        .fetch_all()
+        .await
+        .expect("list the shared reconcile MVs");
+    for view in views {
+        exec(c, &format!("SYSTEM STOP VIEW prices.{view}")).await;
+    }
 }
 
 async fn exec(c: &Client, sql: &str) {
@@ -78,9 +118,9 @@ fn bound(table: &str) -> i64 {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
-    let c = client();
+    let c = client().await;
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
@@ -205,9 +245,9 @@ async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
 /// fails and tells the next reader the gate's rationale has changed — rather
 /// than the gate silently becoming cargo cult.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
-    let c = client();
+    let c = client().await;
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
@@ -256,13 +296,13 @@ async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
 /// columns will not deserialize into `DiskUsage` — the bug that shipped a
 /// broken `backfill-freshness-probe` in PR #97.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn disk_query_executes_and_deserializes() {
     use rollup_freshness_probe::disk::{
         DISK_FREE_PERCENT_METRIC, DiskUsage, disk_metrics, disk_query, free_percent,
     };
 
-    let c = client();
+    let c = client().await;
     let usage =
         c.query(disk_query()).fetch_one::<DiskUsage>().await.expect(
             "disk query must execute and deserialize into DiskUsage (two non-nullable u64)",
@@ -305,11 +345,11 @@ async fn disk_query_executes_and_deserializes() {
 /// Creates and drops its own least-privileged user, so it asserts the real
 /// privilege behaviour rather than a mock of it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
     use rollup_freshness_probe::disk::{DiskUsage, disk_query};
 
-    let admin = client();
+    let admin = client().await;
     exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
     exec(
         &admin,
@@ -364,20 +404,20 @@ async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
 // Task 0204, gap 4 — USD-value correctness on the USDT quote leg.
 // ---------------------------------------------------------------------------
 
-/// Seed the canonical USDT identity into `prices.assets` and return its
-/// `asset_id`. The probe resolves the leg by code + issuer rather than a
-/// hard-coded id (task 0139), so the IT has to make that resolution succeed.
-async fn seed_usdt_identity(c: &Client, asset_id: u32) {
-    exec(
-        c,
-        &format!(
-            "INSERT INTO prices.assets \
-               (asset_id, asset_code, asset_type, issuer_address, contract_address) \
-             SELECT {asset_id}, 'USDT', 'credit_alphanum4', '{issuer}', ''",
-            issuer = prices_clickhouse::USDT_ISSUER,
-        ),
-    )
-    .await;
+/// The canonical USDT identity. Displays as its derived id, so a candle quoted
+/// `{USDT}` sits on the leg the probe resolves.
+const USDT: AssetFixture = AssetFixture::new(
+    "USDT",
+    "credit_alphanum4",
+    prices_clickhouse::USDT_ISSUER,
+    "",
+);
+
+/// Seed [`USDT`] into `prices.assets`. The probe resolves the leg by code +
+/// issuer rather than a hard-coded id (task 0139), so the IT has to make that
+/// resolution succeed.
+async fn seed_usdt_identity(c: &Client) {
+    exec(c, &assets_insert("prices", &[USDT])).await;
 }
 
 /// Insert one USDT-quoted candle with an explicit `close` / `close_usd` into a
@@ -393,7 +433,7 @@ async fn seed_usdt_identity(c: &Client, asset_id: u32) {
 async fn insert_candle_into(
     c: &Client,
     table: &str,
-    usdt_id: u32,
+    usdt_id: impl Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -415,7 +455,7 @@ async fn insert_candle_into(
 /// Insert into the **stranded** tier (`price_ohlcv_1h`).
 async fn insert_usdt_candle(
     c: &Client,
-    usdt_id: u32,
+    usdt_id: impl Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -442,7 +482,7 @@ async fn insert_usdt_candle(
 /// tests that should have failed keep passing.
 async fn insert_usdt_minute_candle(
     c: &Client,
-    usdt_id: u32,
+    usdt_id: impl Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -489,16 +529,16 @@ async fn read_peg(c: &Client) -> PegCounts {
 /// arithmetic: a healthy leg reads zero on both directions rather than being
 /// unable to tell.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // A correctly-priced USDT-quoted candle on each tier: USDT at its measured
     // ~0.15, so close_usd is nowhere near close.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "15").await;
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 DAY", "100", "15").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
 
     let stranded = read_stranded(&c).await;
     assert_eq!(stranded.resolved_legs, 1, "the USDT identity must resolve");
@@ -515,19 +555,19 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 /// applied to gap 4: write the exact two defects into the table and assert each
 /// one is counted. Without this the alarm is only proven to *exist*.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_counts_both_induced_defects() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Defect 1 — the peg re-applied, on the tier enrichment WRITES: close_usd
     // == close (task 0172 / 0212).
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     // Defect 2 — stranded past the grace period, on the tier the consumer
     // reads: zero on a representable close (what task 0182's own reset produced
     // on 2026-08-19).
-    insert_usdt_candle(&c, 111, 6, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 6, "now() - INTERVAL 3 DAY", "100", "0").await;
 
     assert_eq!(
         read_peg(&c).await.peg_applied,
@@ -546,19 +586,19 @@ async fn usd_sanity_counts_both_induced_defects() {
 /// zero on every single run. Without this the alarm would breach permanently
 /// and get muted — the state task 0204 exists to end.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_written_zero_is_not_yet_stranded() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Inside the 48 h grace — awaiting enrichment, not damaged.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 1 HOUR", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 1 HOUR", "100", "0").await;
     assert_eq!(read_stranded(&c).await.stranded, 0, "still within grace");
 
     // The same row, aged past the grace, is the defect.
     exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1h").await;
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
     assert_eq!(read_stranded(&c).await.stranded, 1, "past grace = stranded");
 }
 
@@ -568,15 +608,15 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 /// Task 0182 hit exactly this and its first bound (`1e-11`) was three orders of
 /// magnitude too generous.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     insert_usdt_candle(
         &c,
-        111,
+        USDT,
         5,
         "now() - INTERVAL 3 DAY",
         "0.00000000000001",
@@ -592,11 +632,11 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 /// quote-leg filter were dropped, the alarm would breach forever on healthy
 /// data.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // quote_asset_id 999 is not the USDT leg — an unpriceable exotic pair.
     insert_usdt_candle(&c, 999, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
@@ -611,25 +651,27 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 /// that has already been corrected — an alarm firing on history rather than on
 /// state.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     assert_eq!(read_peg(&c).await.peg_applied, 1, "the defect is present");
 
     // The repair: same primary key, corrected value, version + 1.
     exec(
         &c,
-        "INSERT INTO prices.price_ohlcv_1m \
-           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-         SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-                volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
-         FROM prices.price_ohlcv_1m FINAL \
-         WHERE quote_asset_id = 111 AND close_usd = close",
+        &format!(
+            "INSERT INTO prices.price_ohlcv_1m \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                    volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
+             FROM prices.price_ohlcv_1m FINAL \
+             WHERE quote_asset_id = {USDT} AND close_usd = close"
+        ),
     )
     .await;
 
@@ -645,12 +687,12 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
 /// would score a check that never ran as perfectly healthy. `resolved_legs`
 /// exists so `peg_metric` can refuse it, and `main.rs` fails the invocation.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     // Deliberately no USDT identity seeded.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
 
     let counts = read_peg(&c).await;
     assert_eq!(counts.resolved_legs, 0);
@@ -680,17 +722,17 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
 /// confident **0** over that population. The assertion that matters is the
 /// second one: the tier the check used to read shows nothing wrong.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // The tier enrichment writes: the peg re-applied.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     // The repaired coarse tier: the SAME candle, correctly valued at ~0.15 —
     // which is precisely what 0182's repair left behind.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
 
     assert_eq!(
         read_peg(&c).await.peg_applied,
@@ -717,14 +759,14 @@ async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean(
 /// the tempting simplification — one query over one tier — is what made the peg
 /// direction blind, and a future "let's just union them" would restore it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn each_direction_only_scans_its_own_tier() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Rows in `_1m` only.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     assert_eq!(read_peg(&c).await.scanned, 1);
     assert_eq!(
         read_stranded(&c).await.scanned,
@@ -740,8 +782,8 @@ async fn each_direction_only_scans_its_own_tier() {
     // to `price_ohlcv_1h` — testing the window instead of the tier. Inside the
     // peg window, only the tier can explain a zero.
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "0").await;
+    seed_usdt_identity(&c).await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "0").await;
     assert_eq!(read_stranded(&c).await.scanned, 1);
     assert_eq!(
         read_peg(&c).await.scanned,
@@ -757,18 +799,18 @@ async fn each_direction_only_scans_its_own_tier() {
 /// table — which is the property that makes a cleanup run unable to move the
 /// count.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Inside the 48 h peg window — counted.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     // Older than the peg window but still well inside `_1m`'s 7-day retention,
     // i.e. exactly the band a widened window would have picked up and a cleanup
     // run could then remove underneath it.
-    insert_usdt_minute_candle(&c, 111, 6, "now() - INTERVAL 5 DAY", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 6, "now() - INTERVAL 5 DAY", "100", "100").await;
 
     let peg = read_peg(&c).await;
     assert_eq!(peg.scanned, 1, "only the in-window row is examined");
@@ -783,14 +825,14 @@ async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
 /// they came from one query, and the muting failure from the other side once
 /// they read different tiers.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_empty_peg_scan_does_not_suppress_the_stranded_metric() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // `_1m` is empty; `_1h` carries a real stranded candle.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
 
     let peg = read_peg(&c).await;
     assert_eq!(
@@ -833,9 +875,9 @@ fn drift_value(metrics: &[DriftMetric], name: &str) -> f64 {
 /// fails to execute or a fingerprint parser that no longer matches what
 /// ClickHouse renders.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_applied_schema_reports_no_drift() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("prices"))
         .fetch_one()
@@ -871,9 +913,9 @@ async fn a_freshly_applied_schema_reports_no_drift() {
 /// Without this the alarm is proven to exist but not to detect anything —
 /// exactly the "verified by reading the CDK" failure AC 4 names.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_edited_declaration_is_detected_as_drift() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("prices"))
         .fetch_one()
@@ -917,9 +959,9 @@ async fn an_edited_declaration_is_detected_as_drift() {
 /// Creates a throwaway MV and target rather than touching the real rollup chain,
 /// and drops both afterwards.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_live_mv_without_append_is_detected_as_critical() {
-    let c = client();
+    let c = client().await;
     exec(&c, "DROP VIEW IF EXISTS prices.mv_gap3_probe").await;
     exec(&c, "DROP TABLE IF EXISTS prices.gap3_probe_target").await;
     exec(
@@ -970,9 +1012,9 @@ async fn a_live_mv_without_append_is_detected_as_critical() {
 /// published as "every MV is missing" — which would page as if the whole rollup
 /// chain had been deleted.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("no_such_database"))
         .fetch_one()
@@ -996,4 +1038,894 @@ async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
         0.0,
         "must not page as if the rollup chain were deleted"
     );
+}
+
+// ---- current_prices writer liveness (task 0243) ------------------------------
+//
+// Both tests run in a scratch database built from the real schema, so they never
+// TRUNCATE anything in `prices.*`, cannot race each other, and are immune to
+// whatever a local `prices.mv_current_prices` happens to be doing.
+
+fn scratch_rewrite(sql: &str, db: &str) -> String {
+    sql.replace("prices.", &format!("{db}."))
+        .replace("IF NOT EXISTS prices", &format!("IF NOT EXISTS {db}"))
+}
+
+/// A fresh scratch database holding the full `init.sql` schema, and a client
+/// bound to it — so the exact production query (unqualified table name) resolves.
+async fn scratch_db(db: &str) -> Client {
+    let admin = Client::default().with_url(ch_url());
+    exec(&admin, &format!("DROP DATABASE IF EXISTS {db}")).await;
+    exec(&admin, &format!("CREATE DATABASE {db}")).await;
+    prices_clickhouse::apply_sql(&admin, &scratch_rewrite(prices_clickhouse::INIT_SQL, db))
+        .await
+        .expect("init schema");
+    Client::default().with_url(ch_url()).with_database(db)
+}
+
+async fn drop_scratch_db(db: &str) {
+    let admin = Client::default().with_url(ch_url());
+    let _ = admin
+        .query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute()
+        .await;
+}
+
+async fn current_prices_age(
+    c: &Client,
+) -> rollup_freshness_probe::current_prices::CurrentPricesAge {
+    c.query(rollup_freshness_probe::current_prices::current_prices_age_query())
+        .fetch_one()
+        .await
+        .expect("the production current_prices query executes and deserializes")
+}
+
+/// Task 0243: the exact production query against a real `current_prices` schema
+/// — empty, stale, and holding an unmerged newer version — and the FINAL
+/// correction to the task sketch, pinned against the engine rather than argued.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn current_prices_age_query_executes_and_breaches_when_stale_or_empty() {
+    use rollup_freshness_probe::EMPTY_TIER_SENTINEL_SECONDS;
+    use rollup_freshness_probe::current_prices::{AGE_BOUND_SECONDS, current_prices_metric};
+
+    let db = "it_current_prices_age_0243";
+    let c = scratch_db(db).await;
+
+    // Empty: one row comes back even over zero rows (there is no HAVING), and
+    // what gets published is the sentinel, not the ~56-year epoch age.
+    let empty = current_prices_age(&c).await;
+    assert_eq!(empty.row_count, 0);
+    let m = current_prices_metric(&empty);
+    assert_eq!(m.table, "current_prices");
+    assert_eq!(m.value, EMPTY_TIER_SENTINEL_SECONDS as f64);
+
+    // Stale: last rewritten 20 minutes ago, so over the bound and published as-is.
+    exec(
+        &c,
+        "INSERT INTO current_prices (asset_id, updated_at) SELECT 1, now() - INTERVAL 20 MINUTE",
+    )
+    .await;
+    let stale = current_prices_age(&c).await;
+    assert_eq!(stale.row_count, 1);
+    assert!(
+        (1190..=1260).contains(&stale.age_seconds),
+        "a row written 20 min ago must read ~1200 s, got {}",
+        stale.age_seconds
+    );
+    assert!(stale.age_seconds > AGE_BOUND_SECONDS);
+    assert_eq!(
+        current_prices_metric(&stale).value,
+        stale.age_seconds as f64
+    );
+
+    // FINAL invariance: a newer, still unmerged version of the same asset must be
+    // the one measured, with or without FINAL — the version column IS updated_at.
+    exec(
+        &c,
+        "INSERT INTO current_prices (asset_id, updated_at) SELECT 1, now() - INTERVAL 30 SECOND",
+    )
+    .await;
+    let plain = current_prices_age(&c).await.age_seconds;
+    let with_final: i64 = c
+        .query(
+            "SELECT toInt64(toUnixTimestamp(now()) - toUnixTimestamp(max(updated_at))) \
+             FROM current_prices FINAL",
+        )
+        .fetch_one()
+        .await
+        .expect("FINAL reading");
+    assert!(
+        (plain - with_final).abs() <= 1,
+        "without FINAL {plain} s, with FINAL {with_final} s"
+    );
+    assert!(
+        (25..=45).contains(&plain),
+        "the newer version must be the one measured, got {plain} s"
+    );
+
+    drop_scratch_db(db).await;
+}
+
+/// Task 0243: the link the alarm rests on, end to end on the pinned engine.
+/// While `mv_current_prices` runs, the age stays low; once it is STOPPED the age
+/// grows one-for-one with the clock and the rows stay put; START + REFRESH bring
+/// it back. It doubles as a rehearsal of the production commands in task 0283.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_stopped_mv_current_prices_freezes_updated_at_and_its_age_grows() {
+    let db = "it_current_prices_mv_0243";
+    let c = scratch_db(db).await;
+
+    // The real MV, with its 1-minute schedule shortened so the test runs in seconds.
+    let original = scratch_rewrite(prices_clickhouse::CURRENT_SQL, db);
+    let mv_sql = original.replace("REFRESH EVERY 1 MINUTE", "REFRESH EVERY 2 SECOND");
+    assert_ne!(mv_sql, original, "the schedule swap must apply");
+    let mv_client = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&mv_client, &mv_sql)
+        .await
+        .expect("create mv_current_prices");
+
+    // One priced candle, so the MV has a row to write.
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (now(), 1, 2, 'sdex', 2, 2, 2, 2, 50, 100, 100, 2, 2, 1, 1)"
+        ),
+    )
+    .await;
+    exec(&c, &format!("SYSTEM REFRESH VIEW {db}.mv_current_prices")).await;
+
+    // Running: the writer keeps rewriting, so the age stays within a few seconds.
+    let mut running = None;
+    for _ in 0..40 {
+        let a = current_prices_age(&c).await;
+        if a.row_count > 0 {
+            running = Some(a);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let running = running.expect("mv_current_prices did not populate current_prices in time");
+    assert!(
+        running.age_seconds <= 4,
+        "a running writer keeps the age low, got {} s",
+        running.age_seconds
+    );
+
+    // Stopped: the table keeps its rows and the age climbs with the clock.
+    exec(&c, &format!("SYSTEM STOP VIEW {db}.mv_current_prices")).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let a0 = current_prices_age(&c).await;
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let a1 = current_prices_age(&c).await;
+    assert_eq!(
+        a1.row_count, a0.row_count,
+        "a stopped writer leaves its last rows in place"
+    );
+    assert!(
+        a1.age_seconds >= a0.age_seconds + 5,
+        "the age must grow once the writer stops: {} s -> {} s",
+        a0.age_seconds,
+        a1.age_seconds
+    );
+
+    // Restarted: START + REFRESH bring the age back down.
+    exec(&c, &format!("SYSTEM START VIEW {db}.mv_current_prices")).await;
+    exec(&c, &format!("SYSTEM REFRESH VIEW {db}.mv_current_prices")).await;
+    let mut recovered = false;
+    for _ in 0..40 {
+        if current_prices_age(&c).await.age_seconds <= 4 {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(recovered, "START + REFRESH did not bring the age back down");
+
+    drop_scratch_db(db).await;
+}
+
+// ---- ADR 0292 / task 0151: the stored-data invariants of the zero sentinel ----
+
+/// One `price_ohlcv_1m` row with every column the invariants read spelled out —
+/// the pf column above all: left to its DEFAULT (`trade_count`) it would turn
+/// the dust-only fixture into a healthy row.
+///
+/// `ts` is a unix timestamp fixed by the caller, NOT `now()` evaluated per
+/// insert: the table's key is `(asset_id, quote_asset_id, source, timestamp)`,
+/// so a repair only supersedes the row it repairs if it lands on the same one.
+async fn insert_invariant_row(
+    c: &Client,
+    ts: u32,
+    asset_id: u32,
+    (close, close_usd, pf): (&str, &str, u32),
+    version: u32,
+) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO prices.price_ohlcv_1m \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                version, pf_trade_count, pf_volume, pf_price_volume) \
+             SELECT toDateTime({ts}), {asset_id}, 2, 'sdex', \
+                    {close}, {close}, {close}, {close}, 1, 1, 0, {close_usd}, 1, 3, {version}, \
+                    {pf}, {pf}, {pf}"
+        ),
+    )
+    .await;
+}
+
+async fn read_zero_invariants(
+    c: &Client,
+) -> rollup_freshness_probe::zero_invariants::ZeroInvariantCounts {
+    c.query(&rollup_freshness_probe::zero_invariants::zero_invariant_query())
+        .fetch_one()
+        .await
+        .expect("the invariant query executes and deserializes")
+}
+
+/// The assertion must **execute and deserialize** on the production build, and
+/// count exactly the rows that break an invariant — no healthy shape among them.
+/// The two healthy rows are the ones a careless predicate would flag: a priced
+/// candle not yet enriched (`close_usd = 0` is meaning 1, not a violation) and
+/// a dust-only candle (`close = 0` is CORRECT when `pf_trade_count = 0`).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
+    use rollup_freshness_probe::zero_invariants::{ZeroInvariantCounts, zero_invariant_metric};
+
+    let c = client().await;
+    reset_sanity_tables(&c).await;
+    let ts: u32 = c
+        .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
+        .fetch_one()
+        .await
+        .unwrap();
+
+    insert_invariant_row(&c, ts, 10, ("5", "0", 3), 1).await; // priced, pending enrichment
+    insert_invariant_row(&c, ts, 11, ("0", "0", 0), 1).await; // dust-only: no price, correctly
+    insert_invariant_row(&c, ts, 12, ("5", "0", 0), 1).await; // ⛔ no price-forming fill, yet a close
+    insert_invariant_row(&c, ts, 13, ("0", "3", 3), 1).await; // ⛔ a USD close without a close
+
+    let counts = read_zero_invariants(&c).await;
+    assert_eq!(
+        counts,
+        ZeroInvariantCounts {
+            violations: 2,
+            scanned: 4
+        }
+    );
+    assert_eq!(zero_invariant_metric(&counts).unwrap().value, 2.0);
+
+    reset_sanity_tables(&c).await;
+}
+
+/// The writer defect the alarm names as its usual cause, reproduced as a writer
+/// would commit it: a statement that OMITS `pf_trade_count`. The column then
+/// takes its DEFAULT (`trade_count`), so a dust-only minute — `close = 0` — is
+/// stored claiming five price-forming fills (ADR 0287's trap). Neither of the
+/// first two invariants can see it: one needs `pf_trade_count = 0`, the other
+/// `close_usd > 0`. RED without the third, `pf_trade_count > 0 ⇒ close > 0`.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violation() {
+    use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
+
+    let c = client().await;
+    reset_sanity_tables(&c).await;
+
+    // No pf_trade_count, pf_volume or pf_price_volume in the column list.
+    exec(
+        &c,
+        "INSERT INTO prices.price_ohlcv_1m \
+           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         SELECT now() - INTERVAL 2 MINUTE, 14, 2, 'sdex', 0, 0, 0, 0, 5, 5, 0, 0, 0, 5, 1",
+    )
+    .await;
+
+    assert_eq!(
+        read_zero_invariants(&c).await,
+        ZeroInvariantCounts {
+            violations: 1,
+            scanned: 1
+        },
+        "a candle that claims price-forming fills must carry a price"
+    );
+
+    reset_sanity_tables(&c).await;
+}
+
+/// `FINAL` is the alarm's whole recovery path: an operator repairs a violating
+/// candle by re-inserting it at a higher `version`, and the count must DROP.
+/// RED without `FINAL`: the superseded row is still read, so the repair adds a
+/// scanned row and clears nothing — a page that latches after the data is fixed.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_repaired_candle_stops_counting_as_a_zero_invariant_violation() {
+    use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
+
+    let c = client().await;
+    reset_sanity_tables(&c).await;
+    let ts: u32 = c
+        .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
+        .fetch_one()
+        .await
+        .unwrap();
+
+    insert_invariant_row(&c, ts, 12, ("5", "0", 0), 1).await; // ⛔ the violation
+    insert_invariant_row(&c, ts, 13, ("0", "3", 3), 1).await; // ⛔ a second, left unrepaired
+    insert_invariant_row(&c, ts, 12, ("0", "0", 0), 2).await; // the repair of the first
+
+    assert_eq!(
+        read_zero_invariants(&c).await,
+        ZeroInvariantCounts {
+            violations: 1,
+            scanned: 2
+        },
+        "a repair at a higher version must clear its violation, not add a row to the scan"
+    );
+
+    reset_sanity_tables(&c).await;
+}
+
+/// The window is a claim about scope, not only about cost: a legacy row written
+/// before task 0286 is out of scope until its phase 3 re-ingests the history
+/// (ADR 0292), and must neither page nor pad `scanned`. RED without the `WHERE`.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
+    use rollup_freshness_probe::zero_invariants::{
+        ZERO_INVARIANT_LOOKBACK_SECONDS, ZeroInvariantCounts,
+    };
+
+    let c = client().await;
+    reset_sanity_tables(&c).await;
+    let now: u32 = c
+        .query("SELECT toUnixTimestamp(now())")
+        .fetch_one()
+        .await
+        .unwrap();
+    let inside = now - 120;
+    let outside = now - ZERO_INVARIANT_LOOKBACK_SECONDS as u32 - 3_600;
+
+    insert_invariant_row(&c, inside, 10, ("5", "0", 3), 1).await; // healthy, in the window
+    insert_invariant_row(&c, outside, 12, ("5", "0", 0), 1).await; // ⛔ but an hour past it
+
+    assert_eq!(
+        read_zero_invariants(&c).await,
+        ZeroInvariantCounts {
+            violations: 0,
+            scanned: 1
+        }
+    );
+
+    reset_sanity_tables(&c).await;
+}
+
+// ---- Rollup MVs stuck behind a dependency (task 0203 / 0143) ----------------
+//
+// Since task 0143 the rollup MVs are chained with `DEPENDS ON`. A stopped,
+// failing or missing dependency leaves its dependents `WaitingForDependencies`
+// forever, with no error (BRIEF §2). These pin the probe's read of that state
+// against a live 26.3.10.60 scheduler, and its refusal to publish a 0 when the
+// table is denied.
+
+/// One declared view's `(status, next_refresh_time, last_success_time)` as
+/// epoch seconds, straight from `system.view_refreshes`.
+async fn view_state(c: &Client, db: &str, view: &str) -> (String, i64, i64) {
+    c.query(&format!(
+        "SELECT toString(status), \
+                toInt64(toUnixTimestamp(ifNull(next_refresh_time, toDateTime(0)))), \
+                toInt64(toUnixTimestamp(ifNull(last_success_time, toDateTime(0)))) \
+         FROM system.view_refreshes WHERE database = '{db}' AND view = '{view}'"
+    ))
+    .fetch_one::<(String, i64, i64)>()
+    .await
+    .unwrap_or_else(|e| panic!("{view} is listed in system.view_refreshes: {e}"))
+}
+
+/// ⚠️ **Induce the condition.** STOP `mv_ohlcv_1h_to_4h`, then move
+/// `mv_ohlcv_4h_to_1d`'s scheduler just past its next 4-hour slot with
+/// `SYSTEM TEST VIEW … SET FAKE TIME`. The dependent fires for that slot, finds
+/// its dependency has not refreshed for it, and waits — forever, with no error.
+/// The probe's own query must see it `WaitingForDependencies` and its
+/// dependency `Disabled`.
+///
+/// ⚠️ The classifier is handed the FAKE clock (`slot + period + 1`), not the
+/// row's `db_now_unix`: fake time moves only the view's scheduler, not `now()`,
+/// so the wait has not yet aged in wall time. A real stall reaches the same
+/// state by waiting out one period of wall time — which is what the probe's
+/// server clock measures in production.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, refresh_wait_metrics, refresh_waits_query,
+    };
+
+    const DEPENDENT: &str = "mv_ohlcv_4h_to_1d";
+    const DEPENDENCY: &str = "mv_ohlcv_1h_to_4h";
+    const PERIOD: i64 = 14_400; // mv_ohlcv_4h_to_1d REFRESH EVERY 4 HOUR
+
+    let db = "it_refresh_waits_0203";
+    let c = scratch_db(db).await;
+    let rmv = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&rmv, &scratch_rewrite(prices_clickhouse::ROLLUPS_SQL, db))
+        .await
+        .expect("apply the generated rollup chain");
+
+    // Let the CREATE-time refreshes settle, then switch the dependency off.
+    for view in [DEPENDENCY, DEPENDENT] {
+        exec(&rmv, &format!("SYSTEM WAIT VIEW {db}.{view}")).await;
+    }
+    exec(&rmv, &format!("SYSTEM STOP VIEW {db}.{DEPENDENCY}")).await;
+
+    // The dependent's next slot on the real clock, and a fake clock 30 s past
+    // it (FAKE TIME takes a string literal; the server renders it in its TZ).
+    let (_, slot, _) = view_state(&c, db, DEPENDENT).await;
+    assert!(slot > 0, "{DEPENDENT} has a scheduled next refresh");
+    let fake: String = c
+        .query(&format!("SELECT toString(toDateTime({}))", slot + 30))
+        .fetch_one()
+        .await
+        .expect("render the fake time");
+    exec(
+        &rmv,
+        &format!("SYSTEM TEST VIEW {db}.{DEPENDENT} SET FAKE TIME '{fake}'"),
+    )
+    .await;
+
+    // Poll until the dependent either waits or (without DEPENDS ON) runs.
+    let mut state = view_state(&c, db, DEPENDENT).await;
+    for _ in 0..80 {
+        if state.0 == "WaitingForDependencies" || state.2 >= slot {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        state = view_state(&c, db, DEPENDENT).await;
+    }
+
+    // Collect everything before asserting, and drop the scratch DB (its MVs
+    // keep firing) before any assertion can unwind past the cleanup.
+    let rows = c
+        .query(&refresh_waits_query(db))
+        .fetch_all::<ViewRefreshRow>()
+        .await;
+    drop_scratch_db(db).await;
+    let rows = rows.expect("the probe's refresh-waits query executes and deserializes");
+
+    let find = |view: &str| {
+        rows.iter()
+            .find(|r| r.view == view)
+            .unwrap_or_else(|| panic!("{view} is among the probe's rows: {rows:?}"))
+    };
+    let dependent = find(DEPENDENT);
+    assert_eq!(
+        dependent.status, "WaitingForDependencies",
+        "with its dependency STOPped, {DEPENDENT} must wait for slot {slot} instead of \
+         running (last_success_time {}); rows: {rows:?}",
+        state.2
+    );
+    assert_eq!(
+        dependent.next_refresh_unix, slot,
+        "a waiting view keeps the slot it waits for as next_refresh_time"
+    );
+    assert_eq!(find(DEPENDENCY).status, "Disabled");
+    assert_eq!(rows.len(), 12, "all twelve declared views are listed");
+
+    let value_of = |m: &[rollup_freshness_probe::mv_drift::DriftMetric], name: &str| {
+        m.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} published"))
+            .value
+    };
+
+    // A whole period later on the scheduler's clock: stuck, and the STOP shows.
+    let m = refresh_wait_metrics(&rows, slot + PERIOD + 1);
+    assert!(value_of(&m, MV_REFRESH_WAITING_METRIC) >= 1.0, "{m:?}");
+    assert!(value_of(&m, MV_REFRESH_DISABLED_METRIC) >= 1.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_UNREADABLE_METRIC), 0.0);
+
+    // The threshold, on the two views this test controls. The other ten run
+    // on the REAL clock, so judging them against a fake "now" hours ahead could
+    // count an ordinary momentary wait of theirs.
+    let pair: Vec<ViewRefreshRow> = rows
+        .iter()
+        .filter(|r| r.view == DEPENDENT || r.view == DEPENDENCY)
+        .cloned()
+        .collect();
+    assert_eq!(
+        value_of(
+            &refresh_wait_metrics(&pair, slot + PERIOD + 1),
+            MV_REFRESH_WAITING_METRIC
+        ),
+        1.0
+    );
+    // Review WR-07: one stall is counted once — the waiting view's and the
+    // STOPped view's stale successes belong to their own counts, not failing.
+    // Judged where both successes ARE stale (more than two own periods old),
+    // so only the waiting/disabled exclusion keeps them out of the count.
+    let last_success = |view: &str| {
+        find(view)
+            .last_success_unix
+            .unwrap_or_else(|| panic!("{view} succeeded at CREATE: {rows:?}"))
+    };
+    let stale_now = (slot + PERIOD + 1)
+        .max(last_success(DEPENDENT) + 2 * PERIOD + 1)
+        .max(last_success(DEPENDENCY) + 2 * 3_600 + 1);
+    let m = refresh_wait_metrics(&pair, stale_now);
+    assert_eq!(value_of(&m, MV_REFRESH_WAITING_METRIC), 1.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_DISABLED_METRIC), 1.0, "{m:?}");
+    assert_eq!(
+        value_of(&m, MV_REFRESH_FAILING_METRIC),
+        0.0,
+        "a waiting or STOPped view is never also failing, however old its last success: {m:?}"
+    );
+    for not_yet in [slot + 1, slot + PERIOD] {
+        assert_eq!(
+            value_of(
+                &refresh_wait_metrics(&pair, not_yet),
+                MV_REFRESH_WAITING_METRIC
+            ),
+            0.0,
+            "a wait of at most one period (now = slot + {}) is an ordinary slot",
+            not_yet - slot
+        );
+    }
+}
+
+/// ⚠️ **Induce the condition** (review WR-07). The two monthly LEAVES —
+/// `mv_ohlcv_1d_to_1M` and `mv_reconcile_1d_to_1M` — fail on every pass: the
+/// column `vwap` of their shared target is renamed away, so the `INSERT` each
+/// pass makes into it fails at analysis, whatever the data and whatever the
+/// clock (a data-driven failure would need a CLOSED month inside the 7-day
+/// reconcile window, which exists only in a month's first week). Nothing
+/// `DEPENDS ON` a leaf, so neither makes anything wait: after its retries
+/// ClickHouse puts it back to `Scheduled` with the error in `exception`. The
+/// waiting and disabled counts therefore read 0 — the gap — and only the
+/// failing count, from the probe's exact read and classification, sees them.
+///
+/// Real clock throughout (no fake time), so the row's own `db_now_unix` is
+/// the probe's `now`, exactly as in production.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_failing_leaf_is_reported_as_failing_though_nothing_waits_on_it() {
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, metrics_for_read,
+        refresh_waits_query,
+    };
+
+    const LEAVES: [&str; 2] = ["mv_ohlcv_1d_to_1M", "mv_reconcile_1d_to_1M"];
+
+    let db = "it_refresh_failing_0203";
+    let c = scratch_db(db).await;
+    let rmv = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&rmv, &scratch_rewrite(prices_clickhouse::ROLLUPS_SQL, db))
+        .await
+        .expect("apply the generated rollup chain");
+    for (view, _) in prices_clickhouse::rollup_sql::rollup_views() {
+        exec(&rmv, &format!("SYSTEM WAIT VIEW {db}.{view}")).await;
+    }
+
+    exec(
+        &c,
+        &format!("ALTER TABLE {db}.price_ohlcv_1M RENAME COLUMN vwap TO vwap_renamed_by_it"),
+    )
+    .await;
+    for view in LEAVES {
+        // SYSTEM REFRESH VIEW ignores DEPENDS ON, so each leaf runs now.
+        exec(&rmv, &format!("SYSTEM REFRESH VIEW {db}.{view}")).await;
+    }
+
+    // Poll until both leaves are back to Scheduled with their error (retries
+    // spent), or give up after ~20 s and let the assertions say what is left.
+    let mut rows: Result<Vec<ViewRefreshRow>, clickhouse::error::Error> = Ok(vec![]);
+    for _ in 0..80 {
+        rows = c
+            .query(&refresh_waits_query(db))
+            .fetch_all::<ViewRefreshRow>()
+            .await;
+        let settled = rows.as_ref().is_ok_and(|rows| {
+            LEAVES.iter().all(|leaf| {
+                rows.iter()
+                    .any(|r| r.view == *leaf && r.status == "Scheduled" && !r.exception.is_empty())
+            })
+        });
+        if settled {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    // Everything collected; drop the scratch DB (its MVs keep firing) before
+    // any assertion can unwind past the cleanup.
+    drop_scratch_db(db).await;
+    let rows = rows.expect("the probe's refresh-waits query executes and deserializes");
+    assert_eq!(
+        rows.len(),
+        12,
+        "all twelve declared views are listed: {rows:?}"
+    );
+
+    for leaf in LEAVES {
+        let row = rows
+            .iter()
+            .find(|r| r.view == leaf)
+            .unwrap_or_else(|| panic!("{leaf} is among the probe's rows"));
+        assert_eq!(
+            row.status, "Scheduled",
+            "{leaf}: a failing leaf is Scheduled, not waiting — the state no \
+             other count can see; row: {row:?}"
+        );
+        assert!(
+            row.exception.contains("vwap"),
+            "{leaf}: the induced failure is the one recorded: {row:?}"
+        );
+    }
+
+    let value_of = |m: &[DriftMetric], name: &str| {
+        m.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} published: {m:?}"))
+            .value
+    };
+    let detail = describe_failing(&rows, rows[0].db_now_unix);
+    let m =
+        metrics_for_read::<clickhouse::error::Error>(Ok(rows)).expect("a readable table publishes");
+    assert_eq!(
+        value_of(&m, MV_REFRESH_FAILING_METRIC),
+        2.0,
+        "exactly the two failing leaves: {detail}"
+    );
+    assert_eq!(value_of(&m, MV_REFRESH_WAITING_METRIC), 0.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_DISABLED_METRIC), 0.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_UNREADABLE_METRIC), 0.0, "{m:?}");
+    for leaf in LEAVES {
+        assert!(
+            detail.contains(&format!("{leaf}: Code: ")),
+            "the log detail names {leaf} and its error: {detail}"
+        );
+    }
+}
+
+/// `system.view_refreshes` is DENIED — not grant-filtered like `system.tables`
+/// — to a user holding only `SELECT ON prices.*`, the shape of the probe's
+/// `prices_writer` identity (measured on 26.3.10.60, RESEARCH §3). The probe's
+/// exact read must come back as the unreadable flag ALONE: a waiting/disabled/failing
+/// 0 would read as a healthy chain the probe cannot see.
+///
+/// Creates and drops its own least-privileged user; both results are
+/// collected and the user dropped before anything can panic.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn view_refreshes_is_denied_to_a_prices_only_user_and_reads_as_unreadable() {
+    use rollup_freshness_probe::refresh_waits::{
+        ViewRefreshRow, is_access_denied, metrics_for_read, refresh_waits_query, unreadable_metrics,
+    };
+
+    let admin = client().await;
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
+    exec(
+        &admin,
+        "CREATE USER rollup_probe_waits_it IDENTIFIED WITH no_password",
+    )
+    .await;
+    exec(&admin, "GRANT SELECT ON prices.* TO rollup_probe_waits_it").await;
+
+    let restricted = Client::default()
+        .with_url(ch_url())
+        .with_database("prices")
+        .with_user("rollup_probe_waits_it");
+
+    let read = restricted
+        .query(&refresh_waits_query("prices"))
+        .fetch_all::<ViewRefreshRow>()
+        .await
+        .map_err(|e| e.to_string());
+    // The control: the same user CAN read the grant-filtered system.tables.
+    let tables: Result<u64, _> = restricted
+        .query("SELECT count() FROM system.tables WHERE database = 'prices'")
+        .fetch_one()
+        .await;
+
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
+
+    assert!(
+        tables.expect("system.tables is filtered, not denied") > 0,
+        "the control: a prices-only user sees its own schema"
+    );
+    let err = read
+        .clone()
+        .expect_err("system.view_refreshes must be denied to a prices-only user");
+    assert!(
+        is_access_denied(&err),
+        "the refusal must be recognised as a grant gap, got: {err}"
+    );
+    assert_eq!(
+        metrics_for_read(read),
+        Ok(unreadable_metrics()),
+        "a denied read publishes the unreadable flag and no count"
+    );
+}
+
+// ---- Task 0139: asset-id uniqueness and orphan candles -----------------------
+//
+// Scratch databases built from the real schema, so the probe's unqualified
+// queries resolve exactly as on prod and nothing in `prices.*` is touched.
+
+const FOO: AssetFixture = AssetFixture::new("FOO", "classic", "GFOO", "");
+const USDC: AssetFixture = AssetFixture::new("USDC", "classic", prices_clickhouse::USDC_ISSUER, "");
+
+async fn read_asset_ids(c: &Client) -> rollup_freshness_probe::asset_id_uniqueness::AssetIdCounts {
+    c.query(&rollup_freshness_probe::asset_id_uniqueness::collisions_query())
+        .fetch_one()
+        .await
+        .expect("the collision query executes and deserializes")
+}
+
+async fn read_orphans(
+    c: &Client,
+) -> rollup_freshness_probe::asset_id_uniqueness::OrphanCandleCounts {
+    c.query(&rollup_freshness_probe::asset_id_uniqueness::orphan_candles_query())
+        .fetch_one()
+        .await
+        .expect("the orphan query executes and deserializes")
+}
+
+/// One `_1m` candle `mins_ago` minutes old. `base` / `quote` are SQL id
+/// expressions: a fixture asset (`{FOO}`) or a bare number no row carries.
+async fn insert_id_candle(c: &Client, base: impl Display, quote: impl Display, mins_ago: u32) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO price_ohlcv_1m \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT now() - INTERVAL {mins_ago} MINUTE, {base}, {quote}, 'sdex', \
+                    1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1"
+        ),
+    )
+    .await;
+}
+
+/// A registry whose ids are derived from the identity reads 0 collisions, and
+/// candles on those ids read 0 orphans.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_derived_registry_reads_no_collision_and_no_orphan() {
+    use rollup_freshness_probe::asset_id_uniqueness::{
+        AssetIdCounts, OrphanCandleCounts, collisions_metric, orphan_candles_metric,
+    };
+
+    let db = "it_probe_0139_clean";
+    let c = scratch_db(db).await;
+    exec(&c, &assets_insert(db, &[FOO, USDC])).await;
+    insert_id_candle(&c, FOO, USDC, 2).await;
+
+    let ids = read_asset_ids(&c).await;
+    assert_eq!(
+        ids,
+        AssetIdCounts {
+            identities: 2,
+            ids: 2
+        }
+    );
+    assert_eq!(collisions_metric(&ids).unwrap().value, 0.0);
+    let orphans = read_orphans(&c).await;
+    assert_eq!(
+        orphans,
+        OrphanCandleCounts {
+            orphans: 0,
+            scanned: 1
+        }
+    );
+    assert_eq!(orphan_candles_metric(&orphans).unwrap().value, 0.0);
+
+    drop_scratch_db(db).await;
+}
+
+/// Two identities on one id read as one collision. The registry here has the
+/// pre-0139 shape (a plain id column, as prod's `assets` holds until the
+/// window), because the derived schema cannot store a shared id at all.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn one_id_shared_by_two_identities_is_one_collision() {
+    use rollup_freshness_probe::asset_id_uniqueness::collisions_metric;
+
+    let db = "it_probe_0139_collision";
+    let c = scratch_db(db).await;
+    exec(&c, "DROP TABLE assets").await;
+    exec(
+        &c,
+        "CREATE TABLE assets ( \
+             asset_id UInt32, asset_code String, issuer_address String, \
+             contract_address String, updated_at DateTime DEFAULT now()) \
+         ENGINE = ReplacingMergeTree(updated_at) \
+         ORDER BY (asset_code, issuer_address, contract_address)",
+    )
+    .await;
+    // 4194's shape on prod: STW and ARBRIDGE on one id, beside a clean one.
+    exec(
+        &c,
+        "INSERT INTO assets (asset_id, asset_code, issuer_address, contract_address) VALUES \
+         (4194, 'STW', 'GA2L', ''), (4194, 'ARBRIDGE', 'GBAC', ''), (3, 'USDC', 'GA5Z', '')",
+    )
+    .await;
+
+    let ids = read_asset_ids(&c).await;
+    assert_eq!((ids.identities, ids.ids), (3, 2));
+    assert_eq!(collisions_metric(&ids).unwrap().value, 1.0);
+
+    drop_scratch_db(db).await;
+}
+
+/// A candle naming an id with no `assets` row is an orphan, on either leg; one
+/// older than the window is not counted.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_candle_on_an_unregistered_id_is_an_orphan_on_either_leg() {
+    use rollup_freshness_probe::asset_id_uniqueness::orphan_candles_metric;
+
+    let db = "it_probe_0139_orphan";
+    let c = scratch_db(db).await;
+    exec(&c, &assets_insert(db, &[FOO, USDC])).await;
+    insert_id_candle(&c, FOO, USDC, 2).await;
+    insert_id_candle(&c, 999, USDC, 3 * 60).await; // outside the 2 h window
+
+    insert_id_candle(&c, 999, USDC, 2).await;
+    let orphans = read_orphans(&c).await;
+    assert_eq!((orphans.orphans, orphans.scanned), (1, 2), "base leg");
+    assert_eq!(orphan_candles_metric(&orphans).unwrap().value, 1.0);
+
+    insert_id_candle(&c, FOO, 998, 2).await;
+    let orphans = read_orphans(&c).await;
+    assert_eq!((orphans.orphans, orphans.scanned), (2, 3), "quote leg");
+
+    drop_scratch_db(db).await;
+}
+
+/// An empty registry and an empty window are unreadable: both reads succeed,
+/// and both readings are refused rather than published as a healthy 0.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn an_empty_registry_or_window_is_refused_as_unreadable() {
+    use rollup_freshness_probe::asset_id_uniqueness::{
+        UniquenessRefusal, collisions_metric, orphan_candles_metric,
+    };
+
+    let db = "it_probe_0139_empty";
+    let c = scratch_db(db).await;
+
+    assert_eq!(
+        collisions_metric(&read_asset_ids(&c).await),
+        Err(UniquenessRefusal::EmptyRegistry)
+    );
+    assert_eq!(
+        orphan_candles_metric(&read_orphans(&c).await),
+        Err(UniquenessRefusal::EmptyWindow)
+    );
+
+    // Candles only outside the window: still nothing measured.
+    exec(&c, &assets_insert(db, &[FOO, USDC])).await;
+    insert_id_candle(&c, FOO, USDC, 3 * 60).await;
+    assert_eq!(
+        orphan_candles_metric(&read_orphans(&c).await),
+        Err(UniquenessRefusal::EmptyWindow)
+    );
+
+    drop_scratch_db(db).await;
 }

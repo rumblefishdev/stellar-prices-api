@@ -24,6 +24,10 @@
 mv <file> .trash/
 ```
 
+## Operations
+
+- **Check or change a user's usage plan** (free/basic/analyst/lite/pro, by Discord id): skill `change-plan` → commands in `docs/runbooks/manual-api-key-tier.md`.
+
 ## Context
 
 @lore/0-session/current-user.md

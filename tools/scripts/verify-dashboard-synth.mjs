@@ -44,8 +44,9 @@
  *      overrides every per-widget period and makes the trend rows inert.
  *   6. The dashboard's physical name is unchanged — a rename replaces the CFN
  *      resource and changes the console URL handed to the reviewer.
- *   7. No `LoginProfile` appears anywhere in the template: the read-only viewer
- *      identity must carry no password in source control.
+ *   7. No IAM user, login profile or access key appears anywhere in the
+ *      template: reviewer access is granted on request to a named person
+ *      (task 0295), never as a standing identity in source control.
  *
  * USAGE
  *   npm run infra:synth:production && npm run infra:verify-dashboard
@@ -339,60 +340,25 @@ if (dashboard.Properties.DashboardName !== expectedName) {
   );
 }
 
-// -- 6. no password in the template -----------------------------------------
-for (const bad of ['LoginProfile', 'AWS::IAM::AccessKey']) {
-  if (JSON.stringify(template).includes(bad)) {
-    failures.push(
-      `template contains ${bad} — the viewer identity must carry no credential in source control; ` +
-        'the console login is created out of band with `aws iam create-login-profile --password-reset-required`',
-    );
-  }
-}
-// CR-01: the VIEWER must not carry CloudWatchReadOnlyAccess — it grants
-// logs:FilterLogEvents / logs:Get* and xray:Get* account-wide. Scoped to the
-// viewer user: the AWS Chatbot role in this same stack legitimately carries
-// that policy, so a template-wide grep would always fail.
-const viewerUsers = Object.entries(template.Resources ?? {}).filter(
+// -- 6. no standing identity in the template ----------------------------------
+// Task 0125 shipped a `*-stellar-viewer` IAM user with an out-of-band console
+// login; task 0295 removed it. Access is granted on request, to a named
+// person, with MFA, and removed after the review — so this template must
+// create no IAM user and carry no credential of any kind. The AWS Chatbot
+// ROLE in this stack is not a user and is unaffected.
+const identities = Object.entries(template.Resources ?? {}).filter(
   ([, r]) =>
-    r.Type === 'AWS::IAM::User' &&
-    String(r.Properties?.UserName ?? '').endsWith('-stellar-viewer'),
+    r.Type === 'AWS::IAM::User' ||
+    r.Type === 'AWS::IAM::AccessKey' ||
+    r.Type === 'AWS::IAM::LoginProfile',
 );
-if (viewerUsers.length !== 1) {
+if (identities.length > 0) {
   failures.push(
-    `expected exactly one *-stellar-viewer IAM user, found ${viewerUsers.length}`,
+    `template creates ${identities.length} IAM identity resource(s) (${identities
+      .map(([id, r]) => `${id}: ${r.Type}`)
+      .join(', ')}) — reviewer access is granted on request (task 0295, ` +
+      'docs/runbooks/0295-dashboard-access-on-request.md), never as a standing user in source control',
   );
-} else {
-  const [viewerId, viewer] = viewerUsers[0];
-  const managed = JSON.stringify(viewer.Properties?.ManagedPolicyArns ?? []);
-  if (
-    managed.includes('CloudWatchReadOnlyAccess') ||
-    managed.includes('ReadOnlyAccess')
-  ) {
-    failures.push(
-      'viewer user carries a managed *ReadOnlyAccess policy — that reads every log group and trace ' +
-        'in the shared account; use the scoped dashboard-read inline policy',
-    );
-  }
-  const attached = Object.values(template.Resources ?? {}).filter(
-    (r) =>
-      r.Type === 'AWS::IAM::Policy' &&
-      JSON.stringify(r.Properties?.Users ?? []).includes(viewerId),
-  );
-  const actions = attached.flatMap((p) =>
-    p.Properties.PolicyDocument.Statement.flatMap((s) => [].concat(s.Action)),
-  );
-  const forbidden = actions.filter(
-    (a) => !/^cloudwatch:(Get|List|Describe)/.test(a),
-  );
-  if (attached.length === 0) {
-    failures.push(
-      'viewer user has no inline policy — it could not open the dashboard',
-    );
-  } else if (forbidden.length > 0) {
-    failures.push(
-      `viewer inline policy grants non-read or non-CloudWatch actions: ${forbidden.join(', ')}`,
-    );
-  }
 }
 
 if (failures.length > 0) {
@@ -413,4 +379,6 @@ console.log(
 console.log(
   `  alarm strip covers ${declared} alarms (${ownAlarms} own + ${IMPORTED_WORKER_ERROR_ALARMS} imported)`,
 );
-console.log('  periodOverride inherit, name unchanged, no login profile');
+console.log(
+  '  periodOverride inherit, name unchanged, no IAM identity in the template',
+);

@@ -409,17 +409,31 @@ The `api-handler` Lambda lives in the **Compute** stack.
 
 ```bash
 cd infra
-make diff-production          # read-only; review before deploying
+make diff-production          # builds the Lambdas first, then a read-only diff; review it
 make deploy-production-compute
 ```
 
-Two things to know before running this:
+Three things to know before running this:
 
+- **The Rust must be built, and the target now builds it.** `Code.fromAsset`
+  zips whatever is in `target/lambda/<name>/`; nothing in `cdk` compiles Rust.
+  On 2026-08-03 this step shipped a **stale `prices-api`** — green deploy, clean
+  S3Key diff, stub responses — and only step 7 caught it (task 0141). Since
+  0141 `deploy-production-compute` depends on `build-lambdas`
+  (`tools/scripts/build-lambda-assets.sh`): cargo rebuilds what is out of date,
+  then every bootstrap is refused unless it is a distinct aarch64 ELF.
+  `diff-production` depends on it too, so the diff you review is of the artifacts
+  the deploy will ship; the deploy's own build is then a ~1 s no-op.
 - **It also heals the 0132 CFN drift.** The 0132 egress fix was shipped by a
   surgical `aws lambda update-function-code` precisely to avoid deploying the
   then-unrolled 0072 read-API, which left CloudFormation believing the live
   processor still ran the old asset. This deploy reconciles that — the code it
   ships is the same code already running, so expect no behaviour change there.
+  ⚠️ That is only true of a `prices-ledger-processor` built from a tree that
+  **contains** the 0132 fix. A bootstrap predating it would have "healed" the
+  drift by silently reverting the 99.9% egress reduction, behind the same
+  clean-looking diff. On 2026-08-03 it was current by luck; since 0141 it is
+  current because the deploy builds it.
 - **It deploys every Lambda in the stack from the current tree**, not just the
   API. Confirm `develop` holds nothing else unrolled before running it.
 
@@ -429,6 +443,12 @@ Two things to know before running this:
 curl -sS -H "x-api-key: $PRICES_API_KEY" \
   "https://<api-host>/production/v1/assets/native/price" | jq .
 ```
+
+🔴 **Do not use `GET /health` to verify a deploy.** It is a keyless API Gateway
+**mock** integration: it never invokes a Lambda, so it returns 200 with the
+handler stale, stubbed, or failing at init. Nor is a green `cdk deploy`
+evidence — it reports that CloudFormation accepted an asset, not what the asset
+is. Verify response **content**, as below.
 
 **The gate is `sources`, and only `sources`.** It must be a populated JSON
 **object** (not `{}`). A `{}` here while the CH columns are populated means the

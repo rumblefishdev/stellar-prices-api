@@ -8,6 +8,7 @@ members = [
     "packages/phoenix-extractor",
     "packages/soroswap-extractor",
     "packages/aquarius-extractor",
+    "packages/comet-extractor",
     "packages/ledger-processor",
     "packages/prices-ingest-core",
     "packages/prices-ledger-processor",
@@ -22,10 +23,11 @@ members = [
     "packages/rollup-freshness-probe",
     "packages/mtls-notafter-probe",
     "packages/pool-registry-seed",
+    "packages/coverage-sweep-probe",
 ]
 
 [workspace.dependencies]
-stellar-xdr = { version = "=27.0.0" }
+stellar-xdr = { version = "=28.0.0" }
 stellar-strkey = "0.0.13"
 sha2 = "0.10"
 xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "develop" }
@@ -39,7 +41,9 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 lambda_http = "1"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-utoipa = { version = "5", features = ["axum_extras"] }
+# `preserve_order`: schema properties in struct order, the order serde writes
+# them, so the reference's examples read like the responses (task 0306).
+utoipa = { version = "5", features = ["axum_extras", "preserve_order"] }
 utoipa-axum = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
@@ -62,6 +66,10 @@ aws-sdk-s3 = "1"
 # API the console drives. Used by prices-api's portal only.
 aws-sdk-apigateway = "1"
 aws-sdk-cloudwatch = "1"
+# Reads alarm state (DescribeAlarms) for the daily stuck-alarm digest, task 0214.
+# Publishing that digest needs SNS: a metric+meta-alarm would latch the same way
+# the 28-day enrichment latch did, so the digest has to be a fresh message.
+aws-sdk-sns = "1"
 aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
 tempfile = "3"
 
@@ -69,3 +77,7 @@ tempfile = "3"
 # to publish days-to-expiry. Pure/no-AWS, so the probe's day-math stays testable
 # in the default build.
 x509-parser = "0.16"
+
+# The coverage sweep's committed allow-list (task 0100) is TOML, compiled into
+# the probe binary. Same toml-rs family already in Cargo.lock transitively.
+toml = "1"

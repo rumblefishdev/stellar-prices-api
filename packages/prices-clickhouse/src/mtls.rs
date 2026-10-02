@@ -305,9 +305,12 @@ pub fn client_with_mtls(
             .build(https);
 
     let url = format!("https://{domain}");
-    Ok(clickhouse::Client::with_http_client(hyper_client)
-        .with_url(url)
-        .with_database(database))
+    // ⚠️ `with_readable_errors` is load-bearing, not cosmetic: without it every
+    // ClickHouse error arrives as an empty string. See its docs (task 0281).
+    Ok(crate::with_readable_errors(
+        clickhouse::Client::with_http_client(hyper_client).with_url(url),
+    )
+    .with_database(database))
 }
 
 /// Build an mTLS ClickHouse client from PEM **file paths** (client cert, client

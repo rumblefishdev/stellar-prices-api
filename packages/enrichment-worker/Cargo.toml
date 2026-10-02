@@ -31,6 +31,17 @@ name = "coarse-repair"
 path = "src/bin/coarse-repair.rs"
 required-features = ["aws-mtls"]
 
+# Operator entrypoint for task 0267's external USD-rate loader. Same
+# `aws-mtls` requirement and the same consequence: a bin whose
+# required-features are unmet is SILENTLY SKIPPED by CI's featureless
+# `cargo test --workspace`, which is why everything decidable without a
+# connection lives in the `external_rate` lib module instead. Build/run:
+#   cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- …
+[[bin]]
+name = "load-external-rate"
+path = "src/bin/load-external-rate.rs"
+required-features = ["aws-mtls"]
+
 [features]
 default = []
 aws-mtls = ["prices-clickhouse/aws-mtls"]

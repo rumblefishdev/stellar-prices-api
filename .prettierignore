@@ -22,3 +22,6 @@ web/portal/src/api/generated.ts
 
 # k6 load-test output (task 0121) — generated per run, kept verbatim
 docs/loadtest-results/*.json
+
+# The privacy policy is reviewed legal text (task 0303): kept byte for byte, never reformatted.
+web/portal/src/privacy/privacy-policy.md

@@ -20,9 +20,24 @@
 -- ## Column-type contract (load-bearing)
 -- The tables the SDEX/soroban backfill writer touches — `assets`,
 -- `price_ohlcv_1m`, `backfill_sdex_ledgers` — MUST keep these exact column
--- names and types: the writer uses positional clickhouse::Row inserts
--- (packages/sdex-backfill/src/sink.rs). Do not reorder or retype without
--- updating the Row structs.
+-- names and types. The ingest writer lives in
+-- packages/prices-ingest-core/src/writer.rs and is NAME-routed, not positional
+-- (task 0286): the clickhouse crate emits `INSERT INTO t(<struct field names>)
+-- FORMAT RowBinary`, so a column MISSING from the Row struct does not error —
+-- it silently takes this file's column DEFAULT. That is why
+-- prices_clickhouse::CANDLE_COLUMNS pins the DDL below and
+-- CANDLE_WRITER_COLUMNS the writer's field names, with a unit test on each
+-- side. Do not add, reorder or retype a candle column without updating both
+-- lists and the Row structs.
+--
+-- ## asset_id is derived by ClickHouse (task 0139)
+-- Every asset id is xxh3 of the identity, rendered by prices_clickhouse::asset_id
+-- (a unit test pins each expression below to its rendering). No writer sends an
+-- id: `assets` computes it (MATERIALIZED, so naming it is refused), and candle
+-- and oracle writers send the identity in EPHEMERAL columns that the id's
+-- DEFAULT reads. DEFAULT rather than MATERIALIZED on those, because the rollup
+-- MVs and enrichment copy ids between tiers with INSERT … SELECT. A CHECK
+-- refuses 0 and the id of a blank identity wherever an id must be an asset's.
 --
 -- ## Engine assignment
 --   - OHLCV fact tables       → ReplacingMergeTree(version), monthly partitions
@@ -42,11 +57,12 @@ CREATE DATABASE IF NOT EXISTS prices;
 ----------------------------------------------------------------------
 -- Asset registry (ReplacingMergeTree, last-write-wins on updated_at)
 -- §3.1. Populated by the backfill's AssetRegistry and, in production, the
--- Asset Discovery Lambda. asset_id is an app-assigned UInt32 surrogate.
+-- Asset Discovery Lambda. asset_id is derived from the identity (task 0139):
+-- two identities can never share one, so `FINAL` keeps one row per id.
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.assets (
-    asset_id         UInt32,
+    asset_id         UInt64        MATERIALIZED xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)),
     asset_code       String,
     asset_type       String,
     issuer_address   String        DEFAULT '',
@@ -59,7 +75,8 @@ CREATE TABLE IF NOT EXISTS prices.assets (
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),
-    updated_at       DateTime      DEFAULT now()
+    updated_at       DateTime      DEFAULT now(),
+    CONSTRAINT asset_id_derived CHECK asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', ''))
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_code, issuer_address, contract_address)
@@ -84,7 +101,7 @@ ALTER TABLE prices.assets ADD COLUMN IF NOT EXISTS sac_address String DEFAULT ''
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.asset_metadata (
-    asset_id     UInt32,
+    asset_id     UInt64,
     home_domain  String        DEFAULT '',
     updated_at   DateTime      DEFAULT now()
 )
@@ -95,15 +112,36 @@ SETTINGS index_granularity = 8192;
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the
 -- Prices Ledger Processor; backfill streams write here with source in
--- ('sdex','phoenix','soroswap','aquarius'). version = ledger_seq × 1000 +
--- intra-ledger order; ReplacingMergeTree(version) collapses duplicate PKs.
--- §3.2.
+-- ('sdex','phoenix','soroswap','aquarius','sushiswap','comet'). version =
+-- ledger_seq × 1000 + intra-ledger order; ReplacingMergeTree(version) collapses
+-- duplicate PKs. §3.2.
+--
+-- Price semantics (task 0286, ADR 0287): open/high/low/close come ONLY from the
+-- bucket's PRICE-FORMING fills — open is the first such fill and close the last,
+-- in fill order; high/low are their extremes. A bucket with none has no price
+-- (all four zero) but keeps its volumes and trade_count. pf_trade_count,
+-- pf_volume and pf_price_volume are that price-forming subset's count, base
+-- volume and Σ price × base volume. Their DEFAULT expressions give a pre-0286
+-- row its OLD meaning (every fill was price-forming); only a re-ingest changes
+-- that (0286 phase 3).
+--
+-- DEPLOY ORDER for 0286 (task §4.9 — this order, not any other):
+--   1. this schema,
+--   2. enrichment worker + the coarse sweep + prices-api,
+--   3. the rollup MV re-CREATE,
+--   4. ingest LAST (ledger-processor, backfill binaries).
+-- Reason: a pre-0286 MV takes min(low) over a dust-only minute and turns the new
+-- zero low into a zero low for the whole coarse bucket, and pre-0286 enrichment
+-- re-inserts a candle row WITHOUT the pf columns, so they fall back to the
+-- DEFAULT expressions above and a dust-only minute starts reporting itself as
+-- fully price-forming. Both are silent. Shipping ingest last means nothing
+-- writes a zero-priced row until everything downstream understands one.
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     timestamp        DateTime      CODEC(DoubleDelta),
-    asset_id         UInt32,
-    quote_asset_id   UInt32,
+    asset_id         UInt64        DEFAULT xxh3(concat(base_code, ':', base_issuer, ':', base_contract)),
+    quote_asset_id   UInt64        DEFAULT xxh3(concat(quote_code, ':', quote_issuer, ':', quote_contract)),
     source           LowCardinality(String),
     open             Decimal(38, 14),
     high             Decimal(38, 14),
@@ -115,7 +153,19 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     close_usd        Decimal(38, 14) DEFAULT 0,
     vwap             Decimal(38, 14),
     trade_count      UInt32        DEFAULT 0,
-    version          UInt64
+    version          UInt64,
+    pf_trade_count   UInt32          DEFAULT trade_count,
+    pf_volume        Decimal(38, 14) DEFAULT volume_base,
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote,
+    -- The identities the writer sends (task 0139). Not stored: the ids above
+    -- are their xxh3. Native XLM is code 'XLM' with empty issuer and contract.
+    base_code        String EPHEMERAL,
+    base_issuer      String EPHEMERAL,
+    base_contract    String EPHEMERAL,
+    quote_code       String EPHEMERAL,
+    quote_issuer     String EPHEMERAL,
+    quote_contract   String EPHEMERAL,
+    CONSTRAINT asset_ids_derived CHECK asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', '')) AND quote_asset_id != 0 AND quote_asset_id != xxh3(concat('', ':', '', ':', ''))
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -135,7 +185,15 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
 
 -- Historical USD close (task 0061). close_usd = oracle_usd × close, computed at
 -- enrichment time (DEFAULT 0 until the enrichment pass fills it, mirroring
--- volume_quote_usd). Added to the base CREATE above so fresh AS-copies inherit
+-- volume_quote_usd).
+--
+-- ⚠️ That 0 is a SENTINEL with four meanings, kept on purpose (ADR 0292): not yet
+-- enriched; never priceable (no oracle or reference market for the quote asset);
+-- genuinely zero (assumed not to occur); and — since ADR 0287 — "this bucket has
+-- no price" (`pf_trade_count = 0`, so `close = 0` and `rate × 0 = 0`, permanent
+-- and correct). No aggregate may read it as a number: every reader and its guard
+-- is listed in docs/database-schema/close-usd-zero-guardrails.md, and a new one
+-- belongs there in the same PR. Added to the base CREATE above so fresh AS-copies inherit
 -- it; these idempotent ALTERs add it to databases created before 0061, where the
 -- AS-copies do NOT inherit a post-hoc base-table ALTER — so apply per table.
 ALTER TABLE prices.price_ohlcv_1m  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
@@ -146,6 +204,47 @@ ALTER TABLE prices.price_ohlcv_1d  ADD COLUMN IF NOT EXISTS close_usd Decimal(38
 ALTER TABLE prices.price_ohlcv_1w  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
 ALTER TABLE prices.price_ohlcv_1M  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
 
+-- Price-forming aggregates (task 0286, ADR 0287). Added to the base CREATE
+-- above so fresh AS-copies inherit them; these idempotent ALTERs add them to
+-- databases created before 0286, where the AS-copies do NOT inherit a post-hoc
+-- base-table ALTER — so apply per table, exactly like close_usd above. They run
+-- AFTER the close_usd block on purpose: a pre-0061 database must get close_usd
+-- into its mid-table position first.
+--
+-- The DEFAULT expressions are what make this migration safe on a live database.
+-- ClickHouse computes a DEFAULT over other columns on READ for parts written
+-- before the ALTER, so every existing candle keeps reporting the pre-0286
+-- meaning (every fill was price-forming) instead of reading zero. Nothing is
+-- rewritten and no history is re-rolled in phase 1 (task 0286 §4.9).
+ALTER TABLE prices.price_ohlcv_1m
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_15m
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1h
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_4h
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1d
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1w
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1M
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+
 ----------------------------------------------------------------------
 -- Current per-asset state (§3.3). One row per asset. Written by the Current
 -- Price Updater Lambda; not exercised by the backfill (current-state, not
@@ -153,7 +252,7 @@ ALTER TABLE prices.price_ohlcv_1M  ADD COLUMN IF NOT EXISTS close_usd Decimal(38
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.current_prices (
-    asset_id         UInt32,
+    asset_id         UInt64,
     price_usd        Decimal(38, 14),
     price_xlm        Decimal(38, 14),
     change_24h_pct   Decimal(10, 4),
@@ -163,7 +262,9 @@ CREATE TABLE IF NOT EXISTS prices.current_prices (
     vwap_24h         Decimal(38, 14),
     sources          String,
     updated_at       DateTime      DEFAULT now(),
-    method           LowCardinality(String) DEFAULT ''
+    method           LowCardinality(String) DEFAULT '',
+    as_of            DateTime      DEFAULT toDateTime(0),
+    price_status     LowCardinality(String) DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_id)
@@ -193,6 +294,40 @@ SETTINGS index_granularity = 8192;
 -- pattern above.
 ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality(String) DEFAULT '' AFTER updated_at;
 
+-- The price's own age and what kind of price it is (task 0216). `updated_at` is
+-- when this snapshot was REFRESHED — every row carries a timestamp a minute old
+-- no matter how old the price is — so before these two columns no consumer
+-- could apply a freshness policy at all.
+--
+--   as_of        — the timestamp of the candle `price_usd` was read from, i.e.
+--                  the SAME predicate `price_usd` itself is chosen by. For the
+--                  oracle arm it is the rate reading's own timestamp.
+--   price_status — 'priced'   the price is the asset's newest price-forming
+--                             candle (every oracle row reads this too).
+--                  'carried'  a real priced close exists, but a NEWER
+--                             price-forming candle has not been priced yet.
+--                  'unpriced' `price_usd` is the 0 sentinel: no priced candle
+--                             in the window, and `method` is '' for the same
+--                             reason.
+--                  ''         the "not yet rewritten" SENTINEL, not a
+--                             vocabulary word: a row this table carries from
+--                             before the MV was re-created. It can only be seen
+--                             between this ALTER and that re-CREATE.
+--
+-- Both are non-nullable like every other column here, so absence must be a
+-- value — and that is exactly the trap to respect on as_of. `maxIf(timestamp,
+-- …)` over a window with no matching candle returns the DateTime DEFAULT, not
+-- NULL: 1970-01-01, an ordinary-looking 56-year-old price sitting beside a 0.
+-- The MV forces the epoch deliberately whenever there is no price
+-- (current.sql's as_of projection) so the API can map exactly that value to ''
+-- rather than publishing an age that is a coincidence of an empty aggregate.
+--
+-- Idempotent ALTERs for databases created before 0216, mirroring the method
+-- pattern above. Kept as two statements, one per column, for the same reason
+-- the method ALTER is its own statement: each is independently re-runnable.
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS as_of DateTime DEFAULT toDateTime(0) AFTER method;
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_status LowCardinality(String) DEFAULT '' AFTER as_of;
+
 ----------------------------------------------------------------------
 -- Per-asset circulating supply (task 0039 supply worker). Its OWN
 -- single-writer table so supply (slow, hourly) and price (fast, per-minute
@@ -201,7 +336,7 @@ ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality
 -- cap (best-effort, general-overview §3.3). Sole writer = the supply worker.
 ----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS prices.asset_supply (
-    asset_id      UInt32,
+    asset_id      UInt64,
     token_supply  Decimal(38, 14),
     fetched_at    DateTime      DEFAULT now()
 )
@@ -271,10 +406,15 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS prices.oracle_prices (
     timestamp     DateTime      CODEC(DoubleDelta),
-    asset_id      UInt32,
+    asset_id      UInt64        DEFAULT if(concat(asset_code, ':', issuer_address, ':', contract_address) = '::', 0, xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))),
     oracle_name   LowCardinality(String),
     price_usd     Decimal(38, 14),
-    raw_data      String        CODEC(ZSTD(3))
+    raw_data      String        CODEC(ZSTD(3)),
+    -- The sampled asset's identity (task 0139). A feed with no asset (REDSTONE)
+    -- sends a blank one and is stored under the sentinel id 0.
+    asset_code       String EPHEMERAL,
+    issuer_address   String EPHEMERAL,
+    contract_address String EPHEMERAL
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)
@@ -337,15 +477,70 @@ SETTINGS index_granularity = 8192;
 -- 0154 ASOFs at the CANDLE's timestamp so the boundary case does not arise there.
 --
 -- ## Columns
---   method  'oracle' — a measured reading (hops = 0)
---           'peg'    — the $1 assumption (hops = 0)
---           'pivot'  — via XLM (hops = 1)          } owned by 0154,
---           'pivot2' — via another rated asset (2) } not written here
+--   method  'oracle'   — a measured reading, polled from Reflector (hops = 0)
+--           'external' — a measured reading IMPORTED from an outside USD
+--                        series (task 0267, hops = 0). Same standing as
+--                        'oracle' as evidence, different provenance: nobody
+--                        here polled it. Kept a distinct word because task
+--                        0247 forbids publishing an import as 'oracle'.
+--           'external-candidate'
+--                      — task 0267's PRE-PROMOTION STAGING value. The
+--                        `load-external-rate` tool writes every imported row
+--                        under this word first, an operator verifies the staged
+--                        rows against the runbook's three checks, and only then
+--                        does `--promote` add the same observations under
+--                        'external'. NO read predicate anywhere names this word:
+--                        not the views, not queries_ch::ohlcv_peg_series, and
+--                        emphatically not enrichment-worker's
+--                        ch_enrich::external_sql, which is what makes staging
+--                        safe — unverified rows are inert by construction rather
+--                        than by anyone's discipline. Staged rows are never
+--                        deleted (they are a different sorting key, see below),
+--                        so a promote ADDS a key rather than moving one.
+--           'peg'      — the $1 assumption (hops = 0)
+--           'pivot'    — via XLM (hops = 1)          } owned by 0154,
+--           'pivot2'   — via another rated asset (2) } not written here
+--   ⚠️ NO WORD IS COINED FOR THE ENRICHMENT PIVOT, deliberately (task 0228).
+--   Since 0228 a pivot-leg candle's stored `close_usd` is the reference asset's
+--   own MEASURED close against USDC, scaled by the measured USDC/USD rate from
+--   this table (`ch_enrich::pivot_sql` ASOF-joins the 'oracle' series, else the
+--   'external' one, at the bucket's end). That composition changes no provenance:
+--   `/ohlcv` still labels such a candle `traded`, because the label names how the
+--   price was reached — through the reference asset's own market — not which
+--   factors the arithmetic carried. The rows READ here are ordinary 'oracle' /
+--   'external' rows; nothing new is WRITTEN here on that account.
+--   quality — task 0267. The IMPORTING series' own confidence in the day's
+--             observation, carried through 1:1 from the composed CSV so a
+--             consumer can decide whether to trust it:
+--               'measured'          — a real observation from the primary feed
+--               'measured-disputed' — observed, but the cross-check between two
+--                                     independent sources disagreed beyond the
+--                                     composer's spread tolerance
+--               'fallback'          — no primary observation for the day; the
+--                                     composer substituted its secondary source
+--             Every other writer leaves it at the '' DEFAULT — in particular
+--             ORACLE ROWS CARRY '', because "how confident was the outside
+--             series" is not a question a polled Reflector reading answers.
+--             '' therefore means "not applicable", not "unknown quality".
 --   ⚠️ ABSENCE IS THE SIGNAL for pre-oracle history. Deep history (before the
 --   oracle window, ~2025-09) gets NO ROW, and the consumer's own peg fallback
 --   applies. Do NOT write synthetic method='peg' rows at $1 to "fill" it — that
 --   makes a fallback indistinguishable from a measurement, which is precisely
 --   the close_usd = 0 mistake (one value meaning several things) in a new place.
+--
+--   That prohibition stands, and 'external' does NOT relax it: an IMPORTED
+--   MEASUREMENT is not a synthetic fill. A method='external' row says an
+--   outside series observed this rate at this instant — on 2023-03-11 it says
+--   0.9681, which no $1 fill could ever say. What the rule forbids is inventing
+--   a value, not sourcing one elsewhere. Task 0267's backfill is therefore
+--   allowed to reach into deep history where a 'peg' fill would not be.
+--
+--   ⚠️ There is NO 'assumed-par' here, deliberately, and it is not an omission
+--   to "fix". That value exists only on the /ohlcv wire, where it is DERIVED at
+--   read time from a candle's close_usd = close signature (see
+--   prices-api queries_ch::usd_method_expr). Nothing writes it to this table,
+--   because a row asserting "we assumed a dollar" is exactly the synthetic fill
+--   the warning above forbids.
 --
 --   ⚠️ `method` IS PART OF THE SORTING KEY, deliberately. RMT dedups on the
 --   sorting key, so without it a 'pivot' row written by 0154 at the same
@@ -377,6 +572,12 @@ ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp, method)
 SETTINGS index_granularity = 8192;
+
+-- Idempotent ALTER for databases created before task 0267, mirroring the
+-- current_prices.method pattern above. Positioned AFTER reference_asset so the
+-- two PROVENANCE columns (which outside series, and how good was its
+-- observation) sit together and ahead of the hops/version bookkeeping.
+ALTER TABLE prices.usd_rate ADD COLUMN IF NOT EXISTS quality LowCardinality(String) DEFAULT '' AFTER reference_asset;
 
 ----------------------------------------------------------------------
 -- Backfill bookkeeping.
@@ -425,20 +626,12 @@ ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS earliest_data_avai
 ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS newest_data_available Nullable(DateTime) AFTER earliest_data_available;
 
 -- ---------------------------------------------------------------------
--- Asset Discovery high-water-mark (task 0054). One row per worker tracking
--- the highest ledger sequence the hourly discovery scan has processed, so
--- the next invocation resumes at last_ledger + 1 rather than re-scanning.
--- Single-writer = the asset-discovery worker. ReplacingMergeTree on the
--- worker key; read with FINAL.
+-- `prices.discovery_state` (task 0054) used to be created here: the cursor of
+-- asset-discovery's hourly ledger scan. The scan never ran in production and
+-- task 0256 removed it, so a fresh database no longer gets the table. This file
+-- is CREATE-IF-NOT-EXISTS only and never drops anything: on a database that
+-- already has the (empty) table, dropping it is an operator step — see 0256.
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS prices.discovery_state (
-    worker        LowCardinality(String),   -- 'asset-discovery'
-    last_ledger   UInt64,                    -- highest ledger sequence scanned
-    updated_at    DateTime      DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (worker)
-SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------
 -- Unresolved AMM pools (task 0053, decision #3). One row per
@@ -474,10 +667,14 @@ SETTINGS index_granularity = 8192;
 -- output of the in-window registry so a partial re-backfill (a mid-history
 -- window) or the live processor can LOAD it instead of re-deriving from Soroban
 -- activation (this inverts task 0069: registry-as-output, not required-input).
--- venue = 'soroswap' | 'phoenix' | 'aquarius'. token0/token1 are the Soroswap
--- pair tokens (needed because a Soroswap swap event omits them); pool_type /
--- wasm_hash are Phoenix pool details; both default empty for venues that don't
--- use them. ReplacingMergeTree(updated_at) on contract_id collapses re-runs;
+-- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290) | 'comet' (task 0300).
+-- token0/token1 are the pair tokens of the two pair-backed venues — Soroswap
+-- (from `new_pair`) and SushiSwap V3 (from `pool_created`) — needed because
+-- their swap events omit them; pool_type / wasm_hash are Phoenix pool details;
+-- both default empty for venues that don't use them. A pair-backed row with
+-- blank tokens does NOT resolve: it loads its venue only, and the pool is
+-- reported in `prices.unresolved_pools` rather than priced against an empty
+-- asset. ReplacingMergeTree(updated_at) on contract_id collapses re-runs;
 -- read with FINAL.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS prices.pool_registry (
@@ -529,8 +726,8 @@ SETTINGS index_granularity = 8192;
 -- (`ENRICH_LIVE_PARTITIONS`); the historical drain walks the rest one partition
 -- at a time, and this is how it remembers where it got to across invocations.
 --
--- Fourth instance of the pattern `ingest_cursor` / `backfill_progress` /
--- `discovery_state` already establish here: a tiny ReplacingMergeTree state
+-- Third instance of the pattern `ingest_cursor` / `backfill_progress`
+-- already establish here: a tiny ReplacingMergeTree state
 -- table in `prices`, written by our own workers. ~102 partitions × 6 tiers is
 -- under 700 rows and well under 100 KB permanently — on a disk we are 3.3% of.
 -- Not a materialized view, not in the rollup chain, and NOT in the cleanup
