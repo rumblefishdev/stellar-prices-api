@@ -8,8 +8,8 @@
 //!
 //! The decode → extract → canonicalise → bucket → write pipeline is **not**
 //! reimplemented here: it is `prices_ingest_core`, the same tested code the SDEX
-//! backfill uses, so live and backfill rows are identical (same surrogate
-//! `asset_id`s, SAC collapse, orientation, `Decimal`/`version`). This crate owns
+//! backfill uses, so live and backfill rows are identical (same identities and
+//! so `asset_id`s, SAC collapse, orientation, `Decimal`/`version`). This crate owns
 //! only the *transport* seams:
 //! - [`object_fetcher`] — local-disk (fixtures/tests) vs S3 (`lambda` feature).
 //! - [`cursor`] — the ledger-sequence checkpoint.

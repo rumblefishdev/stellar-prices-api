@@ -8,7 +8,15 @@
 //! client rather than by rewriting the writer's SQL.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 use prices_ingest_core::{AssetIdentity, OhlcvWriter};
+
+// The peg assets. Each displays as its id, derived from its identity
+// (`asset_id::fixture`), so an oracle row written `({USDC}, …)` agrees with
+// the `assets` row.
+const USDC: AssetFixture = AssetFixture::new("USDC", "classic", USDC_ISSUER, "");
+const USDT: AssetFixture = AssetFixture::new("USDT", "classic", USDT_ISSUER, "");
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -17,7 +25,7 @@ fn ch_url() -> String {
 fn usdc() -> AssetIdentity {
     AssetIdentity::Credit {
         code: "USDC".to_string(),
-        issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+        issuer: USDC_ISSUER.to_string(),
     }
 }
 
@@ -45,17 +53,45 @@ async fn fresh_prices_schema() -> Client {
     admin
 }
 
-async fn seed_usdc(client: &Client, asset_id: u32) {
+async fn seed_usdc(client: &Client) {
     client
-        .query(&format!(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES ({asset_id},'USDC','classic','{}','','')",
-            prices_clickhouse::USDC_ISSUER
-        ))
+        .query(&assets_insert("prices", &[USDC]))
         .execute()
         .await
         .unwrap();
+}
+
+/// ARBRIDGE, the asset that sat on another's id on prod (4194, task 0139).
+const ARBRIDGE: AssetFixture = AssetFixture::new("ARBRIDGE", "classic", "GARB", "");
+
+/// Tries to put ARBRIDGE on USDC's id, the shape the 0139 guard used to
+/// refuse, then inserts ARBRIDGE as a writer must. Returns the first insert's
+/// error: the schema derives `assets.asset_id`, so naming it is refused.
+async fn try_to_squat_on_usdc_id(client: &Client) -> clickhouse::error::Error {
+    let squat = client
+        .query(&format!(
+            "INSERT INTO prices.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
+             VALUES ({USDC},'ARBRIDGE','classic','GARB','','')"
+        ))
+        .execute()
+        .await
+        .expect_err("assets must refuse a writer that names asset_id");
+    client
+        .query(&assets_insert("prices", &[ARBRIDGE]))
+        .execute()
+        .await
+        .unwrap();
+    squat
+}
+
+/// `(rows, distinct ids)` in `assets FINAL`.
+async fn identities_and_ids(client: &Client) -> (u64, u64) {
+    client
+        .query("SELECT count(), uniqExact(asset_id) FROM prices.assets FINAL")
+        .fetch_one::<(u64, u64)>()
+        .await
+        .unwrap()
 }
 
 async fn rate_rows(client: &Client) -> Vec<(u32, f64, String, u8)> {
@@ -74,16 +110,16 @@ async fn rate_rows(client: &Client) -> Vec<(u32, f64, String, u8)> {
 async fn copies_oracle_readings_and_re_runs_without_duplicating() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     let writer = OhlcvWriter::new(client.clone());
 
     // Two readings, deliberately NOT $1 — the whole point is a depeg-aware rate.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
-                    (1750003600, 3, 'reflector', 1.0004, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, ''), \
+                    (1750003600, {USDC}, 'reflector', 1.0004, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -116,10 +152,10 @@ async fn copies_oracle_readings_and_re_runs_without_duplicating() {
 
     // A new reading arrives; only it is copied.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750007200, 3, 'reflector', 0.9987, '')",
-        )
+             VALUES (1750007200, {USDC}, 'reflector', 0.9987, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -134,54 +170,42 @@ async fn copies_oracle_readings_and_re_runs_without_duplicating() {
 
 /// ⚠️ The 0139 guard. `oracle_prices` is keyed on `asset_id` and `usd_rate` on
 /// natural identity, so this copy is the one place the two key spaces meet.
-/// With 3,281 ids serving 6,568 identities on prod, translating without
-/// checking would file one asset's readings under another's identity — in a
-/// table built to be trusted forever. The write must be REFUSED, not attempted.
+/// On prod 3,281 ids once served 6,568 identities, and translating through a
+/// shared id would file one asset's readings under another's identity. Since
+/// 0139 the schema derives the id from the identity, so the shared id cannot
+/// be built: the squat is refused, the guard finds one identity per id, and
+/// the copy goes ahead. The guard stays as a cheap uniqueness assertion.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
-async fn refuses_to_write_when_the_peg_asset_id_is_shared() {
+async fn the_peg_asset_id_cannot_be_shared_so_the_guard_lets_the_copy_through() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
-    // A second, unrelated identity squatting on the same surrogate id.
+    seed_usdc(&client).await;
+    let squat = try_to_squat_on_usdc_id(&client).await;
+    assert!(squat.to_string().contains("asset_id"), "{squat}");
+    assert_eq!(identities_and_ids(&client).await, (2, 2), "one id each");
     client
-        .query(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (3,'ARBRIDGE','classic','GARB','','')",
-        )
-        .execute()
-        .await
-        .unwrap();
-    client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, '')"
+        ))
         .execute()
         .await
         .unwrap();
 
     let writer = OhlcvWriter::new(client.clone());
-    let err = writer
+    let stats = writer
         .populate_usd_rate_from_oracle(&[usdc()], "reflector")
         .await
-        .expect_err("a shared asset_id must refuse the write");
-    let msg = err.to_string();
-    assert!(msg.contains("0139"), "error must name the cause: {msg}");
-
-    assert_eq!(
-        rate_rows(&client).await.len(),
-        0,
-        "refusing means writing NOTHING — a partial write is the failure mode \
-         this guard exists to prevent"
-    );
+        .expect("no id is shared, so nothing is refused");
+    assert_eq!(stats.rows_inserted, 1);
+    assert_eq!(rate_rows(&client).await.len(), 1);
 }
 
 fn usdt() -> AssetIdentity {
     AssetIdentity::Credit {
         code: "USDT".to_string(),
-        issuer: prices_clickhouse::USDT_ISSUER.to_string(),
+        issuer: USDT_ISSUER.to_string(),
     }
 }
 
@@ -196,14 +220,14 @@ fn usdt() -> AssetIdentity {
 async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     let writer = OhlcvWriter::new(client.clone());
 
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750003600, 3, 'reflector', 1.0004, '')",
-        )
+             VALUES (1750003600, {USDC}, 'reflector', 1.0004, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -214,10 +238,10 @@ async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
 
     // A backfill now writes an OLDER reading — below the frontier just set.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1740000000, 3, 'reflector', 0.9981, '')",
-        )
+             VALUES (1740000000, {USDC}, 'reflector', 0.9981, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -236,64 +260,45 @@ async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
     assert_eq!(rows[0].0, 1740000000, "the older row is present");
 }
 
-/// Review finding 1. Guarding per-identity *inside* the write loop meant a
-/// failure on a later identity left earlier identities already written — a
-/// partial write, which is the failure mode the guard exists to prevent. The
-/// original test only used one identity, so it could not catch this.
+/// Review finding 1 was that a guard failing on a later peg left the earlier
+/// pegs written. The guard is now a pre-pass, and since 0139 the collision it
+/// refused cannot be stored: with the squatter refused, every peg is copied.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
-async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
+async fn no_peg_can_collide_so_every_peg_is_copied() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
-    // USDT is clean...
+    seed_usdc(&client).await;
+    client
+        .query(&assets_insert("prices", &[USDT]))
+        .execute()
+        .await
+        .unwrap();
+    try_to_squat_on_usdc_id(&client).await;
+    assert_eq!(identities_and_ids(&client).await, (3, 3), "one id each");
     client
         .query(&format!(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (111,'USDT','classic','{}','','')",
-            prices_clickhouse::USDT_ISSUER
-        ))
-        .execute()
-        .await
-        .unwrap();
-    // ...but USDC's surrogate id is shared, and USDC is processed FIRST.
-    client
-        .query(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (3,'ARBRIDGE','classic','GARB','','')",
-        )
-        .execute()
-        .await
-        .unwrap();
-    client
-        .query(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
-                    (1750000000, 111, 'reflector', 0.9997, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, ''), \
+                    (1750000000, {USDT}, 'reflector', 0.9997, '')"
+        ))
         .execute()
         .await
         .unwrap();
 
     let writer = OhlcvWriter::new(client.clone());
-    let err = writer
+    let stats = writer
         .populate_usd_rate_from_oracle(&[usdc(), usdt()], "reflector")
         .await
-        .expect_err("one bad peg must fail the whole pass");
-    assert!(err.to_string().contains("0139"), "{err}");
+        .expect("no peg shares its id");
+    assert_eq!((stats.identities, stats.rows_inserted), (2, 2));
 
     let total: u64 = client
         .query("SELECT count() FROM prices.usd_rate")
         .fetch_one::<u64>()
         .await
         .unwrap();
-    assert_eq!(
-        total, 0,
-        "USDT is clean but must NOT be written — a guard that fails after a \
-         partial write is worse than no guard"
-    );
+    assert_eq!(total, 2, "both pegs copied");
 }
 
 /// Task 0086 — folded into 0227 and FIXED 2026-08-27. Kept as a regression
@@ -316,16 +321,16 @@ async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
 async fn does_not_snapshot_the_0086_junk_1970_timestamps() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     let writer = OhlcvWriter::new(client.clone());
 
     // One good reading and one 0086-shaped row: correct price, epoch/1000.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
-                    (   1750000, 3, 'reflector', 0.9991, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, ''), \
+                    (   1750000, {USDC}, 'reflector', 0.9991, '')"
+        ))
         .execute()
         .await
         .unwrap();

@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -44,48 +45,47 @@ async fn setup(db: &str) -> Client {
         .await
         .unwrap();
 
+    let assets = [
+        AssetFixture::new("XLM", "native", "", ""),
+        AssetFixture::new("USDC", "credit", issuer(), ""),
+    ];
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'XLM', 'native', '', ''), \
-             (2, 'USDC', 'credit', '{iss}', '')",
-            iss = issuer()
-        ))
+        .query(&assets_insert(db, &assets))
         .execute()
         .await
         .unwrap();
+    let [xlm, usdc] = assets.map(|a| a.id());
     // home_domain is enrichment — it lives in the single-writer asset_metadata
     // table, not on the assets identity row (task 0067). The read path LEFT JOINs
     // it back in.
     admin
         .query(&format!(
-            "INSERT INTO {db}.asset_metadata (asset_id, home_domain) VALUES (2, 'centre.io')"
+            "INSERT INTO {db}.asset_metadata (asset_id, home_domain) VALUES ({usdc}, 'centre.io')"
         ))
         .execute()
         .await
         .unwrap();
     admin
         .query(&format!(
-            // Task 0216: asset 1 carries a REAL as_of/price_status pair dated
+            // Task 0216: XLM carries a REAL as_of/price_status pair dated
             // behind its updated_at.
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
              VALUES \
-             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried')"
+             ({xlm}, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried')"
         ))
         .execute()
         .await
         .unwrap();
     admin
         .query(&format!(
-            // Asset 2 names neither new column, so it really takes the table
+            // USDC names neither new column, so it really takes the table
             // DEFAULT pair (the epoch and ''), which the wire must render as
             // ""/"" — not a hand-written copy of those values.
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) \
              VALUES \
-             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
+             ({usdc}, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
         ))
         .execute()
         .await
@@ -94,8 +94,8 @@ async fn setup(db: &str) -> Client {
         .query(&format!(
             "INSERT INTO {db}.oracle_prices \
              (timestamp, asset_id, oracle_name, price_usd, raw_data) VALUES \
-             ('2026-02-10 11:55:00', 2, 'reflector', 1.0, ''), \
-             ('2026-02-10 11:58:00', 2, 'redstone', 1.0001, '')"
+             ('2026-02-10 11:55:00', {usdc}, 'reflector', 1.0, ''), \
+             ('2026-02-10 11:58:00', {usdc}, 'redstone', 1.0001, '')"
         ))
         .execute()
         .await
@@ -240,11 +240,9 @@ fn contract() -> String {
 async fn seed_soroban(db: &str, symbol: Option<&str>) {
     let admin = Client::default().with_url(ch_url());
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (3, '', 'contract', '', '{c}')",
-            c = contract()
+        .query(&assets_insert(
+            db,
+            &[AssetFixture::new("", "contract", "", &contract())],
         ))
         .execute()
         .await

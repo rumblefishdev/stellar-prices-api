@@ -377,6 +377,16 @@ export class ObservabilityStack extends cdk.Stack {
    */
   public readonly zeroInvariantAlarms: Record<string, cloudwatch.Alarm>;
   /**
+   * More identities than ids on `assets FINAL` (task 0139): two assets share
+   * an `asset_id`, which ClickHouse now derives from the identity. Keyed by count.
+   */
+  public readonly assetIdCollisionAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * `price_ohlcv_1m` candles of the last 2 h on an id `assets` lacks (task
+   * 0139): a writer sent ids, not identities. Keyed by count.
+   */
+  public readonly assetIdOrphanCandleAlarms: Record<string, cloudwatch.Alarm>;
+  /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
    * only drift severity that compounds while nobody looks.
@@ -1709,6 +1719,35 @@ export class ObservabilityStack extends cdk.Stack {
           (count) => count > 1,
         ),
       ],
+    );
+
+    // Asset-id uniqueness (task 0139). The id is xxh3 of the identity, so the
+    // healthy reading of both is exactly 0, and a regressed writer keeps adding
+    // to them: the zero-invariant ladder, first rung fixed at 1. Before the
+    // migration window prod read 3,321 collisions (count - uniqExact on
+    // assets FINAL, 2026-10-01); these ship in that window, after the swap.
+    // See packages/rollup-freshness-probe/src/asset_id_uniqueness.rs.
+    const zeroLadder = [
+      1,
+      ...config.opsAlarms.usdSanityEscalationCounts.filter(
+        (count) => count > 1,
+      ),
+    ];
+    this.assetIdCollisionAlarms = usdSanityRungs(
+      'AssetIdCollisions',
+      'AssetIdCollisionsAlarmCount',
+      'asset-id-collisions',
+      (count) =>
+        `${count} or more identities in prices.assets FINAL share an asset_id with another (count() - uniqExact(asset_id)). Since task 0139 ClickHouse derives asset_id = xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)), so this is 0 by construction: a non-zero value means assets.asset_id is no longer MATERIALIZED from the identity (a schema change or a restored old table) or a 64-bit hash collision. Every table keyed on asset_id then blends two assets. Find the shared ids: SELECT asset_id, groupArray((asset_code, issuer_address, contract_address)) FROM prices.assets FINAL GROUP BY asset_id HAVING count() > 1. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
+    );
+    this.assetIdOrphanCandleAlarms = usdSanityRungs(
+      'AssetIdOrphanCandles',
+      'AssetIdOrphanCandlesAlarmCount',
+      'asset-id-orphan-candles',
+      (count) =>
+        `${count} or more price_ohlcv_1m candles of the last 2 h carry an asset_id or quote_asset_id that prices.assets does not hold. Since task 0139 a writer sends the identity and ClickHouse derives both ids; an orphan means a writer sent ids itself (a stale pre-0139 binary or Lambda version: RowBinary is width-exact, so an old u32 writer misaligns rather than failing) or wrote candles before their assets rows. Stop that writer first, then find it from the rows' source column. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
     );
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built

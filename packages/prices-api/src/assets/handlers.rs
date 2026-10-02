@@ -553,9 +553,9 @@ pub async fn get_ohlcv(
         match base_currency {
             BaseCurrency::Usd => {
                 // Resolved once per AppState and shared thereafter — see
-                // AppState::usd_refs. The three identities are constants and their
-                // surrogate ids never move, so re-reading `assets FINAL` on every
-                // request is pure waste on a p95-bounded path.
+                // AppState::usd_refs. The three identities are constants and the
+                // database derives their ids from them, so re-reading `assets
+                // FINAL` on every request is pure waste on a p95-bounded path.
                 let refs = state
                 .usd_refs()
                 .get_or_try_init(|| async {
@@ -756,7 +756,7 @@ async fn resolve_reference(
     ch: &clickhouse::Client,
     ident: AssetIdentifier,
     base_currency: BaseCurrency,
-) -> Result<u32, Response> {
+) -> Result<u64, Response> {
     match queries_ch::resolve_asset_id(ch, &ident).await {
         Ok(Some(id)) => Ok(id),
         Ok(None) => {

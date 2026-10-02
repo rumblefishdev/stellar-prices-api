@@ -224,7 +224,8 @@ ORDER BY venue;
 SELECT asset_id, price_usd, price_xlm, vwap_24h, volume_24h_usd,
        change_24h_pct, sources, method, updated_at
 FROM prices.current_prices FINAL
-WHERE asset_id = 4;
+WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
+                  WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '');
 
 -- (13) The raw candles the published figure is derived from.
 --      This is the capture that task 0123 re-aggregated in plain Python,
@@ -234,7 +235,15 @@ WHERE asset_id = 4;
 SELECT timestamp, asset_id, quote_asset_id, source,
        close, close_usd, volume_quote_usd
 FROM prices.price_ohlcv_1m FINAL
-WHERE asset_id IN (4, 5, 70, 108, 430, 741)
+WHERE asset_id IN (SELECT asset_id FROM prices.assets FINAL
+                   WHERE contract_address = ''
+                     AND (asset_code, issuer_address) IN (
+                       ('XLM', ''),
+                       ('AQUA', 'GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA'),
+                       ('SCOP', 'GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ'),
+                       ('BTC', 'GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDWO5O2MZM'),
+                       ('EURC', 'GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2'),
+                       ('USDCAllow', 'GDIEKKIQWMIZ4LD3RP3ABPN7X5KEAEWYMR634BRHB7EULIMEVREWLF3G')))
   AND timestamp >= toDateTime('2026-08-25 13:22:00')
   AND timestamp <= toDateTime('2026-08-26 13:22:00');
 
@@ -318,7 +327,8 @@ WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
 SELECT toDate(timestamp) AS day, asset_id, source,
        close, close_usd, trade_count
 FROM prices.price_ohlcv_1d
-WHERE asset_id = 4
+WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
+                  WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '')
   AND toDate(timestamp) IN ('2022-01-03', '2022-06-15', '2023-03-11',
                             '2024-07-01', '2026-06-15')
 ORDER BY day, source;

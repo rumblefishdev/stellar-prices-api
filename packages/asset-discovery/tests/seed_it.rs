@@ -43,21 +43,17 @@ async fn seed_populates_assets_idempotently() {
 
     let seed = asset_discovery::seed_identities().expect("parse seed");
 
-    // First run seeds the table.
+    // First run writes every seed asset.
     let n1 = asset_discovery::ensure_seed(&writer, &seed)
         .await
         .expect("first seed run");
-    assert_eq!(
-        n1,
-        seed.len(),
-        "registry should hold exactly the seed assets"
-    );
+    assert_eq!(n1, seed.len(), "the first run writes the whole seed");
 
-    // Second run is a no-op: same count, no duplicate rows after FINAL collapse.
+    // Second run is a no-op: it writes nothing.
     let n2 = asset_discovery::ensure_seed(&writer, &seed)
         .await
         .expect("second seed run");
-    assert_eq!(n1, n2, "re-run must not change the asset count");
+    assert_eq!(n2, 0, "a steady-state run writes no asset");
 
     let count: u64 = writer
         .client()
@@ -92,6 +88,60 @@ async fn seed_populates_assets_idempotently() {
     writer
         .client()
         .query("SYSTEM START MERGES prices.assets")
+        .execute()
+        .await
+        .expect("restart merges");
+}
+
+/// Assets the table already holds, seed or not, are neither re-emitted nor
+/// read back: only the absent seed identities are written.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn seed_writes_only_the_absent_identities() {
+    use prices_ingest_core::{AssetIdentity, AssetRegistry};
+
+    let writer = OhlcvWriter::plaintext(&ch_url());
+    prices_clickhouse::apply_sql(writer.client(), prices_clickhouse::INIT_SQL)
+        .await
+        .expect("apply init schema");
+    let ch = writer.client();
+    ch.query("TRUNCATE TABLE prices.assets")
+        .execute()
+        .await
+        .expect("truncate assets");
+    ch.query("SYSTEM STOP MERGES prices.assets")
+        .execute()
+        .await
+        .expect("stop merges");
+
+    let seed = asset_discovery::seed_identities().expect("parse seed");
+    let (held, absent) = seed.split_at(seed.len() / 2);
+    let mut pre = AssetRegistry::from_existing(Vec::new());
+    for identity in held {
+        pre.intern(identity);
+    }
+    for c in ["C1", "C2", "C3"] {
+        pre.intern(&AssetIdentity::Contract(c.to_string()));
+    }
+    writer.write_new_assets(&pre).await.expect("pre-seed");
+
+    let written = asset_discovery::ensure_seed(&writer, &seed)
+        .await
+        .expect("seed run");
+    assert_eq!(written, absent.len(), "only the absent half is written");
+
+    let raw: u64 = ch
+        .query("SELECT count() FROM prices.assets")
+        .fetch_one()
+        .await
+        .expect("raw count");
+    assert_eq!(
+        raw as usize,
+        seed.len() + 3,
+        "no held row is re-emitted, unmerged"
+    );
+
+    ch.query("SYSTEM START MERGES prices.assets")
         .execute()
         .await
         .expect("restart merges");

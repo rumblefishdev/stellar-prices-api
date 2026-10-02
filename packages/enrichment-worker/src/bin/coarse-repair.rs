@@ -132,7 +132,7 @@ struct Args {
     /// refused right after connecting, before the oracle check and dry run
     /// included (`ResetPlainModeOnPivotLeg`, task 0208 review WR-04).
     #[arg(long, requires = "reset_not_before")]
-    reset_quote_asset_id: Option<u32>,
+    reset_quote_asset_id: Option<u64>,
 
     /// Epoch (unix seconds) below which stored USD values are left alone.
     ///

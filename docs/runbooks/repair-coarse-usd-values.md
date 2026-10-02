@@ -511,6 +511,16 @@ WHERE asset_id = <USDC_ID> AND oracle_name = 'reflector'
   --reset-not-after <the lower of the two>
 ```
 
+`<ID>` is the leg's `asset_id`, looked up by identity. Since task 0139 ids are
+derived from the identity (`UInt64`), so never type one from memory. Canonical
+USDT, the leg of this appendix:
+
+```sql
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDT' AND contract_address = ''
+  AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'
+```
+
 ### What reset mode refuses outright
 
 All nine are hard errors, not warnings, because each one ends with rows zeroed
@@ -520,7 +530,7 @@ that nothing can refill:
 | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--skip-snapshot` + `--reset-*` without `--snapshots-verified` | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. On prod `--skip-snapshot` is the _correct_ flag (Step 3b: the admin freezes, `prices_writer` cannot), so it is not refused — but "the admin did it" and "nobody did it" must not look identical. Verify under `shadow/`, then add `--snapshots-verified`.                                                                                          |
 | `--pivot-window-s` below the table's bucket width              | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first.                                                                                                                                                                                                                                              |
-| A quote leg that is not a peg or pivot reference               | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                                                                                                                 |
+| A quote leg that is not a peg or pivot reference               | A mistyped id (one digit dropped) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                                                                                                              |
 | A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                                                                                                            |
 | `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `ResetPlainModeOnPivotLeg`                                     | The plain mode on an XLM or USDT leg. The pivot refills such a row only with a USDC/USD rate AND a reference inside `--pivot-window-s`, and the plain mode checks neither, so it zeroes rows in the middle of history that nothing can refill. Re-run with `--reset-require-pivot-usdc-rate` (Appendix C).                                                                                                                  |
@@ -550,7 +560,7 @@ WHERE asset_id = <REF_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volum
 Pass `first_reference_candle` as `--reset-not-before`. `reference_rows = 0` means
 there is no reference on that table at all, and **no epoch is safe**.
 
-For canonical USDT (`asset_id = 111` on prod) the value is **`1612724400` =
+For canonical USDT (`<ID>` from the lookup above) the value is **`1612724400` =
 2021-02-07 19:00 UTC** on `_1h` — for an Appendix C (0228-mode) run, because the
 plain mode no longer runs on USDT. The tool checks per table: it refuses any epoch
 below that table's own first reference candle, before any write and in a dry run
@@ -699,8 +709,8 @@ in fresh for **each** table; do not paste one filled-in copy five times:
 - `<TABLE>` — the table you reset: `price_ohlcv_1h`, `_4h`, `_1d`, `_1w`, `_1M`,
   **each in turn**. On 2026-08-18 all the damage was in `_1h` and `_4h`, the two
   tables nobody queried.
-- `<QUOTE_ID>` — the `--reset-quote-asset-id` you passed (`111` for USDT on
-  prod).
+- `<QUOTE_ID>` — the `--reset-quote-asset-id` you passed (for USDT, the id
+  from the lookup above).
 - `<NOT_BEFORE>` — the `--reset-not-before` you passed (`1612724400` for USDT on
   `_1h`).
 

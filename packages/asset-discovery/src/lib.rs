@@ -15,16 +15,16 @@
 //! each AMM pool as it learns it from a factory event (task 0291). A second,
 //! hourly reader of the same ledgers could only find what live already had.
 //!
-//! The seed reuses `prices_ingest_core`'s [`AssetRegistry`] + [`OhlcvWriter`] so
-//! the rows are byte-identical to the live ledger processor's (same surrogate
-//! ids, same column mapping). The supply fetch (`prices.asset_supply`) is a
+//! The seed reuses `prices_ingest_core`'s [`OhlcvWriter`] so
+//! the rows are byte-identical to the live ledger processor's (same column
+//! mapping; ClickHouse derives the ids). The supply fetch (`prices.asset_supply`) is a
 //! *different* worker (task 0039); this crate only writes the identity columns
 //! of `prices.assets` — never `home_domain`, whose enrichment carries the
 //! task-0067 whole-row-clobber hazard.
 
 pub mod symbols;
 
-use prices_ingest_core::{AssetIdentity, AssetRegistry, IngestError, OhlcvWriter};
+use prices_ingest_core::{AssetIdentity, IngestError, OhlcvWriter};
 use serde::Deserialize;
 
 /// The Tranche-1 seed list, embedded at build time. Edited as data, not code.
@@ -69,37 +69,21 @@ pub fn seed_identities() -> Result<Vec<AssetIdentity>, DiscoveryError> {
     Ok(file.assets.into_iter().map(AssetIdentity::from).collect())
 }
 
-/// Ensure the given identities exist in `prices.assets` (idempotent).
+/// Ensure the given identities exist in `prices.assets` (idempotent), and
+/// return how many this run wrote.
 ///
-/// Loads the existing registry first so surrogate ids are reused — a re-run, or
-/// a run after the live ledger processor has already interned an asset, neither
-/// reassigns ids nor duplicates rows. Returns the total asset count in the
-/// registry, whether or not this run had anything to write.
-///
-/// Writes **only what this run interned**, via [`OhlcvWriter::write_new_assets`].
-/// It previously re-emitted the whole registry through `write_assets`, and
-/// because this worker is scheduled hourly rather than one-shot, that piled a
-/// fresh ~209k-row part into `prices.assets` every hour. `ReplacingMergeTree`
-/// collapses duplicates only **on merge**, so between merges a reader without
-/// `FINAL` sees 1×–4× the registry — which is what drove
-/// `prices-production-oracle` into `Runtime.OutOfMemory` at its 256 MB ceiling
-/// (task 0256). Task 0132 removed the same amplification from the live ledger
-/// processor.
+/// Checks only the seed identities ([`OhlcvWriter::write_absent_assets`]); it
+/// does not load the ~210k-row registry, which is what drove
+/// `prices-production-oracle` into `Runtime.OutOfMemory` (task 0256). An
+/// identity already present is not re-emitted, so a steady-state run writes
+/// NOTHING — no INSERT, no new part. Re-emitting the registry every hour piled
+/// a fresh ~209k-row part into `prices.assets` that `ReplacingMergeTree` only
+/// collapses on merge (task 0256; task 0132 for the live processor).
 pub async fn ensure_seed(
     writer: &OhlcvWriter,
     identities: &[AssetIdentity],
 ) -> Result<usize, DiscoveryError> {
-    let existing = writer.load_assets().await?;
-    let mut registry = AssetRegistry::from_existing(existing);
-    // Everything already durable in `prices.assets` sits below this id.
-    let durable = registry.watermark();
-    for identity in identities {
-        registry.get_or_assign(identity);
-    }
-    // Steady state: the seed is already present, nothing lands at or above the
-    // watermark, and this writes NOTHING — no INSERT, no new part.
-    writer.write_new_assets(&registry, durable).await?;
-    Ok(registry.assets().count())
+    Ok(writer.write_absent_assets(identities).await?)
 }
 
 #[cfg(test)]

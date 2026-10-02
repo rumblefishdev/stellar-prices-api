@@ -23,6 +23,10 @@ follows.
 [`0286-candle-definitions-rollout.md`](0286-candle-definitions-rollout.md) — the
 phase-1 rollout. This runbook assumes everything in it is done and green.
 
+**After the 0139 window** (asset ids derived by ClickHouse, `UInt64`): read §10
+before resuming. The orchestrator detects the new schema and refuses to run
+without it.
+
 ---
 
 ## 1. Preconditions
@@ -847,20 +851,33 @@ run holding 1 564 045 USDT-quoted rows valued at `close × $1` (2018-05-15 →
 and the coarse tiers and never touched `1m`. This run replaces every one of
 those rows and 7b re-prices them, so 0212 needs no repair of its own — **but
 only if the USDT pivot actually writes** (it never had until task 0215; confirm
-`CAST(111 AS UInt32) AS ref_asset_id` statements in `system.query_log` during
-7b, not only XLM's `CAST(4 …)`). Otherwise the rows end at zero instead of
-wrong, which is the trade 0172 made on 2026-08-13.
+`CAST(<USDT_ID> AS UInt64) AS ref_asset_id` statements in `system.query_log`
+during 7b, not only XLM's `CAST(<XLM_ID> …)`; `UInt32` on a build before 0139).
+Otherwise the rows end at zero instead of wrong, which is the trade 0172 made on
+2026-08-13.
+
+The two ids, by identity (since task 0139 they are derived from it, so no
+number is fixed across databases):
+
+```sql
+SELECT asset_code, asset_id FROM prices.assets FINAL
+WHERE (asset_code, issuer_address, contract_address) IN
+      (('XLM', '', ''), ('USDT', 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V', ''));
+```
 
 Measure it on `1m`, not on the tiers the pre-roll just wrote:
 
 ```sql
--- 111 = the canonical USDT on prod (task 0209). Its real rate is ~0.14.
+-- Canonical USDT (task 0209), by identity. Its real rate is ~0.14.
 SELECT
     countIf(close_usd / close <  0.5) AS pivot_written,
     countIf(close_usd / close >= 0.9) AS peg_written,
     min(timestamp) AS oldest_priced, max(timestamp) AS newest_priced
 FROM prices.price_ohlcv_1m FINAL
-WHERE quote_asset_id = 111 AND close > 0 AND close_usd > 0;
+WHERE quote_asset_id = (SELECT asset_id FROM prices.assets FINAL
+                        WHERE asset_code = 'USDT' AND contract_address = ''
+                          AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V')
+  AND close > 0 AND close_usd > 0;
 ```
 
 Expected: `peg_written = 0`, `pivot_written > 0` over the same span. Run it once
@@ -879,14 +896,17 @@ full scan):
 
 ```sql
 -- A row is inconsistent when its rate is more than 10x off the median rate of
--- its own quote leg in the same bucket. 4 = XLM, 111 = USDT (task 0209).
+-- its own quote leg in the same bucket: XLM and USDT (task 0209), by identity;
+-- the 7e lookup names the two ids.
 -- close_usd is floored at the precision floor: below it the Decimal(38, 14)
 -- tick alone moves the ratio. close is NOT floored — a sub-floor close under a
 -- real close_usd is the worst case of this defect (5.0M x on 1h, 2022-02-11).
 WITH r AS (
     SELECT timestamp, quote_asset_id, toFloat64(close_usd) / toFloat64(close) AS rate
     FROM prices.price_ohlcv_1d FINAL          -- then _1h, _4h, _1w, _1M
-    WHERE quote_asset_id IN (4, 111)
+    WHERE quote_asset_id IN (SELECT asset_id FROM prices.assets FINAL
+                             WHERE (asset_code, issuer_address, contract_address) IN
+                                   (('XLM', '', ''), ('USDT', 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V', '')))
       AND close > 0
       AND close_usd >= toDecimal128('0.000000000001', 14)),
 m AS (SELECT timestamp, quote_asset_id, quantileExact(0.5)(rate) AS med
@@ -1002,6 +1022,214 @@ SYSTEM UNFREEZE WITH NAME 'reingest_0286_prices_price_ohlcv_1m_<month>';
 
 ---
 
+## 10. After 0139: derived asset ids
+
+Task 0139 moves every id-keyed table, in one window
+([`0139-asset-id-migration.md`](0139-asset-id-migration.md)), to
+`asset_id = xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))`,
+a `UInt64` that ClickHouse derives. Phase 3 is paused
+at a month boundary for it, and that runbook records the last finished month as
+`PAUSE_MONTH` (its Preconditions). The window does not copy rows under the old
+colliding ids, because they are blends of two assets. The months that held them
+are listed in `prices.rekey_0139_reingest_months` and are re-ingested here.
+
+Nothing in this section runs before that runbook's W14 is green. Its W1 keeps
+the orchestrator stopped until then.
+
+The orchestrator detects the new schema on its own (`prices.price_ohlcv_1m`'s
+`asset_id` is `UInt64`), and from then on:
+
+| Step        | After 0139                                                                                                                                                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `preflight` | Requires `--ack-0139-binaries` (10a) and a non-empty `prices.asset_id_map_0139`. Refuses while any `reingest_0286_bak_*` without the `_pre0139` suffix still has UInt32 id columns (10b), and then does not probe the snapshot grants |
+| snapshot    | Refuses a backup table whose id columns differ from the source's: `CREATE … IF NOT EXISTS` would otherwise keep an old-shape table, and `ATTACH` never crosses widths                                                                 |
+| `rollback`  | Checks every table before the first write. It refuses a backup in another id space, and a backup without the month, because `REPLACE PARTITION` from it would empty the month. Both messages name the `_pre0139` tables               |
+| reconcile   | Restricted to the ids the rekey copied (10e). Trades back under formerly colliding identities are notes, not a verdict                                                                                                                |
+| `release`   | A month without snapshot rows is skipped with a note. A pre-window snapshot is in `*_pre0139`, which is dropped whole in 10f                                                                                                          |
+
+`--accept YYYYMM` stays the escape hatch for a reconciliation that is
+understood and recorded on the task.
+
+### 10a. Rebuild the binaries
+
+`sdex-backfill` and `events-backfill` write ids, and RowBinary is width-exact:
+an old binary sends 4-byte ids into 8-byte columns, and nothing guarantees a
+loud failure. Build both from the 0139 merge commit or later.
+
+On `fishuser-hero`, in the checkout the orchestrator runs from:
+
+```bash
+git checkout develop && git pull --ff-only
+git merge-base --is-ancestor <0139 merge commit> HEAD && echo "contains 0139"
+cargo build --release -p sdex-backfill --features aws-mtls
+cargo build --release -p events-backfill --features aws-mtls
+```
+
+On the CH host (`--amm ssh` runs `~/events-backfill` there), the 0139 runbook's
+Preconditions put the new binary in place and kept the old one as
+`~/events-backfill.pre0139`. Confirm that the host binary is the new build
+before the first run, for example by comparing `sha256sum ~/events-backfill`
+with the checksum of the build that was copied there.
+
+Then pass `--ack-0139-binaries` to every `preflight` and `run` below. It is an
+attestation: the orchestrator cannot probe the host binary.
+
+### 10b. The old snapshots (GA1)
+
+The window's W9b renames the `reingest_0286_bak_*` snapshots to
+`reingest_0286_bak_*_pre0139`. They keep phase 3's pre-window snapshots in the
+old id space, and `prices.asset_id_map_0139` decodes them. Check the rename
+before resuming, and finish it if anything is left: **after the window (W14
+green), before the first `run`.**
+
+CH shell, `chq` as defined in the 0139 runbook:
+
+```bash
+chq <<'SQL' > ~/rekey-0139/bak-before.tsv
+SELECT replaceRegexpOne(name, '_pre0139$', '') AS base, total_rows FROM system.tables
+WHERE database = 'prices' AND startsWith(name, 'reingest_0286_bak_') ORDER BY base FORMAT TSV
+SQL
+chq <<'SQL' > ~/rekey-0139/rename-bak-0286.sql
+SELECT DISTINCT 'RENAME TABLE prices.' || table || ' TO prices.' || table || '_pre0139;'
+FROM system.columns WHERE database = 'prices' AND startsWith(table, 'reingest_0286_bak_')
+  AND NOT endsWith(table, '_pre0139') AND name IN ('asset_id', 'quote_asset_id') AND type != 'UInt64'
+FORMAT TSVRaw
+SQL
+cat ~/rekey-0139/rename-bak-0286.sql && chq < ~/rekey-0139/rename-bak-0286.sql
+chq <<'SQL' > ~/rekey-0139/bak-after.tsv
+SELECT replaceRegexpOne(name, '_pre0139$', '') AS base, total_rows FROM system.tables
+WHERE database = 'prices' AND startsWith(name, 'reingest_0286_bak_') ORDER BY base FORMAT TSV
+SQL
+diff ~/rekey-0139/bak-before.tsv ~/rekey-0139/bak-after.tsv && echo "same rows under the new names"
+```
+
+An empty `rename-bak-0286.sql` means W9b did all of it. The `diff` must be
+empty: every table holds the same `total_rows` under its new name. Then give
+any newly renamed table the old-id-space comment, as in W9b:
+
+```bash
+chq <<'SQL' | chq
+SELECT 'ALTER TABLE prices.' || name || ' MODIFY COMMENT ''old id space: pre-0139 UInt32 asset ids, decode with prices.asset_id_map_0139'';'
+FROM system.tables WHERE database = 'prices' AND startsWith(name, 'reingest_0286_bak_')
+  AND endsWith(name, '_pre0139') FORMAT TSVRaw
+SQL
+```
+
+The next `preflight` then reads `ok 0139 snapshots`, and the first snapshot
+creates new-shape `reingest_0286_bak_*` tables under the original names.
+
+A month finished before the window has its only snapshot in `*_pre0139`.
+`rollback` refuses it, by design: those rows cannot go back into a UInt64
+table. If such a month is wrong, re-ingest it in the second pass.
+
+### 10c. Resume the first pass (the original state dir)
+
+Phase 3 continues in `~/reingest-0286`, from the month after `PAUSE_MONTH`.
+The state dir already knows which month that is; do not pass `--from-month`.
+
+```bash
+R=tools/scripts/reingest_0286.py      # plus the paused run's own flags below
+python3 $R status <the run's flags>   # every month up to PAUSE_MONTH done, none in progress
+python3 $R preflight <the run's flags> --ack-0139-binaries
+python3 $R run <the run's flags> --ack-0139-binaries
+```
+
+These months are a first pass on the new ids, and they need no second pass.
+
+### 10d. The second pass (a fresh state dir)
+
+The months up to and including `PAUSE_MONTH` were re-ingested on the old ids,
+and the window left out their colliding rows. The second pass re-ingests those
+months, with each identity under its own id. The month list (read-only):
+
+```sql
+SELECT month, colliding_rows, orphan_rows FROM prices.rekey_0139_reingest_months
+WHERE month <= <PAUSE_MONTH> ORDER BY month;
+```
+
+It is built from `price_ohlcv_1m`, and that is complete: by the pause, phase 3
+had refilled `1m` for every month up to `PAUSE_MONTH`. Months after the pause
+are 10c's first pass.
+
+```bash
+mkdir -p ~/reingest-0286-pass2 && cp -r ~/reingest-0286/ledger-cache ~/reingest-0286-pass2/
+P2="--state-dir ~/reingest-0286-pass2 --second-pass --to-month <PAUSE_MONTH>"
+python3 $R plan --state-dir ~/reingest-0286-pass2 --to-month <PAUSE_MONTH>
+python3 $R preflight <the run's flags> $P2 --ack-0139-binaries
+python3 $R run <the run's flags> $P2 --ack-0139-binaries
+```
+
+- `--second-pass` takes every listed month up to `--to-month`. It refuses
+  without `--to-month`, before the swap, and when the plan lacks a listed month.
+- **No `--min-excluded-rows`** (Adam, 2026-10-02): every listed month is
+  re-ingested. With N, a listed month with at most N excluded `1m` rows
+  (colliding + orphan) would be skipped and its identities would keep a hole
+  there. Measured 2026-10-02 at N = 1000: 14 of 65 months and 1,611 rows, about
+  a day of a 5–6 day pass, not worth a permanent hole.
+- After each month, run the 0139 runbook's month post-check block with
+  `?param_m=<month>`. Every line must be `1`.
+
+**Order.** 10c then 10d is the default. Either order works; the trade-off is:
+
+| First             | Gets sooner                                                                          | Waits                                                                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 10c (resume)      | 0286's corrected candles for the months after the pause, the history users read most | The formerly colliding identities stay missing in the pre-pause months for the whole second pass: ~63 months × ~2 h ≈ 5–6 days, because `sdex-backfill` re-ingests whole months |
+| 10d (second pass) | Those identities' pre-pause history                                                  | Phase 3's remaining months, by the same 5–6 days                                                                                                                                |
+
+**Never run both at once.** Each state dir has its own lock, so they do not
+stop each other, and one writer per source still holds. Between them,
+`release` reconciled months if `disk` is short.
+
+### 10e. Reconcile in the new mode
+
+The `before` and `after` sums count only rows whose `asset_id` **and**
+`quote_asset_id` are ids the rekey copied: a `new_id` with a `mapped` or
+`sentinel` row in `prices.asset_id_map_0139` and no `colliding` row. On those
+rows the gates are unchanged: SDEX equal to the stroop, a gain above
+`--sdex-max-gain-pct` a DEFECT.
+
+Everything else is reported per source and class, as `before -> after` trades:
+
+```
+NOTE 202203 sdex colliding: 0 -> 41207 trades on ids the 0139 rekey did not copy, back under their own identities — information, not reconciled
+```
+
+`colliding` means trades back under a formerly colliding identity, the point of
+the second pass. `unmapped` means an id the map does not know: an identity
+first seen after the map was built.
+
+A month whose `before` numbers were read on the old width stops at reconcile.
+That happens only to a month in progress across the window, which W1 forbids.
+Compare by hand, then `run --accept <month>` with the reason on the task.
+
+### 10f. After both passes
+
+1. `finish` once, after the last month of both passes, from the original state
+   dir (its plan covers every month). Then §7b onwards. The second pass changes
+   `1d` under months the first `finish` would already have rolled, so do not
+   run `finish` between the passes.
+2. GA2: drop `X__pre0139` and `assets__pre0139` **as soon as the second pass
+   verifies** (every month's post-check `1`), per the 0139 runbook's "Old
+   tables". There is no extra retention.
+3. GA1: at the end of task 13, drop the phase-3 pre-window snapshots. Record the
+   rows first:
+
+   ```bash
+   chq <<'SQL'
+   SELECT name, total_rows FROM system.tables WHERE database = 'prices'
+     AND startsWith(name, 'reingest_0286_bak_') AND endsWith(name, '_pre0139') ORDER BY name;
+   SQL
+   chq <<'SQL' > ~/rekey-0139/drop-bak-0286.sql
+   SELECT 'DROP TABLE prices.' || name || ' SYNC;' FROM system.tables WHERE database = 'prices'
+     AND startsWith(name, 'reingest_0286_bak_') AND endsWith(name, '_pre0139') FORMAT TSVRaw
+   SQL
+   cat ~/rekey-0139/drop-bak-0286.sql && chq < ~/rekey-0139/drop-bak-0286.sql
+   ```
+
+4. Keep `prices.asset_id_map_0139` while any old-id-space table remains.
+
+---
+
 ## Related
 
 - [`0286-candle-definitions-rollout.md`](0286-candle-definitions-rollout.md) —
@@ -1019,4 +1247,6 @@ SYSTEM UNFREEZE WITH NAME 'reingest_0286_prices_price_ohlcv_1m_<month>';
   timeout flags.
 - [`running-ingestion-components.md`](running-ingestion-components.md) — the
   disjoint-range rule and the boundary-minute residual this run inherits.
+- [`0139-asset-id-migration.md`](0139-asset-id-migration.md) — the window that
+  derives the asset ids; §10 continues from its W15.
 - ADR 0287 §1–§8; lore task 0286, phases 2 and 3.

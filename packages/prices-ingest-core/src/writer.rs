@@ -72,21 +72,20 @@ impl OhlcvWriter {
         Ok(())
     }
 
-    /// Load the existing `prices.assets` rows as `(asset_id, identity)` so a
-    /// run reuses surrogate ids rather than reassigning them.
-    pub async fn load_assets(&self) -> Result<Vec<(u32, AssetIdentity)>, IngestError> {
+    /// Load the identities already in `prices.assets`, so a run writes only
+    /// the ones it discovers. Ids are not loaded: ClickHouse derives them from
+    /// the identity (task 0139).
+    pub async fn load_assets(&self) -> Result<Vec<AssetIdentity>, IngestError> {
         let rows = self
             .client
-            .query(
-                "SELECT asset_id, asset_code, issuer_address, contract_address FROM prices.assets",
-            )
+            .query("SELECT asset_code, issuer_address, contract_address FROM prices.assets")
             .fetch_all::<ExistingAssetRow>()
             .await?;
 
-        let assets: Vec<(u32, AssetIdentity)> = rows
+        let assets: Vec<AssetIdentity> = rows
             .into_iter()
             .map(|r| {
-                let identity = if !r.contract_address.is_empty() {
+                if !r.contract_address.is_empty() {
                     AssetIdentity::Contract(r.contract_address)
                 } else if r.asset_code == "XLM" && r.issuer_address.is_empty() {
                     AssetIdentity::Native
@@ -95,8 +94,7 @@ impl OhlcvWriter {
                         code: r.asset_code,
                         issuer: r.issuer_address,
                     }
-                };
-                (r.asset_id, identity)
+                }
             })
             .collect();
 
@@ -222,27 +220,46 @@ impl OhlcvWriter {
         self.write_asset_rows(registry, registry.assets()).await
     }
 
-    /// Write only the assets interned on/after the `since` watermark — the
-    /// caller's high-water mark of assets already durably in `prices.assets` (see
-    /// [`AssetRegistry::watermark`]). A run that discovered no new assets writes
-    /// **nothing**. This is the live processor's asset write path: it replaces the
-    /// full-registry re-emit that caused ~$337/mo of redundant egress (task 0132).
-    /// Correctness is unchanged — a new asset's row (including its deterministic
-    /// `sac_address`) is complete when interned.
-    pub async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), IngestError> {
-        // O(1) steady-state fast path (the common case — no new assets). Ids are
-        // handed out monotonically, so once `since` has caught up to the next id
-        // no asset can have `id >= since`; skip without scanning the whole
-        // ~200k-entry registry to conclude the set is empty.
-        if since >= registry.watermark() {
-            return Ok(());
-        }
-        self.write_asset_rows(registry, registry.assets_since(since))
+    /// Write only the registry's pending identities ([`AssetRegistry::pending_new`])
+    /// — those this process interned and has not yet persisted. A run that
+    /// discovered no new assets writes **nothing**. This is the live processor's
+    /// asset write path: it replaces the full-registry re-emit that caused
+    /// ~$337/mo of redundant egress (task 0132). A new asset's row (including its
+    /// deterministic `sac_address`) is complete when interned. The caller clears
+    /// the pending set only after this returns `Ok`.
+    pub async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), IngestError> {
+        self.write_asset_rows(registry, registry.pending_new())
             .await
+    }
+
+    /// Write the `prices.assets` rows of those `identities` the table does not
+    /// hold yet, and return how many that was. For a writer that needs a few
+    /// assets to exist without loading the ~210k-row registry (the oracle
+    /// worker). A row already present is not re-emitted.
+    pub async fn write_absent_assets(
+        &self,
+        identities: &[AssetIdentity],
+    ) -> Result<usize, IngestError> {
+        let mut absent = AssetRegistry::from_existing(Vec::new());
+        for identity in identities {
+            let (code, issuer, contract) = identity_strings(identity);
+            let present: u64 = self
+                .client
+                .query(
+                    "SELECT count() FROM prices.assets \
+                     WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
+                )
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .fetch_one()
+                .await?;
+            if present == 0 {
+                absent.intern(identity);
+            }
+        }
+        self.write_new_assets(&absent).await?;
+        Ok(absent.pending_new().count())
     }
 
     /// Shared row-builder for [`write_assets`] / [`write_new_assets`]. Skips the
@@ -255,7 +272,7 @@ impl OhlcvWriter {
     async fn write_asset_rows<'a>(
         &self,
         registry: &AssetRegistry,
-        rows: impl Iterator<Item = (&'a AssetIdentity, &'a u32)>,
+        rows: impl Iterator<Item = &'a AssetIdentity>,
     ) -> Result<(), IngestError> {
         let mut rows = rows.peekable();
         if rows.peek().is_none() {
@@ -264,7 +281,7 @@ impl OhlcvWriter {
 
         let mut insert = self.client.insert("prices.assets")?;
         let mut written = 0u64;
-        for (identity, &id) in rows {
+        for identity in rows {
             let (asset_code, asset_type, issuer_address, contract_address) = match identity {
                 AssetIdentity::Native => {
                     ("XLM".to_string(), "classic", String::new(), String::new())
@@ -282,7 +299,6 @@ impl OhlcvWriter {
 
             insert
                 .write(&AssetRow {
-                    asset_id: id,
                     asset_code,
                     asset_type: asset_type.to_string(),
                     issuer_address,
@@ -364,15 +380,7 @@ impl OhlcvWriter {
         }
         let mut insert = self.client.insert("prices.oracle_prices")?;
         for s in samples {
-            insert
-                .write(&OracleRow {
-                    timestamp: s.timestamp,
-                    asset_id: s.asset_id,
-                    oracle_name: s.oracle_name.clone(),
-                    price_usd: s.price_usd,
-                    raw_data: s.raw_data.clone(),
-                })
-                .await?;
+            insert.write(&oracle_row(s)).await?;
         }
         insert.end().await?;
         Ok(())
@@ -426,27 +434,31 @@ impl OhlcvWriter {
     /// already written — a partial write, which is the exact failure mode the
     /// guard exists to prevent. All identities are checked first; if any fails,
     /// nothing is written and the error names every offender.
+    ///
+    /// Since 0139 ClickHouse derives the id from the identity, so a shared id
+    /// can no longer be stored. The guard stays as a cheap assertion.
     pub async fn populate_usd_rate_from_oracle(
         &self,
         pegs: &[AssetIdentity],
         oracle_name: &str,
     ) -> Result<UsdRateStats, IngestError> {
         // ---- pre-pass: resolve + guard EVERY identity before writing ----
-        let mut resolved: Vec<(&AssetIdentity, u32)> = Vec::with_capacity(pegs.len());
+        let mut resolved: Vec<(&AssetIdentity, u64)> = Vec::with_capacity(pegs.len());
         let mut problems: Vec<String> = Vec::new();
 
         for identity in pegs {
             let (_, code, issuer, contract) = identity_columns(identity);
-            let ids: Vec<u32> = self
+            // `toUInt64`: reads the id on either schema width (task 0139).
+            let ids: Vec<u64> = self
                 .client
                 .query(
-                    "SELECT asset_id FROM prices.assets FINAL \
+                    "SELECT toUInt64(asset_id) FROM prices.assets FINAL \
                      WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
                 )
                 .bind(code)
                 .bind(issuer)
                 .bind(contract)
-                .fetch_all::<u32>()
+                .fetch_all::<u64>()
                 .await?;
             let [asset_id] = ids[..] else {
                 problems.push(format!(
@@ -583,6 +595,13 @@ fn identity_columns(id: &AssetIdentity) -> (&str, &str, &str, &str) {
     }
 }
 
+/// The `(code, issuer, contract)` an id is derived from (task 0139): the
+/// columns a writer sends in place of an id.
+fn identity_strings(id: &AssetIdentity) -> (&str, &str, &str) {
+    let (_, code, issuer, contract) = identity_columns(id);
+    (code, issuer, contract)
+}
+
 /// Outcome of a [`OhlcvWriter::populate_usd_rate_from_oracle`] pass.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UsdRateStats {
@@ -638,12 +657,21 @@ fn validate_table(table: &str) -> Result<(), IngestError> {
 /// unit-testable without a ClickHouse (task 0286): the clickhouse crate routes
 /// this INSERT by field NAME, so a mis-mapped or missing column is a silent
 /// wrong value, never an error.
-fn candle_row(candle: &OhlcvCandle, source: &str) -> OhlcvRow {
+///
+/// The row names the two identities, not their ids: ClickHouse derives the ids
+/// from them (task 0139).
+fn candle_row<'a>(candle: &'a OhlcvCandle, source: &'a str) -> OhlcvRow<'a> {
+    let (base_code, base_issuer, base_contract) = identity_strings(&candle.base);
+    let (quote_code, quote_issuer, quote_contract) = identity_strings(&candle.quote);
     OhlcvRow {
         timestamp: candle.minute_start,
-        asset_id: candle.asset_id,
-        quote_asset_id: candle.quote_asset_id,
-        source: source.to_string(),
+        base_code,
+        base_issuer,
+        base_contract,
+        quote_code,
+        quote_issuer,
+        quote_contract,
+        source,
         open: decimal_to_i128(candle.open),
         high: decimal_to_i128(candle.high),
         low: decimal_to_i128(candle.low),
@@ -669,11 +697,15 @@ fn candle_row(candle: &OhlcvCandle, source: &str) -> OhlcvRow {
 }
 
 #[derive(Debug, Serialize, clickhouse::Row)]
-struct OhlcvRow {
+struct OhlcvRow<'a> {
     timestamp: u32,
-    asset_id: u32,
-    quote_asset_id: u32,
-    source: String,
+    base_code: &'a str,
+    base_issuer: &'a str,
+    base_contract: &'a str,
+    quote_code: &'a str,
+    quote_issuer: &'a str,
+    quote_contract: &'a str,
+    source: &'a str,
     open: i128,
     high: i128,
     low: i128,
@@ -690,9 +722,9 @@ struct OhlcvRow {
     pf_price_volume: i128,
 }
 
+/// No `asset_id`: the table computes it, and refuses a writer that names it.
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct AssetRow {
-    asset_id: u32,
     asset_code: String,
     asset_type: String,
     issuer_address: String,
@@ -705,19 +737,18 @@ struct AssetRow {
 /// single-writer counterpart to identity in `prices.assets` (task 0067).
 #[derive(Debug, Clone)]
 pub struct AssetMetadata {
-    pub asset_id: u32,
+    pub asset_id: u64,
     pub home_domain: String,
 }
 
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct AssetMetadataRow {
-    asset_id: u32,
+    asset_id: u64,
     home_domain: String,
 }
 
 #[derive(Debug, Deserialize, clickhouse::Row)]
 struct ExistingAssetRow {
-    asset_id: u32,
     asset_code: String,
     issuer_address: String,
     contract_address: String,
@@ -758,20 +789,40 @@ struct UnresolvedPoolRow {
 #[derive(Debug, Clone)]
 pub struct OracleSample {
     pub timestamp: u32,
-    pub asset_id: u32,
+    /// The sampled asset; `None` for a feed with no asset (REDSTONE). The
+    /// writer sends it and ClickHouse derives the row's id (task 0139).
+    pub identity: Option<AssetIdentity>,
     pub oracle_name: String,
     /// price_usd scaled to 14 decimals (matches Decimal(38,14)).
     pub price_usd: i128,
     pub raw_data: String,
 }
 
+/// A sample with no asset (REDSTONE) sends a blank identity, which the table
+/// stores under the sentinel id 0.
+fn oracle_row(s: &OracleSample) -> OracleRow<'_> {
+    let (asset_code, issuer_address, contract_address) =
+        s.identity.as_ref().map_or(("", "", ""), identity_strings);
+    OracleRow {
+        timestamp: s.timestamp,
+        asset_code,
+        issuer_address,
+        contract_address,
+        oracle_name: &s.oracle_name,
+        price_usd: s.price_usd,
+        raw_data: &s.raw_data,
+    }
+}
+
 #[derive(Debug, Serialize, clickhouse::Row)]
-struct OracleRow {
+struct OracleRow<'a> {
     timestamp: u32,
-    asset_id: u32,
-    oracle_name: String,
+    asset_code: &'a str,
+    issuer_address: &'a str,
+    contract_address: &'a str,
+    oracle_name: &'a str,
     price_usd: i128,
-    raw_data: String,
+    raw_data: &'a str,
 }
 
 #[cfg(test)]
@@ -790,7 +841,7 @@ mod tests {
     fn the_row_struct_names_every_candle_column() {
         assert_eq!(
             OhlcvRow::COLUMN_NAMES.to_vec(),
-            prices_clickhouse::CANDLE_COLUMNS.to_vec()
+            prices_clickhouse::CANDLE_WRITER_COLUMNS.to_vec()
         );
     }
 
@@ -837,8 +888,8 @@ mod tests {
     fn the_row_builder_maps_each_pf_column_from_its_own_field() {
         let candle = OhlcvCandle {
             minute_start: 1_700_000_000,
-            asset_id: 1,
-            quote_asset_id: 2,
+            base: AssetIdentity::Native,
+            quote: AssetIdentity::Contract("CQUOTE".to_string()),
             open: Decimal::from(3),
             high: Decimal::from(4),
             low: Decimal::from(2),
@@ -866,5 +917,42 @@ mod tests {
         );
         assert_eq!(row.trade_count, 9);
         assert_eq!(row.volume_base, decimal_to_i128(Decimal::from(40)));
+        // Task 0139: the identities, which ClickHouse turns into the ids.
+        assert_eq!(
+            (row.base_code, row.base_issuer, row.base_contract),
+            ("XLM", "", "")
+        );
+        assert_eq!(
+            (row.quote_code, row.quote_issuer, row.quote_contract),
+            ("", "", "CQUOTE")
+        );
+    }
+
+    /// Task 0139: an oracle row names its asset's identity, and a feed with no
+    /// asset names a blank one (the table's sentinel 0).
+    #[test]
+    fn the_oracle_row_names_the_identity_or_a_blank_one() {
+        let sample = |identity| OracleSample {
+            timestamp: 1,
+            identity,
+            oracle_name: "reflector".to_string(),
+            price_usd: 1,
+            raw_data: String::new(),
+        };
+        let usdc = sample(Some(AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: "GISSUER".to_string(),
+        }));
+        let row = oracle_row(&usdc);
+        assert_eq!(
+            (row.asset_code, row.issuer_address, row.contract_address),
+            ("USDC", "GISSUER", "")
+        );
+        let redstone = sample(None);
+        let row = oracle_row(&redstone);
+        assert_eq!(
+            (row.asset_code, row.issuer_address, row.contract_address),
+            ("", "", "")
+        );
     }
 }

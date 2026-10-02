@@ -72,7 +72,7 @@ fn accumulate_ledger(
 ) {
     let mut out = LedgerSoroban::default();
     process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
-    for (source, tick) in &out.amm_ticks {
+    for (source, tick) in out.amm_ticks {
         accumulators.entry(source).or_default().merge(tick);
         *ticks_by_source.entry(source).or_default() += 1;
     }
@@ -97,18 +97,42 @@ fn accumulate_ledger(
     }
 }
 
-/// Write one source's buffered candles as a single batch. Newly-minted asset ids
-/// are persisted FIRST (so a candle never references an asset_id absent from
-/// `prices.assets`) and ONLY when the registry actually grew since the last asset
-/// write — collapsing what would otherwise be a full-registry write on every
-/// batch down to a handful over a run. Dry-run counts without writing.
+/// The two writes [`emit_buffer`] orders: an identity's `prices.assets` row
+/// before any candle that names it. A trait so a recording sink can pin that.
+pub(crate) trait EmitSink {
+    async fn write_new_assets(&self, assets: &AssetRegistry) -> Result<(), EventsBackfillError>;
+    async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), EventsBackfillError>;
+}
+
+impl EmitSink for OhlcvWriter {
+    async fn write_new_assets(&self, assets: &AssetRegistry) -> Result<(), EventsBackfillError> {
+        retry_write(|| async { OhlcvWriter::write_new_assets(self, assets).await }).await
+    }
+    async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), EventsBackfillError> {
+        retry_write(|| async { OhlcvWriter::write_candles(self, candles, source).await }).await
+    }
+}
+
+/// Write one source's buffered candles as a single batch. The identities this
+/// run interned since the last asset write go FIRST, so a candle never names an
+/// asset absent from `prices.assets`, and only those: re-emitting the whole
+/// ~210k-row registry whenever it grew wrote a duplicate part each time (the
+/// 0256 shape). They stay pending until the write returns `Ok` (task 0139).
+/// Dry-run counts without writing.
 async fn emit_buffer(
-    writer: &OhlcvWriter,
+    sink: &impl EmitSink,
     dry_run: bool,
     candles: &[OhlcvCandle],
     source: &str,
-    assets: &AssetRegistry,
-    assets_written: &mut usize,
+    assets: &mut AssetRegistry,
     total_candles: &mut u64,
 ) -> Result<(), EventsBackfillError> {
     if candles.is_empty() {
@@ -118,13 +142,11 @@ async fn emit_buffer(
     if dry_run {
         return Ok(());
     }
-    let asset_count = assets.assets().count();
-    if asset_count > *assets_written {
-        retry_write(|| async { writer.write_assets(assets).await }).await?;
-        *assets_written = asset_count;
+    if assets.pending_new().next().is_some() {
+        sink.write_new_assets(assets).await?;
+        assets.clear_pending();
     }
-    retry_write(|| async { writer.write_candles(candles, source).await }).await?;
-    Ok(())
+    sink.write_candles(candles, source).await
 }
 
 fn build_client(cli: &Cli) -> Client {
@@ -159,7 +181,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     }
 
     // Preload — identical to the live/backfill cold start so repriced candles
-    // reuse existing surrogate `asset_id`s and resolve every seeded pool.
+    // write only newly seen assets and resolve every seeded pool.
     let existing_assets = writer.load_assets().await?;
     let mut assets = AssetRegistry::from_existing(existing_assets);
     let mut reg = reprice_registry(writer.load_pool_registry().await?)?;
@@ -204,14 +226,12 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // any non-zero count means those fills ARE in the wrong order.
     let mut apply_order_fallbacks: u64 = 0;
 
-    // Run-level state (persists across chunks): one accumulator per source, one
-    // write buffer per source, and the count of assets already written to
-    // prices.assets (seeded with the preload so the first mint is what triggers a
-    // write). `flush_older_than` keeps the current minute open across chunk
-    // boundaries; the buffers are drained (written) once per chunk.
+    // Run-level state (persists across chunks): one accumulator per source and
+    // one write buffer per source. `flush_older_than` keeps the current minute
+    // open across chunk boundaries; the buffers are drained (written) once per
+    // chunk.
     let mut accumulators: HashMap<&'static str, CandleAccumulator> = HashMap::new();
     let mut buffers: HashMap<&'static str, Vec<OhlcvCandle>> = HashMap::new();
-    let mut assets_written: usize = assets.assets().count();
 
     let mut chunk_start = cli.start;
     loop {
@@ -352,8 +372,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 cli.dry_run,
                 batch,
                 source,
-                &assets,
-                &mut assets_written,
+                &mut assets,
                 &mut total_candles,
             )
             .await?;
@@ -380,8 +399,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 cli.dry_run,
                 &candles,
                 source,
-                &assets,
-                &mut assets_written,
+                &mut assets,
                 &mut total_candles,
             )
             .await?;
@@ -788,5 +806,99 @@ mod tests {
         assert_eq!(reg.venue.len(), 2);
         assert_eq!(reg.venue.get(AQUA), Some(&Venue::Aquarius));
         assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
+    }
+
+    // ---- task 0139: only new identities, and before their candles ----------
+
+    /// Records every ordered write; fails the asset write on demand.
+    #[derive(Default)]
+    struct RecordingSink {
+        calls: std::cell::RefCell<Vec<String>>,
+        fail_assets: bool,
+    }
+
+    impl EmitSink for RecordingSink {
+        async fn write_new_assets(
+            &self,
+            assets: &AssetRegistry,
+        ) -> Result<(), EventsBackfillError> {
+            if self.fail_assets {
+                return Err(EventsBackfillError::InvalidChunkSize);
+            }
+            let n = assets.pending_new().count();
+            self.calls.borrow_mut().push(format!("assets {n}"));
+            Ok(())
+        }
+        async fn write_candles(
+            &self,
+            candles: &[OhlcvCandle],
+            source: &str,
+        ) -> Result<(), EventsBackfillError> {
+            let n = candles.len();
+            self.calls
+                .borrow_mut()
+                .push(format!("candles {source} {n}"));
+            Ok(())
+        }
+    }
+
+    /// One candle of a new pair, its two identities interned beside 1,000
+    /// loaded ones.
+    fn new_pair() -> (AssetRegistry, Vec<OhlcvCandle>) {
+        let loaded = (0..1000)
+            .map(|i| prices_ingest_core::AssetIdentity::Contract(format!("CLOADED{i}")))
+            .collect();
+        let mut assets = AssetRegistry::from_existing(loaded);
+        let base = prices_ingest_core::AssetIdentity::Contract(T0.to_string());
+        let quote = prices_ingest_core::AssetIdentity::Contract(T1.to_string());
+        assets.intern(&base);
+        assets.intern(&quote);
+        let mut acc = CandleAccumulator::new();
+        acc.merge(prices_ingest_core::TradeTick {
+            ledger_sequence: 100,
+            closed_at: 1_700_000_000,
+            transaction_index: 0,
+            operation_index: 0,
+            claim_index: 0,
+            base,
+            quote,
+            price: 2.into(),
+            volume_base: 1.into(),
+            volume_quote: 2.into(),
+            price_forming: true,
+        });
+        (assets, acc.flush_all())
+    }
+
+    #[tokio::test]
+    async fn only_new_identities_are_written_and_before_their_candles() {
+        let sink = RecordingSink::default();
+        let (mut assets, candles) = new_pair();
+        let mut total = 0;
+        for _ in 0..2 {
+            emit_buffer(&sink, false, &candles, "soroswap", &mut assets, &mut total)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *sink.calls.borrow(),
+            ["assets 2", "candles soroswap 1", "candles soroswap 1"],
+            "the 1,000 loaded identities are never re-emitted"
+        );
+        assert_eq!(assets.pending_new().count(), 0, "cleared after Ok");
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_asset_write_writes_no_candle_and_keeps_the_identities_pending() {
+        let sink = RecordingSink {
+            fail_assets: true,
+            ..Default::default()
+        };
+        let (mut assets, candles) = new_pair();
+        let emitted = emit_buffer(&sink, false, &candles, "soroswap", &mut assets, &mut 0).await;
+        assert!(emitted.is_err());
+        assert!(sink.calls.borrow().is_empty(), "no candle");
+        assert_eq!(assets.pending_new().count(), 2, "retried by the next batch");
     }
 }

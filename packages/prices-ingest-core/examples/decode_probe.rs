@@ -60,7 +60,7 @@ fn main() {
             if tick.price_forming {
                 price_forming += 1;
             }
-            acc.merge(&tick);
+            acc.merge(tick);
         }
         println!(
             "  seq={seq} meta={variant} tx_processing={txn} trades_extracted={}",
@@ -91,8 +91,8 @@ fn main() {
     );
     for c in candles.iter().take(3) {
         println!(
-            "   candle minute={} base={} quote={} close={} vol_base={} version={}",
-            c.minute_start, c.asset_id, c.quote_asset_id, c.close, c.volume_base, c.version
+            "   candle minute={} base={:?} quote={:?} close={} vol_base={} version={}",
+            c.minute_start, c.base, c.quote, c.close, c.volume_base, c.version
         );
     }
 }

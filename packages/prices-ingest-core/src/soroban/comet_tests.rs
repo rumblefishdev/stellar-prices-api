@@ -17,29 +17,26 @@ use serde_json::json;
 const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
 /// BLND's issuer (also the account that deployed the Comet pool).
 const BLND_ISSUER: &str = "GDJEHTBE6ZHUXSWFI642DCGLUOECLHPF3KSXHPXTSTJ7E3JF6MQ5EZYY";
-const BLND_ID: u32 = 225;
-const USDC_ID: u32 = 3;
 const CLOSED_AT: i64 = 1_700_000_000;
 
-/// Production's asset ids for the pool's two tokens. `from_existing` registers
-/// the SAC of every known classic identity, so both SACs collapse onto them.
+fn usdc() -> AssetIdentity {
+    AssetIdentity::Credit {
+        code: "USDC".to_string(),
+        issuer: USDC_ISSUER.to_string(),
+    }
+}
+
+fn blnd() -> AssetIdentity {
+    AssetIdentity::Credit {
+        code: "BLND".to_string(),
+        issuer: BLND_ISSUER.to_string(),
+    }
+}
+
+/// The pool's two tokens, as already known. `from_existing` registers the SAC
+/// of every known classic identity, so both SACs collapse onto them.
 fn seeded_assets() -> AssetRegistry {
-    AssetRegistry::from_existing(vec![
-        (
-            USDC_ID,
-            AssetIdentity::Credit {
-                code: "USDC".to_string(),
-                issuer: USDC_ISSUER.to_string(),
-            },
-        ),
-        (
-            BLND_ID,
-            AssetIdentity::Credit {
-                code: "BLND".to_string(),
-                issuer: BLND_ISSUER.to_string(),
-            },
-        ),
-    ])
+    AssetRegistry::from_existing(vec![usdc(), blnd()])
 }
 
 /// The registry the preload builds once `pool_registry` holds the Comet row.
@@ -114,8 +111,8 @@ fn a_registered_comet_pool_swap_becomes_a_comet_tick() {
     assert_eq!(out.amm_ticks.len(), 1, "one swap, one tick");
     let (source, tick) = &out.amm_ticks[0];
     assert_eq!(*source, "comet");
-    assert_eq!(tick.base_id, BLND_ID, "BLND is the base");
-    assert_eq!(tick.quote_id, USDC_ID, "USDC is the quote");
+    assert_eq!(tick.base, blnd(), "BLND is the base");
+    assert_eq!(tick.quote, usdc(), "USDC is the quote");
     // USDC → BLND canonicalises inverted: price = USDC in / BLND out.
     assert_eq!(tick.price, d(3_454_229) / d(621_636_466));
     assert_eq!(tick.volume_base, d(621_636_466));
@@ -184,7 +181,7 @@ fn the_exploit_dump_ticks_as_is_beside_its_dropped_self_swap() {
     assert_eq!(out.amm_ticks.len(), 1, "only the dump prices");
     let (source, tick) = &out.amm_ticks[0];
     assert_eq!(*source, "comet");
-    assert_eq!((tick.base_id, tick.quote_id), (BLND_ID, USDC_ID));
+    assert_eq!((&tick.base, &tick.quote), (&blnd(), &usdc()));
     // BLND → USDC: price = USDC out / BLND in (≈ 0.053048).
     assert_eq!(tick.price, d(4_251_768_634_888) / d(80_150_040_873_159));
     assert_eq!(tick.operation_index, 20);
@@ -386,7 +383,7 @@ fn only_tick(event: RawSorobanEvent) -> TradeTick {
     assert_eq!(out.amm_ticks.len(), 1);
     let (source, tick) = out.amm_ticks.into_iter().next().unwrap();
     assert_eq!(source, "comet");
-    assert_eq!((tick.base_id, tick.quote_id), (BLND_ID, USDC_ID));
+    assert_eq!((&tick.base, &tick.quote), (&blnd(), &usdc()));
     tick
 }
 
@@ -571,6 +568,6 @@ fn the_static_list_routes_comet_from_an_empty_registry() {
     assert_eq!(out.amm_ticks.len(), 1);
     let (source, tick) = &out.amm_ticks[0];
     assert_eq!(*source, "comet");
-    assert_eq!((tick.base_id, tick.quote_id), (BLND_ID, USDC_ID));
+    assert_eq!((&tick.base, &tick.quote), (&blnd(), &usdc()));
     assert!(out.unregistered_pool_events.is_empty());
 }

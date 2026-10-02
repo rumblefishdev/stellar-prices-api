@@ -40,8 +40,8 @@ const AMM_AMOUNT_SCALE: u32 = 7;
 ///
 /// Oracle assets are NOT kept here: they are resolved through the same
 /// `AssetRegistry` as trades (task 0061 §5) so a Reflector `USDC`/`XLM` row
-/// carries the identical canonical `asset_id` used as a candle's
-/// `quote_asset_id`. The previous synthetic `>= 1_000_000` oracle id space made
+/// carries the identical canonical identity, and so `asset_id`, as a candle's
+/// quote (task 0139: ClickHouse derives both). The previous synthetic `>= 1_000_000` oracle id space made
 /// the enrichment ASOF join (`o.asset_id = p.quote_asset_id`) match nothing for
 /// backfilled data.
 pub struct Registries {
@@ -606,10 +606,9 @@ fn classify_amm_groups(
             Venue::Sushiswap => !reg.sushiswap.contains(&contract_id),
             Venue::Aquarius | Venue::Phoenix | Venue::Comet => false,
         };
-        if pair_unresolved {
-            if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
-                out.unresolved.push(rec);
-            }
+        if pair_unresolved && let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq)
+        {
+            out.unresolved.push(rec);
         }
     }
 }
@@ -749,11 +748,11 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
 
     // Phoenix factory: [Symbol("create"), Symbol("liquidity_pool")], data Address(pool)
     if sig0 == Some("create") {
-        if sig1 == Some("liquidity_pool") {
-            if let Some(pool) = address_value(data) {
-                reg.venue.insert(pool.clone(), Venue::Phoenix);
-                reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
-            }
+        if sig1 == Some("liquidity_pool")
+            && let Some(pool) = address_value(data)
+        {
+            reg.venue.insert(pool.clone(), Venue::Phoenix);
+            reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
         }
         return;
     }
@@ -784,19 +783,19 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
     // FC9B0DF0, the live one on 9F94C577) register through this one arm. All
     // three addresses are required, so a differently-shaped `pool_created` from
     // some other protocol cannot register a pool with empty tokens.
-    if sig0 == Some("pool_created") {
-        if let TaggedValue::Map(m) = json_to_tagged(data) {
-            let get = |k: &str| {
-                m.iter()
-                    .find(|(key, _)| key.as_str() == Some(k))
-                    .and_then(|(_, v)| v.as_address().map(String::from))
-            };
-            if let (Some(pool), Some(t0), Some(t1)) =
-                (get("pool_address"), get("token0"), get("token1"))
-            {
-                reg.sushiswap.register(pool.clone(), t0, t1);
-                reg.venue.insert(pool, Venue::Sushiswap);
-            }
+    if sig0 == Some("pool_created")
+        && let TaggedValue::Map(m) = json_to_tagged(data)
+    {
+        let get = |k: &str| {
+            m.iter()
+                .find(|(key, _)| key.as_str() == Some(k))
+                .and_then(|(_, v)| v.as_address().map(String::from))
+        };
+        if let (Some(pool), Some(t0), Some(t1)) =
+            (get("pool_address"), get("token0"), get("token1"))
+        {
+            reg.sushiswap.register(pool.clone(), t0, t1);
+            reg.venue.insert(pool, Venue::Sushiswap);
         }
     }
 }
@@ -882,8 +881,8 @@ fn amm_trade_to_tick(
         transaction_index,
         operation_index: (trade.first_event_index & 0xFFFF) as u16,
         claim_index: 0,
-        base_id: pair.base_id,
-        quote_id: pair.quote_id,
+        base: pair.base,
+        quote: pair.quote,
         price,
         volume_base,
         volume_quote,
@@ -918,38 +917,32 @@ fn decode_reflector(
         return;
     };
     for entry in entries {
-        if let TaggedValue::Vec(kv) = entry {
-            if kv.len() >= 2 {
-                let key = kv[0].as_str().map(String::from);
-                let price = kv[1].as_i128();
-                if let (Some(key), Some(price)) = (key, price) {
-                    // Resolve to the canonical asset_id (task 0061 §5). Only the
-                    // USD-pegged stables + XLM resolve; every other symbol is
-                    // dropped — either it has no Stellar identity (EUR, BTC, …) or
-                    // it's a tradeable asset we deliberately don't price through
-                    // (EURC). See `reflector_key_to_identity` for the distinction.
-                    let Some(identity) = reflector_key_to_identity(&key) else {
-                        continue;
-                    };
-                    let asset_id = assets.get_or_assign(&identity);
-                    out.oracle.push(OracleSample {
-                        timestamp,
-                        asset_id,
-                        oracle_name: "reflector".to_string(),
-                        price_usd: price, // already 1e14-scaled
-                        raw_data: format!("{{\"asset\":\"{key}\"}}"),
-                    });
-                }
+        if let TaggedValue::Vec(kv) = entry
+            && kv.len() >= 2
+        {
+            let key = kv[0].as_str().map(String::from);
+            let price = kv[1].as_i128();
+            if let (Some(key), Some(price)) = (key, price) {
+                // Resolve to the canonical identity (task 0061 §5). Only the
+                // USD-pegged stables + XLM resolve; every other symbol is
+                // dropped — either it has no Stellar identity (EUR, BTC, …) or
+                // it's a tradeable asset we deliberately don't price through
+                // (EURC). See `reflector_key_to_identity` for the distinction.
+                let Some(identity) = reflector_key_to_identity(&key) else {
+                    continue;
+                };
+                assets.intern(&identity);
+                out.oracle.push(OracleSample {
+                    timestamp,
+                    identity: Some(identity),
+                    oracle_name: "reflector".to_string(),
+                    price_usd: price, // already 1e14-scaled
+                    raw_data: format!("{{\"asset\":\"{key}\"}}"),
+                });
             }
         }
     }
 }
-
-/// Reserved `asset_id` for an oracle feed that is not a tradeable asset (e.g. the
-/// REDSTONE emitter contract). Never assigned by the [`AssetRegistry`] (its ids
-/// start at 1), so it maps to no `prices.assets` row — the feed stays out of the
-/// asset read surface while its `oracle_prices` row is still recorded.
-const ORACLE_FEED_NO_ASSET_ID: u32 = 0;
 
 /// REDSTONE carries a base64 XDR `bytes` payload (updated_feeds map). Full XDR
 /// decode is deferred; we capture one row per event with the raw payload so the
@@ -961,8 +954,9 @@ const ORACLE_FEED_NO_ASSET_ID: u32 = 0;
 /// it to `prices.assets` and leak it into the contract-keyed read surface
 /// (`identity_by_contract`, `current_price_usd`), where a consumer resolving a
 /// pool-leg contract address could match an oracle feed as if it were a token.
-/// Instead the row carries the reserved [`ORACLE_FEED_NO_ASSET_ID`] sentinel — its
-/// `asset_id` is functionally dead anyway (price_usd = 0, oracle_name =
+/// Instead the row carries no identity, which `oracle_prices` stores under the
+/// sentinel id 0 (task 0139) — no asset's id, so it maps to no `prices.assets`
+/// row. That id is functionally dead anyway (price_usd = 0, oracle_name =
 /// 'redstone'; never read by the `reflector` ASOF join), and the raw payload is
 /// preserved for the byte-footprint measurement.
 fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSoroban) {
@@ -973,13 +967,19 @@ fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSorob
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    out.oracle.push(OracleSample {
-        timestamp: ev.created_at.max(0) as u32,
-        asset_id: ORACLE_FEED_NO_ASSET_ID,
+    out.oracle
+        .push(redstone_sample(ev.created_at.max(0) as u32, raw));
+}
+
+/// The REDSTONE row: no identity, no price, the raw payload.
+fn redstone_sample(timestamp: u32, raw_data: String) -> OracleSample {
+    OracleSample {
+        timestamp,
+        identity: None,
         oracle_name: "redstone".to_string(),
         price_usd: 0,
-        raw_data: raw,
-    });
+        raw_data,
+    }
 }
 
 #[cfg(test)]
@@ -1162,36 +1162,37 @@ mod tests {
     }
 
     #[test]
-    fn reflector_usdc_matches_trade_quote_id() {
+    fn reflector_usdc_matches_trade_quote_identity() {
         // The load-bearing guarantee (task 0061 §5): a Reflector USDC oracle row
-        // and a candle whose quote is USDC must land on the SAME asset_id, so the
-        // enrichment ASOF join `o.asset_id = p.quote_asset_id` matches.
-        let mut assets = AssetRegistry::from_existing(vec![]);
+        // and a candle whose quote is USDC carry the SAME identity, so ClickHouse
+        // gives them the same asset_id (task 0139) and the enrichment ASOF join
+        // `o.asset_id = p.quote_asset_id` matches.
         let usdc = AssetIdentity::Credit {
             code: "USDC".to_string(),
             issuer: USDC_ISSUER.to_string(),
         };
-        // Trade path interns USDC as a quote.
-        let trade_quote_id = assets.get_or_assign(&usdc);
-        // Oracle path resolves the Reflector "USDC" symbol.
-        let oracle_id = assets.get_or_assign(&reflector_key_to_identity("USDC").unwrap());
-        assert_eq!(trade_quote_id, oracle_id);
+        assert_eq!(reflector_key_to_identity("USDC"), Some(usdc.clone()));
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        // Trade path interns USDC as a quote; the oracle path finds it known.
+        assert!(assets.intern(&usdc));
+        assert!(!assets.intern(&reflector_key_to_identity("USDC").unwrap()));
+        assert_eq!(assets.assets().count(), 1);
     }
 
     #[test]
-    fn oracle_feed_sentinel_never_collides_with_a_real_asset_id() {
-        // The REDSTONE sentinel (task 0061 review #2) must be disjoint from every
-        // id the registry assigns, so an oracle-feed `oracle_prices` row maps to
-        // NO `prices.assets` row and cannot leak into the contract read surface
-        // (`identity_by_contract` / `current_price_usd`). Registry ids start at 1,
-        // leaving 0 reserved.
-        let mut reg = AssetRegistry::from_existing(vec![]);
-        let native = reg.get_or_assign(&AssetIdentity::Native);
-        assert_ne!(native, ORACLE_FEED_NO_ASSET_ID);
-        assert!(native >= 1, "registry ids must start at 1");
-        // A Contract identity — what REDSTONE used to intern — also never hits 0.
-        let contract = reg.get_or_assign(&AssetIdentity::Contract("CORACLEFEED".to_string()));
-        assert_ne!(contract, ORACLE_FEED_NO_ASSET_ID);
+    fn a_redstone_sample_names_no_asset() {
+        // An oracle feed is not an asset (task 0061 review #2): its row must map
+        // to NO `prices.assets` row, so it cannot leak into the contract read
+        // surface (`identity_by_contract` / `current_price_usd`). It carries no
+        // identity, which `oracle_prices` stores under the sentinel id 0, never
+        // an asset's id (task 0139). `decode_redstone` takes no registry, so it
+        // cannot intern the emitting contract either.
+        let sample = redstone_sample(1_700_000_000, "AAAA".to_string());
+        assert_eq!(sample.identity, None);
+        assert_eq!(
+            (sample.oracle_name.as_str(), sample.price_usd),
+            ("redstone", 0)
+        );
     }
 
     #[test]
@@ -2050,6 +2051,14 @@ mod tests {
             &mut assets,
         )
         .expect("the swap still produces a tick");
+        // T0 is XLM's SAC: the tick carries the collapsed identity (D6).
+        assert_eq!(
+            (&tick.base, &tick.quote),
+            (
+                &AssetIdentity::Contract(T1.to_string()),
+                &AssetIdentity::Native
+            )
+        );
 
         assert!(
             !crate::price::price_survives_column_scale(tick.price),
@@ -2267,7 +2276,7 @@ mod tests {
     /// into the asset registry (which is persisted to `prices.assets`).
     #[test]
     fn a_self_swap_prices_nothing_and_interns_nothing_for_any_venue() {
-        // A pure Soroban token, NOT a SAC — it would be minted a fresh id.
+        // A pure Soroban token, NOT a SAC — it would be a new identity.
         const TOKEN: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
         let trade = extractors_core::TradeRow {
             venue: Venue::Aquarius,

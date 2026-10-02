@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use tracing::warn;
 
+use crate::canonical::AssetIdentity;
 use crate::price::price_survives_column_scale;
 use crate::tick::TradeTick;
 
@@ -14,8 +15,10 @@ use crate::price::CANDLE_COLUMN_MAX_INTEGER as COLUMN_DOMAIN_MAX_INTEGER;
 #[derive(Debug, Clone)]
 pub struct OhlcvCandle {
     pub minute_start: u32,
-    pub asset_id: u32,
-    pub quote_asset_id: u32,
+    /// The pair; the writer sends these and ClickHouse derives the ids
+    /// (task 0139).
+    pub base: AssetIdentity,
+    pub quote: AssetIdentity,
     pub open: Decimal,
     pub high: Decimal,
     pub low: Decimal,
@@ -72,7 +75,7 @@ struct OpenBucket {
     fills: Vec<Fill>,
 }
 
-type BucketKey = (u32, u32, u32); // (minute_start, asset_id, quote_asset_id)
+type BucketKey = (u32, AssetIdentity, AssetIdentity); // (minute_start, base, quote)
 
 pub struct CandleAccumulator {
     buckets: HashMap<BucketKey, OpenBucket>,
@@ -100,9 +103,8 @@ impl CandleAccumulator {
     ///
     /// No state crosses minutes or chunks: a bucket knows only its own fills,
     /// so nothing is carried forward from a previous candle (ADR 0287).
-    pub fn merge(&mut self, tick: &TradeTick) {
+    pub fn merge(&mut self, tick: TradeTick) {
         let minute_start = (tick.closed_at as u32 / 60) * 60;
-        let key = (minute_start, tick.base_id, tick.quote_id);
         // ⚠️ Task 0286 F4: read from the NAMED fields, never positionally from
         // `TradeTick::lex_key`. That tuple is four elements wide, so its second
         // element is the TRANSACTION index — a positional read here would
@@ -110,28 +112,34 @@ impl CandleAccumulator {
         // under ReplacingMergeTree, with every row already in price_ohlcv_1m.
         let version = tick.ledger_sequence as u64 * 1000 + tick.operation_index as u64;
 
-        let bucket = self.buckets.entry(key).or_insert_with(|| OpenBucket {
-            candle: OhlcvCandle {
-                minute_start,
-                asset_id: tick.base_id,
-                quote_asset_id: tick.quote_id,
-                // A minute with no price-forming fill keeps these zeros and is
-                // still written: it traded, it just has no price (ADR 0287 §1).
-                open: Decimal::ZERO,
-                high: Decimal::ZERO,
-                low: Decimal::ZERO,
-                close: Decimal::ZERO,
-                volume_base: Decimal::ZERO,
-                volume_quote: Decimal::ZERO,
-                vwap: Decimal::ZERO,
-                trade_count: 0,
-                version,
-                pf_trade_count: 0,
-                pf_volume: Decimal::ZERO,
-                pf_price_volume: Decimal::ZERO,
-            },
-            fills: Vec::new(),
-        });
+        let fill_key = tick.lex_key();
+        // The key takes the tick's identities; only a new bucket clones them.
+        let key = (minute_start, tick.base, tick.quote);
+        let bucket = self
+            .buckets
+            .entry(key)
+            .or_insert_with_key(|key| OpenBucket {
+                candle: OhlcvCandle {
+                    minute_start,
+                    base: key.1.clone(),
+                    quote: key.2.clone(),
+                    // A minute with no price-forming fill keeps these zeros and is
+                    // still written: it traded, it just has no price (ADR 0287 §1).
+                    open: Decimal::ZERO,
+                    high: Decimal::ZERO,
+                    low: Decimal::ZERO,
+                    close: Decimal::ZERO,
+                    volume_base: Decimal::ZERO,
+                    volume_quote: Decimal::ZERO,
+                    vwap: Decimal::ZERO,
+                    trade_count: 0,
+                    version,
+                    pf_trade_count: 0,
+                    pf_volume: Decimal::ZERO,
+                    pf_price_volume: Decimal::ZERO,
+                },
+                fills: Vec::new(),
+            });
 
         // EVERY fill is recorded, dust included: it is a real trade and its
         // volume is real. Only the PRICE is withheld from a non-price-forming
@@ -141,7 +149,7 @@ impl CandleAccumulator {
             bucket.candle.version = version;
         }
         bucket.fills.push(Fill {
-            key: tick.lex_key(),
+            key: fill_key,
             price: tick.price,
             volume_base: tick.volume_base,
             volume_quote: tick.volume_quote,
@@ -159,18 +167,25 @@ impl CandleAccumulator {
                 true
             }
         });
-        flushed
+        sorted(flushed)
     }
 
     pub fn flush_all(&mut self) -> Vec<OhlcvCandle> {
-        let mut flushed: Vec<OhlcvCandle> = self
-            .buckets
-            .drain()
-            .map(|(_, mut bucket)| finalise(&mut bucket))
-            .collect();
-        flushed.sort_by_key(|c| (c.minute_start, c.asset_id, c.quote_asset_id));
-        flushed
+        sorted(
+            self.buckets
+                .drain()
+                .map(|(_, mut bucket)| finalise(&mut bucket))
+                .collect(),
+        )
     }
+}
+
+/// Flush order is (minute, base, quote), never `HashMap` order.
+fn sorted(mut candles: Vec<OhlcvCandle>) -> Vec<OhlcvCandle> {
+    candles.sort_by(|a, b| {
+        (a.minute_start, &a.base, &a.quote).cmp(&(b.minute_start, &b.base, &b.quote))
+    });
+    candles
 }
 
 /// Close a bucket: the candle ADR 0287 defines, from this minute's fills alone.
@@ -272,8 +287,8 @@ fn finalise(bucket: &mut OpenBucket) -> OhlcvCandle {
         // the right trade and saying so is the whole of this WARN.
         warn!(
             minute_start = bucket.candle.minute_start,
-            asset_id = bucket.candle.asset_id,
-            quote_asset_id = bucket.candle.quote_asset_id,
+            base = ?bucket.candle.base,
+            quote = ?bucket.candle.quote,
             trade_count = bucket.candle.trade_count,
             "candle value saturated at the Decimal(38, 14) column domain — a \
              VOLUME of this minute (volume_base / volume_quote / vwap / \
@@ -386,6 +401,11 @@ mod tests {
         )
     }
 
+    /// The identity a test's numeric asset stands for.
+    fn ident(n: u32) -> AssetIdentity {
+        AssetIdentity::Contract(format!("C{n}"))
+    }
+
     /// [`tick`] with an explicit transaction index — the term that distinguishes
     /// two fills of one ledger that share an operation index (task 0286 D1).
     /// Every fill built here is price-forming; the dust cases live in the
@@ -409,8 +429,8 @@ mod tests {
             transaction_index: tx,
             operation_index: op,
             claim_index: claim,
-            base_id: base,
-            quote_id: quote,
+            base: ident(base),
+            quote: ident(quote),
             price: Decimal::from(price),
             volume_base: Decimal::from(vol_base),
             volume_quote: Decimal::from(vol_quote),
@@ -428,8 +448,8 @@ mod tests {
     #[test]
     fn version_stays_ledger_times_1000_plus_operation_index() {
         let mut acc = CandleAccumulator::new();
-        acc.merge(&tx_tick(100, 7, 3, 0, 1, 2, 10, 1, 10, T_M0_A));
-        acc.merge(&tx_tick(100, 0, 5, 0, 1, 2, 20, 1, 20, T_M0_B));
+        acc.merge(tx_tick(100, 7, 3, 0, 1, 2, 10, 1, 10, T_M0_A));
+        acc.merge(tx_tick(100, 0, 5, 0, 1, 2, 20, 1, 20, T_M0_B));
         let c = &acc.flush_all()[0];
         assert_eq!(
             c.version, 100_005,
@@ -446,8 +466,8 @@ mod tests {
     #[test]
     fn close_is_the_last_fill_in_transaction_apply_order() {
         let mut acc = CandleAccumulator::new();
-        acc.merge(&tx_tick(100, 0, 0, 3, 1, 2, 10, 1, 10, T_M0_A));
-        acc.merge(&tx_tick(100, 1, 0, 0, 1, 2, 20, 1, 20, T_M0_A));
+        acc.merge(tx_tick(100, 0, 0, 3, 1, 2, 10, 1, 10, T_M0_A));
+        acc.merge(tx_tick(100, 1, 0, 0, 1, 2, 20, 1, 20, T_M0_A));
         let c = &acc.flush_all()[0];
         assert_eq!(c.open, 10.into(), "open = the path payment's first fill");
         assert_eq!(
@@ -460,12 +480,12 @@ mod tests {
     #[test]
     fn single_trade_seeds_flat_ohlc() {
         let mut acc = CandleAccumulator::new();
-        acc.merge(&tick(100, 0, 0, 1, 2, 7, 3, 21, T_M0_A));
+        acc.merge(tick(100, 0, 0, 1, 2, 7, 3, 21, T_M0_A));
         let out = acc.flush_all();
         assert_eq!(out.len(), 1);
         let c = &out[0];
         assert_eq!(c.minute_start, M0);
-        assert_eq!((c.asset_id, c.quote_asset_id), (1, 2));
+        assert_eq!((&c.base, &c.quote), (&ident(1), &ident(2)));
         assert_eq!(
             (c.open, c.high, c.low, c.close),
             (7.into(), 7.into(), 7.into(), 7.into())
@@ -487,9 +507,9 @@ mod tests {
         let mut acc = CandleAccumulator::new();
         // Insert out of ledger/op order; open must be the lowest lex, close the
         // highest — regardless of insertion order.
-        acc.merge(&tick(100, 2, 0, 1, 2, 5, 1, 5, T_M0_A)); // mid lex, price 5
-        acc.merge(&tick(100, 0, 0, 1, 2, 10, 1, 10, T_M0_A)); // first lex, price 10
-        acc.merge(&tick(100, 5, 0, 1, 2, 20, 1, 20, T_M0_B)); // last lex, price 20
+        acc.merge(tick(100, 2, 0, 1, 2, 5, 1, 5, T_M0_A)); // mid lex, price 5
+        acc.merge(tick(100, 0, 0, 1, 2, 10, 1, 10, T_M0_A)); // first lex, price 10
+        acc.merge(tick(100, 5, 0, 1, 2, 20, 1, 20, T_M0_B)); // last lex, price 20
         let c = &acc.flush_all()[0];
         assert_eq!(c.open, 10.into(), "open = earliest lex trade");
         assert_eq!(c.close, 20.into(), "close = latest lex trade");
@@ -506,12 +526,12 @@ mod tests {
         // Scenario 1: XLM/USDC (1,2); Scenario 2: PHO/USDC (3,2) — same minute,
         // must not collide.
         let mut acc = CandleAccumulator::new();
-        acc.merge(&tick(100, 0, 0, 1, 2, 10, 2, 20, T_M0_A));
-        acc.merge(&tick(100, 1, 0, 3, 2, 4, 5, 20, T_M0_B));
+        acc.merge(tick(100, 0, 0, 1, 2, 10, 2, 20, T_M0_A));
+        acc.merge(tick(100, 1, 0, 3, 2, 4, 5, 20, T_M0_B));
         let out = acc.flush_all();
         assert_eq!(out.len(), 2);
-        let xlm = out.iter().find(|c| c.asset_id == 1).unwrap();
-        let pho = out.iter().find(|c| c.asset_id == 3).unwrap();
+        let xlm = out.iter().find(|c| c.base == ident(1)).unwrap();
+        let pho = out.iter().find(|c| c.base == ident(3)).unwrap();
         assert_eq!(xlm.close, 10.into());
         assert_eq!(xlm.vwap, 10.into()); // 20/2
         assert_eq!(pho.close, 4.into());
@@ -521,8 +541,8 @@ mod tests {
     #[test]
     fn flush_older_than_keeps_the_current_minute() {
         let mut acc = CandleAccumulator::new();
-        acc.merge(&tick(100, 0, 0, 1, 2, 10, 1, 10, T_M0_A)); // minute M0
-        acc.merge(&tick(101, 0, 0, 1, 2, 12, 1, 12, T_M1)); // minute M1
+        acc.merge(tick(100, 0, 0, 1, 2, 10, 1, 10, T_M0_A)); // minute M0
+        acc.merge(tick(101, 0, 0, 1, 2, 12, 1, 12, T_M1)); // minute M1
         // Flushing "older than M1" emits only the completed M0 candle.
         let flushed = acc.flush_older_than(M1);
         assert_eq!(flushed.len(), 1);
@@ -537,12 +557,45 @@ mod tests {
     #[test]
     fn flush_all_sorts_by_minute_then_pair() {
         let mut acc = CandleAccumulator::new();
-        acc.merge(&tick(101, 0, 0, 3, 2, 1, 1, 1, T_M1)); // M1, pair 3
-        acc.merge(&tick(100, 0, 0, 3, 2, 1, 1, 1, T_M0_A)); // M0, pair 3
-        acc.merge(&tick(100, 1, 0, 1, 2, 1, 1, 1, T_M0_B)); // M0, pair 1
+        acc.merge(tick(101, 0, 0, 3, 2, 1, 1, 1, T_M1)); // M1, pair 3
+        acc.merge(tick(100, 0, 0, 3, 2, 1, 1, 1, T_M0_A)); // M0, pair 3
+        acc.merge(tick(100, 1, 0, 1, 2, 1, 1, 1, T_M0_B)); // M0, pair 1
         let out = acc.flush_all();
-        let keys: Vec<_> = out.iter().map(|c| (c.minute_start, c.asset_id)).collect();
-        assert_eq!(keys, vec![(M0, 1), (M0, 3), (M1, 3)]);
+        let keys: Vec<_> = out.iter().map(|c| (c.minute_start, &c.base)).collect();
+        assert_eq!(
+            keys,
+            vec![(M0, &ident(1)), (M0, &ident(3)), (M1, &ident(3))]
+        );
+    }
+
+    #[test]
+    fn flush_older_than_sorts_by_minute_then_pair() {
+        let mut acc = CandleAccumulator::new();
+        for base in [5, 3, 9, 1] {
+            acc.merge(tick(100, 0, 0, base, 2, 1, 1, 1, T_M0_A));
+        }
+        acc.merge(tick(101, 0, 0, 1, 2, 1, 1, 1, T_M1));
+        let keys: Vec<_> = acc
+            .flush_older_than(M1)
+            .into_iter()
+            .map(|c| c.base)
+            .collect();
+        assert_eq!(keys, [1, 3, 5, 9].map(ident));
+    }
+
+    /// Two identities in one minute are two candles: buckets key on the
+    /// identity, which is all a tick carries since task 0139.
+    #[test]
+    fn buckets_key_on_identities() {
+        let mut acc = CandleAccumulator::new();
+        let mut other = tick(100, 1, 0, 1, 2, 4, 1, 4, T_M0_B);
+        other.base = ident(7);
+        acc.merge(tick(100, 0, 0, 1, 2, 10, 1, 10, T_M0_A));
+        acc.merge(other);
+        let out = acc.flush_all();
+        assert_eq!(out.len(), 2, "two identities, two candles");
+        assert_eq!((&out[0].base, out[0].close), (&ident(1), 10.into()));
+        assert_eq!((&out[1].base, out[1].close), (&ident(7), 4.into()));
     }
 
     // ---- ADR 0287: the candle is built from its price-forming fills ---------
@@ -598,8 +651,8 @@ mod tests {
     fn dust_only_minute_has_volume_but_no_price() {
         let mut registry = AssetRegistry::from_existing(vec![]);
         let mut acc = CandleAccumulator::new();
-        acc.merge(&dust(&mut registry, 0));
-        acc.merge(&dust(&mut registry, 1));
+        acc.merge(dust(&mut registry, 0));
+        acc.merge(dust(&mut registry, 1));
 
         let out = acc.flush_all();
         assert_eq!(out.len(), 1, "the row is still emitted");
@@ -633,9 +686,9 @@ mod tests {
     fn dust_beside_ordinary_fills_moves_neither_close_nor_low() {
         let mut registry = AssetRegistry::from_existing(vec![]);
         let mut acc = CandleAccumulator::new();
-        acc.merge(&ordinary(&mut registry, 0, 50_000_000, 10_000_000)); // 5 XLM -> 1 USDC, 0.2
-        acc.merge(&ordinary(&mut registry, 2, 100_000_000, 30_000_000)); // 10 XLM -> 3 USDC, 0.3
-        acc.merge(&dust(&mut registry, 3)); // last in fill order, price ~0.059
+        acc.merge(ordinary(&mut registry, 0, 50_000_000, 10_000_000)); // 5 XLM -> 1 USDC, 0.2
+        acc.merge(ordinary(&mut registry, 2, 100_000_000, 30_000_000)); // 10 XLM -> 3 USDC, 0.3
+        acc.merge(dust(&mut registry, 3)); // last in fill order, price ~0.059
 
         let c = &acc.flush_all()[0];
         assert_eq!(c.open, Decimal::new(2, 1), "0.2 — the first ordinary fill");
@@ -669,10 +722,10 @@ mod tests {
     fn open_and_close_are_the_first_and_last_price_forming_fill() {
         let mut registry = AssetRegistry::from_existing(vec![]);
         let mut acc = CandleAccumulator::new();
-        acc.merge(&dust(&mut registry, 0));
-        acc.merge(&ordinary(&mut registry, 1, 50_000_000, 10_000_000)); // 0.2
-        acc.merge(&ordinary(&mut registry, 3, 100_000_000, 30_000_000)); // 0.3
-        acc.merge(&dust(&mut registry, 5));
+        acc.merge(dust(&mut registry, 0));
+        acc.merge(ordinary(&mut registry, 1, 50_000_000, 10_000_000)); // 0.2
+        acc.merge(ordinary(&mut registry, 3, 100_000_000, 30_000_000)); // 0.3
+        acc.merge(dust(&mut registry, 5));
 
         let c = &acc.flush_all()[0];
         assert_eq!(c.open, Decimal::new(2, 1));
@@ -700,7 +753,7 @@ mod tests {
 
         let mut registry = AssetRegistry::from_existing(vec![]);
         let mut acc = CandleAccumulator::new();
-        acc.merge(&fill(&mut registry, 0, BASE_STROOPS, QUOTE_STROOPS, T_M0_A));
+        acc.merge(fill(&mut registry, 0, BASE_STROOPS, QUOTE_STROOPS, T_M0_A));
 
         let out = acc.flush_all();
         assert_eq!(out.len(), 1, "the row is still emitted");
@@ -761,7 +814,7 @@ mod tests {
             let mut acc = CandleAccumulator::new();
             for i in 0..amounts.len() {
                 let (tx, sold, bought) = amounts[(i + rotation) % amounts.len()];
-                acc.merge(&ordinary(&mut registry, tx, sold, bought));
+                acc.merge(ordinary(&mut registry, tx, sold, bought));
             }
             let c = &acc.flush_all()[0];
             let got: Snapshot = (
@@ -818,14 +871,14 @@ mod tests {
         let price = amount_out / amount_in;
 
         let mut acc = CandleAccumulator::new();
-        acc.merge(&TradeTick {
+        acc.merge(TradeTick {
             ledger_sequence: 100,
             closed_at: T_M0_A,
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
+            base: ident(1),
+            quote: ident(2),
             price,
             volume_base: amount_in,
             volume_quote: amount_out,
@@ -890,14 +943,14 @@ mod tests {
         );
 
         let mut acc = CandleAccumulator::new();
-        acc.merge(&TradeTick {
+        acc.merge(TradeTick {
             ledger_sequence: 100,
             closed_at: T_M0_A,
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
+            base: ident(1),
+            quote: ident(2),
             price,
             volume_base: amount_in,
             volume_quote: amount_out,
@@ -933,14 +986,14 @@ mod tests {
     #[test]
     fn a_price_under_the_column_resolution_forms_no_price_either() {
         let mut acc = CandleAccumulator::new();
-        acc.merge(&TradeTick {
+        acc.merge(TradeTick {
             ledger_sequence: 100,
             closed_at: T_M0_A,
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
+            base: ident(1),
+            quote: ident(2),
             price: Decimal::new(486, 17), // ~4.86e-15, the 2026-04-02 06:39 row
             volume_base: Decimal::new(3_338_784_011_063, 2),
             volume_quote: Decimal::new(1_622, 7),

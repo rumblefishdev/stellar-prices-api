@@ -1153,7 +1153,7 @@ mod tests {
         );
 
         let mut acc = CandleAccumulator::new();
-        for tick in &ticks {
+        for tick in ticks {
             acc.merge(tick);
         }
         let candle = &acc.flush_all()[0];

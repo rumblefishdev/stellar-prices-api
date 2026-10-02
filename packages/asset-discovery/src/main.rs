@@ -81,16 +81,15 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 symbols_resolved = symbols.as_ref().map(|s| s.resolved).unwrap_or(0),
                 symbols_absent = symbols.as_ref().map(|s| s.absent).unwrap_or(0),
                 symbols_skipped = symbols.as_ref().map(|s| s.skipped).unwrap_or(0),
-                // Total rows in the asset registry, not rows written — a
-                // steady-state run writes none.
-                assets_total = seeded,
+                // Seed rows this run wrote; a steady-state run writes none.
+                assets_written = seeded,
                 "asset-discovery run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 // `null` when the symbol stage failed — its error is logged
                 // above and does not abort the run (task 0218).
                 "symbols": symbols.ok(),
-                "assets_total": seeded,
+                "assets_written": seeded,
             }))
         }
     }))
