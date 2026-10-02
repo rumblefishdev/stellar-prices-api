@@ -9,9 +9,10 @@
  * distribution, so production only ever runs the absolute form below.)
  *
  * On the shared host (task 0194) it is not: `sorobanscan.rumblefish.dev/api/*`
- * is a static SPA behaviour that rewrites every extensionless path to
- * `/api/index.html`, so a relative `fetch('/api/config')` there gets this
- * bundle back as `200 text/html`. That deployment is built with
+ * is a `301` to `/pricing-api/*` (task 0326), a static SPA behaviour that
+ * rewrites every extensionless path to `/pricing-api/index.html`, so a
+ * relative `fetch('/api/config')` there gets this bundle back as
+ * `200 text/html`. That deployment is built with
  *
  *     VITE_PORTAL_API_ORIGIN=https://prices-api.sorobanscan.rumblefish.dev
  *

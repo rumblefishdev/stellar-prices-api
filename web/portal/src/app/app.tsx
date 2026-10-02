@@ -118,15 +118,15 @@ import {
  * been taken from task 0193, where MUI arrives.
  *
  * What this page is for is the pipeline behind it — a change to this file
- * reaches `/api/` — plus two properties that are expensive to prove any
+ * reaches `/pricing-api/` — plus two properties that are expensive to prove any
  * later: that a `fetch` from this bundle reaches the API and that the session
  * cookie survives that round-trip in a real browser.
  *
  * Sub-routes were once forbidden here — a hard refresh resolved against S3 and
  * came back `403 AccessDenied`. That constraint is gone (task 0194): the host
- * rewrites every extensionless path under `/api/` to this bundle, so a route
- * costs nothing on the hosting side. Sign-in still needs none: every redirect
- * in the flow lands back on `/api/`.
+ * rewrites every extensionless path under `/pricing-api/` to this bundle, so a
+ * route costs nothing on the hosting side. Sign-in still needs none: every
+ * redirect in the flow lands back on `/pricing-api/`.
  */
 
 type Probe =
@@ -336,7 +336,7 @@ function useSession(enabled: boolean): {
  * The `/login` view — the Figma login frame (`778:2499`) and nothing else.
  *
  * A route of its own since the portal grew a second page. The OAuth callback
- * still lands on `/api/`, exactly as `portal/auth/mod.rs` says it will
+ * still lands on `/pricing-api/`, exactly as `portal/auth/mod.rs` says it will
  * ("when the portal grows a second page, the page it lands on decides where to
  * go next; this handler still will not") — so `RootRoute` is what forwards a
  * `?signin=…` landing here, carrying the query with it. That is why the
@@ -4512,7 +4512,7 @@ type Gate = {
 /**
  * `/` — the landing page, and the junction the OAuth callback lands on.
  *
- * `portal/auth/mod.rs` redirects to `/api/` in **every** outcome and
+ * `portal/auth/mod.rs` redirects to `/pricing-api/` in **every** outcome and
  * says why: "when the portal grows a second page, the page it lands on decides
  * where to go next; this handler still will not." This is that page, and these
  * are the two decisions it makes.
@@ -4652,7 +4652,7 @@ function LoginRoute({ gate }: { gate: Gate }) {
 /**
  * `/dashboard` — the key and the usage panel.
  *
- * A visitor who is not signed in goes to `/api/`, per the brief. It
+ * A visitor who is not signed in goes to `/pricing-api/`, per the brief. It
  * waits for `settled` first: redirecting while `/auth/me` is still in flight
  * would bounce every arrival from the OAuth callback straight back to the
  * landing page, which is the one journey this route exists to complete.
@@ -4920,15 +4920,15 @@ function PrivacyPolicyRoute({ gate }: { gate: Gate }) {
  * pushed page at the top (task 0305).
  *
  * The browser jumps to a hash by itself only if the target exists when it
- * looks, and on a full load — the landing bar's `/api/#faq` from any other
- * page, or a pasted link — it looks before React has rendered anything: the
- * URL said `#faq` and the page stayed at the top. And a router link kept the
- * previous page's offset: "Quick Start" clicked at the foot of the landing
+ * looks, and on a full load — the landing bar's `/pricing-api/#faq` from any
+ * other page, or a pasted link — it looks before React has rendered anything:
+ * the URL said `#faq` and the page stayed at the top. And a router link kept
+ * the previous page's offset: "Quick Start" clicked at the foot of the landing
  * opened the guide 6,000 px down.
  *
- * An entry with a hash is positioned here and nowhere else, so back/forward
- * to `/api/#faq` shows FAQ rather than the offset the browser saved when the
- * reader left. With `#faq` in the address bar, anything else reads as the
+ * An entry with a hash is positioned here and nowhere else, so back/forward to
+ * `/pricing-api/#faq` shows FAQ rather than the offset the browser saved when
+ * the reader left. With `#faq` in the address bar, anything else reads as the
  * link not working. Back/forward to an entry without a hash is the browser's.
  */
 function useScrollOnNavigate() {
@@ -5018,8 +5018,9 @@ export function App() {
         element={<PrivacyPolicyRoute gate={gate} />}
       />
       {/* Anything else is a URL this app never minted. On the shared host
-          every extensionless path under `/api/` boots this bundle (the
-          explorer's routing function rewrites it to `/api/index.html`), so
+          every extensionless path under `/pricing-api/` boots this bundle
+          (the explorer's routing function rewrites it to
+          `/pricing-api/index.html`), so
           a mistyped deep link arrives here rather than at S3 — and goes to
           `/` rather than to a 404 page the app does not have. */}
       <Route path="*" element={<Navigate to="/" replace />} />

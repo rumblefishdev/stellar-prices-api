@@ -388,7 +388,7 @@ async fn a_callback_on_a_failed_load_that_claims_no_action_lands_on_signin_faile
 
     let reply = get(&router, "/api/auth/callback?code=c&state=s").await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/pricing-api/?signin=failed");
     assert!(reply.headers.get(header::SET_COOKIE).is_none());
 }
 
@@ -405,8 +405,8 @@ async fn a_callback_on_a_failed_load_that_claims_no_action_lands_on_signin_faile
 #[tokio::test]
 async fn login_on_a_failed_load_lands_on_a_retryable_failure() {
     for (uri, landing) in [
-        ("/api/auth/login", "/api/?signin=failed"),
-        ("/api/auth/login?action=issue", "/api/?issue=failed"),
+        ("/api/auth/login", "/pricing-api/?signin=failed"),
+        ("/api/auth/login?action=issue", "/pricing-api/?issue=failed"),
     ] {
         let (sources, _) = scripted(vec![Step::Fail], Duration::ZERO);
         let router = router(true, sources);
