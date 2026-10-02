@@ -100,6 +100,24 @@ pub fn rewrite_db(ddl: &str, from: &str, to: &str, names: Option<&[String]>) -> 
     out
 }
 
+/// A rehearsal's definitions run as the operator: `DEFINER = <user>` becomes
+/// `DEFINER = CURRENT_USER`. A production MV's definer (`prices_admin`) cannot
+/// read the scratch database, so its refresh would fail there.
+pub fn own_definer(ddl: &str) -> String {
+    let pat = "DEFINER = ";
+    let mut out = String::with_capacity(ddl.len());
+    let mut rest = ddl;
+    while let Some(at) = rest.find(pat) {
+        out.push_str(&rest[..at + pat.len()]);
+        let tail = &rest[at + pat.len()..];
+        let end = tail.find(|c: char| !ident(c)).unwrap_or(tail.len());
+        out.push_str("CURRENT_USER");
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `db.name` created by a CREATE [MATERIALIZED] VIEW statement.
 pub fn created_object(stmt: &str) -> Option<&str> {
     let rest = [
@@ -256,7 +274,10 @@ impl Rekey {
             .await?;
         let mut lines = Vec::new();
         for (kind, name, q) in &views {
-            let q = rewrite_db(q, &views_db, &self.db, Some(&names));
+            let mut q = rewrite_db(q, &views_db, &self.db, Some(&names));
+            if views_db != self.db {
+                q = own_definer(&q);
+            }
             self.write(&format!(
                 "INSERT INTO {} (kind, name, create_query) SELECT {}, {}, {}",
                 self.t(DDL_TABLE),
@@ -879,6 +900,22 @@ mod tests {
             "TO p.c (`asset_id` Nullable(UInt64), `n` UInt32)"
         );
         assert!(out.contains("toUInt32(1) AS x"));
+    }
+
+    #[test]
+    fn a_rehearsal_definition_runs_as_the_operator() {
+        assert_eq!(
+            own_definer(
+                "CREATE MATERIALIZED VIEW s.mv REFRESH EVERY 1 HOUR APPEND TO s.t \
+                 DEFINER = prices_admin SQL SECURITY DEFINER AS SELECT 1"
+            ),
+            "CREATE MATERIALIZED VIEW s.mv REFRESH EVERY 1 HOUR APPEND TO s.t \
+             DEFINER = CURRENT_USER SQL SECURITY DEFINER AS SELECT 1"
+        );
+        assert_eq!(
+            own_definer("CREATE VIEW s.v AS SELECT 1"),
+            "CREATE VIEW s.v AS SELECT 1"
+        );
     }
 
     #[test]
