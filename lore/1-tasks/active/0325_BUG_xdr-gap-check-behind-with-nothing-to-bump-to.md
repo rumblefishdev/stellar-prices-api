@@ -22,6 +22,16 @@ history:
       an issue saying the decode wall is live. Neither is true: stellar-core
       v29 pins the same XDR commit as v28.0.1, our decoder reads P29 ledgers
       on production, and there is no stellar-xdr 29 to bump to.
+  - date: "2026-10-02"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implemented on fix/0325_xdr-gap-check-behind-with-nothing-to-bump-to.
+      BEHIND now asks crates.io first and is WAITING when no crate exists.
+      New tier test: 13/13 cases pass; the pre-fix script fails 5 of
+      them (exactly the changed ones). Live run against mainnet 29 and
+      crates.io 28.0.1: exit 0 and WAITING in PR and --watch mode. No change
+      to master's workflow is needed. Waiting for review and merge.
 ---
 
 # The XDR gap check reds every PR at BEHIND with nothing to bump to
@@ -68,8 +78,8 @@ Effects today:
 2. Header comment: P29 is the counterexample to "major tracks protocol".
 3. Runbooks: tier table in `xdr-protocol-watch.md`, the protocol-lag
    section of `deploy-ledger-processor.md`.
-4. A dependency-free self-check that runs the tier matrix against a local
-   mock Horizon and crates.io, wired into the CI job.
+4. A test that runs the tier matrix against a local mock Horizon and
+   crates.io, run by CI.
 
 Trade-off, accepted: if a protocol that DOES change XDR is voted before its
 crate is published, the watch stays green. Nobody could bump from crates.io
@@ -80,9 +90,51 @@ GitHub API and core's commit is not always public before release.
 
 ## Acceptance Criteria
 
-- [ ] Live (mainnet 29, crate 28.0.1): exit 0 in PR and `--watch` mode, report says WAITING
-- [ ] Mock crate 29.0.0 with mainnet 29: BEHIND, exit 1 in both modes
-- [ ] 0319's tiers unchanged: WAITING, LAGGING, current, "cannot reach/read"
-- [ ] Self-check covers the matrix and runs in the `XDR protocol lag` CI job
-- [ ] Runbooks updated
+- [x] Live (mainnet 29, crate 28.0.1): exit 0 in PR and `--watch` mode, report says WAITING
+- [x] Mock crate 29.0.0 with mainnet 29: BEHIND, exit 1 in both modes
+- [x] 0319's tiers unchanged: WAITING, LAGGING, current, "cannot reach/read"
+- [x] A test covers the matrix and runs in CI — the infra project's `test`
+      target (`nx run-many -t test` in the `typescript` job, and pre-push)
+- [x] Runbooks updated
 - [ ] Merged to develop before the next scheduled watch run
+
+## Implementation Notes
+
+- `tools/scripts/verify-xdr-protocol-gap.mjs`: BEHIND moved inside the
+  crates.io branch. `needed` = mainnet's protocol when BEHIND, core's when
+  LAGGING; a crate below `needed` prints WAITING and exits 0.
+- `tools/scripts/verify-xdr-protocol-gap.test.mjs` (new, `node:test`):
+  mock Horizon + crates.io on `127.0.0.1:0`, 13 cases relative to the
+  Cargo.toml pin. Picked up by the infra `test` glob
+  `tools/scripts/**/*.test.mjs` (56 tests there now, all pass).
+- Runbooks: tier table, the WAITING rule and a "check the candle frontier
+  after any vote" line in `xdr-protocol-watch.md`; a protocol 29 caveat in
+  `deploy-ledger-processor.md`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Reuse the `— WAITING: no stellar-xdr` marker.** Master's workflow
+   closes an open issue as "not actionable yet" on that text, so the fix
+   ships on develop alone.
+2. **Protocol numbers, not XDR commits.** Accepted cost in Implementation
+   Plan; a `ponytail:` comment in the script names the exact check.
+
+### Emerged
+
+3. **BEHIND needs a crate for mainnet's protocol, not core's.** With pin 28,
+   mainnet 29, core 30 and crate 29 published, comparing against core's 30
+   would have said WAITING while a real bump existed. Covered by the
+   "crate for mainnet but not core" case.
+4. **crates.io down while BEHIND is a notice on PRs.** Before, BEHIND failed
+   PRs without asking crates.io. Now it follows the script's PR rule: an
+   outside outage never fails a PR. Under `--watch` it still fails as a
+   check that could not complete.
+5. **`// prettier-ignore` on the case table.** Prettier spread 13 rows over
+   100 lines; one row per case reads as the decision table it is.
+6. **A `*.test.mjs`, not a new CI step.** The first version was a standalone
+   script with its own npm script and a step in the `XDR protocol lag` job.
+   The repo already runs `tools/scripts/**/*.test.mjs` through the infra
+   `test` target, and the `typescript` job triggers on `tools/scripts/**`,
+   so the test needs no wiring of its own.
