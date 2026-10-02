@@ -24,7 +24,7 @@ history:
       on production, and there is no stellar-xdr 29 to bump to.
   - date: "2026-10-02"
     status: active
-    who: claude
+    who: stkrolikiewicz
     note: >
       Implemented on fix/0325_xdr-gap-check-behind-with-nothing-to-bump-to.
       BEHIND now asks crates.io first and is WAITING when no crate exists.
