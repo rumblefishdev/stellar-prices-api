@@ -18,8 +18,13 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(here, 'verify-xdr-protocol-gap.mjs');
+// The pin as the script's pinnedMajor() reads it: [workspace.dependencies]
+// only, so a stellar-xdr line elsewhere (a [patch], a per-crate override)
+// cannot make the test and the script disagree.
 const toml = readFileSync(join(here, '../../Cargo.toml'), 'utf8');
-const p = Number(toml.match(/^stellar-xdr\s*=.*?(\d+)\.\d+\.\d+/m)[1]);
+const deps = toml.split(/^\[workspace\.dependencies\]$/m)[1].split(/^\[/m)[0];
+const pin = deps.match(/^stellar-xdr\s*=\s*(.+)$/m)[1];
+const p = Number(pin.match(/(\d+)\.\d+\.\d+/)[1]);
 
 // What the mock serves for the running case; `null` answers HTTP 500.
 let horizon, crate, base;
