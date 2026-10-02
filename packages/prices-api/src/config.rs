@@ -581,7 +581,7 @@ mod web_origin_tests {
             Some("   "),
             Some("/"),
             Some("sorobanscan.rumblefish.dev"),
-            Some("https://sorobanscan.rumblefish.dev/pricing-api/"),
+            Some("https://sorobanscan.rumblefish.dev/prices-api/"),
             Some("https://sorobanscan.rumblefish.dev?x=1"),
             Some("https://"),
         ] {

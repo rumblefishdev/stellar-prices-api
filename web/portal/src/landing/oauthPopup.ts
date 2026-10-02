@@ -14,7 +14,7 @@
  *      cross-site TOP-LEVEL GET, which is precisely the case `Lax` permits, so
  *      the pending cookie is sent and the exchange completes;
  *   3. the callback sets the session cookie and 303s the popup to
- *      `/pricing-api/`, where the bridge below posts the outcome to the opener
+ *      `/prices-api/`, where the bridge below posts the outcome to the opener
  *      and closes the window.
  *
  * Step 2 is why this cannot be a `fetch` and why the control stays an `<a>`

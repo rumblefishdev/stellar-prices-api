@@ -277,7 +277,7 @@ pub fn accept(
 ///
 /// ⚠️ **This authorises nothing and must never be used to.** It chooses
 /// between two fixed literals, both failures, both reachable by anyone who
-/// types `/pricing-api/?issue=failed` into a link — so a forged claim buys an
+/// types `/prices-api/?issue=failed` into a link — so a forged claim buys an
 /// attacker nothing they did not already have. Everything a claim could
 /// matter for goes through [`accept`], which verifies both halves before
 /// reading a byte of either. `None` on anything that is not a token of ours

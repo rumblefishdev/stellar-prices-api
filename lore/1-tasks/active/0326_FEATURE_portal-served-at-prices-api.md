@@ -1,6 +1,6 @@
 ---
 id: "0326"
-title: "Serve the portal at /pricing-api/ on the explorer's host"
+title: "Serve the portal at /prices-api/ on the explorer's host"
 type: FEATURE
 status: active
 related_adr: []
@@ -15,23 +15,30 @@ history:
       Task created. The portal moves from sorobanscan.rumblefish.dev/api/ to
       /pricing-api/; the explorer answers 301 on the old path
       (soroban-block-explorer task 0608).
+  - date: 2026-10-02
+    status: active
+    who: stkrolikiewicz
+    note: >
+      /pricing-api/ went live (#384, sync + explorer Delivery deploy), then
+      the name changed to /prices-api/: it matches the product, this repo and
+      the API host prices-api.sorobanscan…, and "pricing" reads as a price
+      list or a valuation engine. The explorer 301s /pricing-api… too.
 ---
 
-# Serve the portal at /pricing-api/ on the explorer's host
+# Serve the portal at /prices-api/ on the explorer's host
 
 ## Summary
 
 `https://sorobanscan.rumblefish.dev/api/` reads as the explorer's own API. The
-portal moves to `/pricing-api/`; the explorer turns every `/api…` URL into a
-`301` to the same path under `/pricing-api`, query string kept
+portal moves to `/prices-api/`; the explorer turns every `/api…` URL into a
+`301` to the same path under `/prices-api`, query string kept
 (soroban-block-explorer task 0608), so nothing shared before the move breaks.
 
 ## Status: Active
 
-**Current state:** code + docs done (portal 269 tests, prices-api lib 258 +
-integration suites, infra green; `nx build portal` emits
-`/pricing-api/assets/…`). Next: review + merge this PR and the explorer's
-(task 0608), then the deploy order below.
+**Current state:** `/pricing-api/` live since 2026-10-02 ~10:00 UTC; the
+rename to `/prices-api/` is on `feat/0326_prices-api-path`. Next: merge it
+and the explorer's (task 0608), then the deploy order below.
 
 ## Context
 
@@ -45,11 +52,11 @@ cookie's `Path=/api/`) do not: that host has no portal bundle on it.
 ## Implementation Plan
 
 1. `web/portal/src/base-path.ts` + `vite.config.mts`: `BASE_PATH` →
-   `/pricing-api/`; specs that pin bundle paths follow.
+   `/prices-api/`; specs that pin bundle paths follow.
 2. `packages/prices-api/src/portal/auth/mod.rs`: `PORTAL_HOME` →
-   `/pricing-api/`.
+   `/prices-api/`.
 3. `infra/Makefile` `sync-portal-explorer`: upload to and invalidate
-   `pricing-api/`.
+   `prices-api/`.
 4. Current-state docs (README, `docs/scf/api-endpoints.md`, overview,
    runbook, skill) name the new URL. Dated evidence (SCF milestone-2 files)
    stays as submitted; the `301` keeps those links working.
@@ -57,18 +64,20 @@ cookie's `Path=/api/`) do not: that host has no portal bundle on it.
 ### Deploy order (production, manual)
 
 1. Here: `make -C infra sync-portal-explorer` — new bundle under
-   `pricing-api/`; `/api/` keeps serving the old one meanwhile.
-2. Explorer: Delivery stack (task 0608) — `/pricing-api/` live, `/api…` → `301`.
+   `prices-api/`; live paths keep serving what they serve meanwhile.
+2. Explorer: Delivery stack (task 0608) — `/prices-api/` live, `/api…` and
+   `/pricing-api…` → `301`.
 3. Here: Compute (`PORTAL_HOME`). Until then the popup lands on `/api/?…` and
    the `301` carries it, query string included.
 
 ## Acceptance Criteria
 
-- [ ] Portal boots at `/pricing-api/`, `/pricing-api/dashboard`,
-      `/pricing-api/docs` (hard refresh included)
-- [ ] Discord sign-in round-trip lands on `/pricing-api/?…`
-- [ ] `/api/?utm_source=stellar-skill` → `301` `/pricing-api/?utm_source=stellar-skill`
-- [ ] Old `api/` prefix dropped from the bucket once the above holds
+- [ ] Portal boots at `/prices-api/`, `/prices-api/dashboard`,
+      `/prices-api/docs` (hard refresh included)
+- [ ] Discord sign-in round-trip lands on `/prices-api/?…`
+- [ ] `/api/?utm_source=stellar-skill` → `301` `/prices-api/?utm_source=stellar-skill`
+- [ ] Old `api/` and `pricing-api/` prefixes dropped from the bucket once
+      the above holds
 
 ## Design Decisions
 
@@ -84,6 +93,11 @@ cookie's `Path=/api/`) do not: that host has no portal bundle on it.
 3. **Skill URL updated** (`skills/stellar-prices-api/SKILL.md`, `utm_source`
    kept). Any copy published outside this repo (task 0318) still points at
    `/api/`, which the `301` covers.
+
+4. **`/prices-api/`, not `/pricing-api/`** — see the 2026-10-02 history
+   entry. Usage plan names (`pricing-api-<tier>-<env>`) and the SSM
+   parameter `/prices/<env>/pricing-api-free-plan-id` are AWS resource
+   names, not URLs, and stay.
 
 ## Notes
 
