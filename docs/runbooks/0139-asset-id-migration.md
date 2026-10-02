@@ -192,10 +192,33 @@ that became colliding.
 
 ## Expected duration
 
-Spike 006 estimate, until task 11's rehearsal replaces it: the fill is the long
-part, 20–50 min for 1.33 B candle rows (5.8 M rows/s read, 1.0–1.1 M rows/s
-insert, measured locally). `EXCHANGE` of 11 tables: milliseconds. With an
-online pre-fill, W7 is one probe per partition plus the current month.
+Measured on ch-prod-01, 2026-10-02 (task 11 rehearsal, `prices_r0139`
+hardlinked from `prices`, run over mTLS as `dev_shared`, with 0286 phase 3
+ingesting for the first ~50 min):
+
+| step                                               | time                                               |
+| -------------------------------------------------- | -------------------------------------------------- |
+| hardlink copy, 885 partitions                      | ~1 min (9 ms per `ATTACH`)                         |
+| `preflight`, `capture`, `map`, `create`            | 1–2 s each                                         |
+| `fill`, 11 tables, 784 partitions                  | **2,003 s (33 min)**; 1m alone ~15 min (620M rows) |
+| `fill` again with nothing to copy                  | 546 s: every partition is probed again             |
+| `check`                                            | **553 s (9 min)**                                  |
+| `alter-assets` (632k rows), `swap`, `recreate-mvs` | 3 s, 3 s, 2 s                                      |
+| refresh loop + `verify`                            | under a minute; every line `1`                     |
+| `gap-backfill`, 3.4 h gap, all six tiers           | 2.2 s                                              |
+| `gap-verify`, `rollback`                           | 1 s, 4 s                                           |
+| disk while the copy exists                         | −50 GiB (865 → ~815 GiB free)                      |
+| API p95 during the run                             | 580–634 ms, baseline 400–630 ms                    |
+
+So W7 is fill + check: about **42 min** cold. With the online pre-fill on T−1 d
+(below), W7 is a probe pass plus check: about **18–20 min**. Use the pre-fill.
+
+Two findings, both fixed. A background merge of a `ReplacingMergeTree` source
+collapses duplicate keys and changes the raw-row fingerprint `check` compares,
+so `check` reported "source changed since fill" on two recent partitions of a
+copy nothing wrote to. W5 now stops merges on the 11 sources. And production's
+rollup MVs run as `DEFINER = prices_admin`, which cannot read a scratch
+database; `capture --rewrite-db` now writes `DEFINER = CURRENT_USER`.
 
 ## Gap budget
 
@@ -346,8 +369,18 @@ SYSTEM STOP VIEW prices.mv_ohlcv_1d_to_1M;
 SYSTEM STOP VIEW prices.mv_current_prices;
 SELECT view, status FROM system.view_refreshes WHERE database = 'prices' ORDER BY view;
 SQL
+for t in price_ohlcv_1m price_ohlcv_15m price_ohlcv_1h price_ohlcv_4h price_ohlcv_1d price_ohlcv_1w \
+         price_ohlcv_1M current_prices asset_supply asset_metadata oracle_prices; do
+  echo "SYSTEM STOP MERGES prices.$t;"
+done | chq && echo "MERGES STOPPED"
 rk capture --execute
 ```
+
+`STOP MERGES` freezes the 11 copy sources until the swap. A merge collapses
+duplicate keys and changes the fingerprint `fill` recorded, and `check` then
+reports "source changed since fill" for a partition nobody wrote (seen in the
+rehearsal). After W9 these tables are the `X__pre0139` copies, and the new
+tables merge as usual. `assets` is not stopped: `alter-assets` needs merges.
 
 Every view `Disabled`; repeat the SELECT while one reads `Running`. If any other
 view is listed (`mv_reconcile_*` on a target where 0143/0203 were deployed),
@@ -533,9 +566,18 @@ watch -n 60 "aws cloudwatch get-metric-statistics --namespace AWS/SQS \
   --period 60 --statistics Maximum --query 'sort_by(Datapoints,&Timestamp)[].Maximum' --output text"
 ```
 
-Caught up when every one of the last 5 one-minute maxima is under 120 s (the
-`prices-production-ledger-processor-lag` threshold). Record it and compare the
-catch-up duration with task 11's prediction:
+Caught up when the newest live candle is within 5 minutes of now:
+
+```bash
+echo "SELECT now(), max(timestamp) FROM prices.price_ohlcv_1m WHERE timestamp > now() - INTERVAL 1 DAY AND source = 'sdex'" | chq
+```
+
+The SQS age above is a ceiling, not the signal. A message is a doorbell, and
+one invocation ingests up to 16 ledgers from the ClickHouse cursor, so the data
+catches up before the doorbells drain. On 2026-10-02 the age stood at 1.5 h
+while candles were one minute old: BE's Galexie was replaying a backlog of
+doorbells. Record it and compare the catch-up duration with task 11's
+prediction:
 
 ```bash
 CATCHUP_END=$(date -u '+%F %T'); echo "CATCHUP_END=$CATCHUP_END" | tee -a ~/rekey-0139/deployed-before.tsv
@@ -634,8 +676,10 @@ rk rollback --execute
 ```
 
 If W9 had run, force an api-handler cold start (its memo may hold new ids; the
-`update-function-configuration` line of W11). Then `SYSTEM START VIEW` each of
-the seven MVs of W5 and re-enable the writers in W13's order.
+`update-function-configuration` line of W11). Then `SYSTEM START MERGES` on the
+11 tables of W5 (the restored tables come back with merges stopped),
+`SYSTEM START VIEW` each of the seven MVs of W5, and re-enable the writers in
+W13's order.
 
 **After W11, before W13**:
 
@@ -655,8 +699,8 @@ the seven MVs of W5 and re-enable the writers in W13's order.
    (`cp -p ~/events-backfill.pre0139 ~/events-backfill`, likewise
    `sdex-backfill`).
 5. Force an api-handler cold start (W11's last line).
-6. `SYSTEM START VIEW` for the seven MVs, then re-enable the writers in W13's
-   order and watch the catch-up the same way.
+6. `SYSTEM START MERGES` on the 11 tables of W5, `SYSTEM START VIEW` for the
+   seven MVs, then re-enable the writers in W13's order and watch the catch-up the same way.
 
 **After W13**: forward-fix only.
 
