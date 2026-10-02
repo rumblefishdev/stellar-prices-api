@@ -56,8 +56,8 @@ templates>`
 >    processor, the oracle and the enrichment worker, and on the gateway stage.
 >    The `prices-production-overview` dashboard covers API latency and errors,
 >    ingestion lag, ClickHouse write latency, the workers and an alarm strip with
->    every `prices-production-*` alarm. `<TO FILL: alarm count and "all OK" date
-after the 0139 window>`
+>    every `prices-production-*` alarm. `<TO FILL: alarm count (83 on
+2026-10-02, was 65) and the "all OK" date>`
 > 7. **Seven days of post-launch monitoring.** From 2026-09-23 09:40 to
 >    2026-09-30 09:40 CEST: **uptime 100.000 %, 0 × 5XX in 65,806 requests,
 >    gateway p95 145.2 ms.** The report recomputes from a raw CloudWatch export
@@ -78,10 +78,10 @@ after the 0139 window>`
 > in place of `openapi-validator` and Swagger UI, and the scope of the
 > load-test figure.
 >
-> **Known issues and limitations are listed, each with the task that owns
-> it:** the history recomputation that finishes after delivery,
-> `<TO FILL: the asset-id fix (task 0139) and its re-ingest, in the words of
-evidence §7>`, a slow path we measured but did not instrument, and the
+> **Known issues and limitations are listed, each with the task that owns it:**
+> the history recomputation that finishes after delivery, the asset-id
+> collisions fixed on 2026-10-02 (task 0139), with their older months still
+> being re-ingested, a slow path we measured but did not instrument, and the
 > ceiling of the database server we share with the Soroban Block Explorer.
 >
 > **Full evidence — acceptance-criteria mapping with runnable commands, the
