@@ -30,6 +30,12 @@
 // assumption is stated here so a future reader can test it rather than infer
 // it.
 //
+// Protocol 29 broke it (task 0325). stellar-core v29 pins the same XDR commit
+// as v28.0.1 (`9c9c145`): the vote changed apply rules, not the format, so
+// `stellar-xdr 28` decodes P29 ledgers and no `stellar-xdr 29` was published.
+// What stopped ingestion was BE's Galexie, whose captive core must match the
+// protocol whatever the XDR does — a failure this script cannot see.
+//
 // TWO TIERS, AND WHY THE WARNING ONE IS THE VALUABLE ONE
 // ------------------------------------------------------
 // Horizon's root document publishes both numbers:
@@ -42,7 +48,8 @@
 //
 //   BEHIND   ours < current         mainnet has moved past us. The decode wall
 //                                   is live or one empty-tx-set ledger away.
-//                                   Always fatal.
+//                                   Fatal in both modes when a crate for it
+//                                   is published (WAITING otherwise, below).
 //   LAGGING  ours < core_supported  an upgrade is announced and available.
 //                                   Fatal only under --watch (see below).
 //
@@ -60,6 +67,15 @@
 //            act on, and here nobody can. The report says so and exits 0.
 //   LAGGING  a stable major that reaches core_supported is on crates.io. Bump
 //            now (after BE's xdr-parser). Fatal under --watch.
+//
+// BEHIND asks crates.io the same way (task 0325): mainnet on a protocol with no
+// published stable crate is WAITING, not BEHIND. There is nothing to bump to,
+// and the protocol may not have changed XDR at all (29 did not). A protocol
+// that DOES change XDR and is voted before its crate ships stays green here;
+// that stall shows as frozen candles, which the rollup-freshness and
+// ledger-processor-no-invocations alarms catch within the hour.
+// ponytail: compares protocol numbers; comparing the crate's XDR commit with
+// core's (`src/protocol-curr/xdr`) is the exact check if this misfires again.
 //
 // crates.io unreadable → fatal under --watch, but reported as a check that
 // could not complete (`cannot read … crates.io`), not as LAGGING: the watch
@@ -240,21 +256,13 @@ const summary =
   `pinned stellar-xdr ${pinned} | mainnet current ${network.current} | ` +
   `core supports ${network.supported}`;
 
-if (pinned < network.current)
-  die(
-    `error: stellar-xdr ${pinned} is BEHIND mainnet protocol ${network.current}.`,
-    '',
-    `  ${summary}`,
-    '',
-    'This is the proto27 condition: the decode wall is live or one ledger',
-    'away, and a stalled ledger-processor drains its queue and logs nothing.',
-    '',
-    'Bump the pin, then DEPLOY it — 0091 merged the proto27 fix and prod',
-    'stayed frozen until 0094 actually shipped the binary. Runbook:',
-    'docs/runbooks/deploy-ledger-processor.md',
-  );
+const behind = pinned < network.current;
 
-if (pinned < network.supported) {
+if (behind || pinned < network.supported) {
+  // The crate a bump would need: mainnet's protocol once it has voted, the one
+  // core supports while the vote is still ahead.
+  const needed = behind ? network.current : network.supported;
+
   let crate;
   try {
     crate = await publishedCrate();
@@ -266,29 +274,57 @@ if (pinned < network.supported) {
         '',
         `  ${summary}`,
         '',
-        `Core supports ${network.supported}, and whether a stellar-xdr ${network.supported} is published`,
-        'could not be checked. The watch could not complete, so the run fails;',
-        'no bump is being asked for. The next run checks again.',
+        `Whether a stellar-xdr ${needed} is published could not be checked.`,
+        'The watch could not complete, so the run fails; no bump is being',
+        'asked for. The next run checks again.',
       );
     console.log(`notice: ${message} — crate availability not checked`);
     process.exit(0);
   }
 
-  if (crate.major < network.supported) {
+  // The `— WAITING: no stellar-xdr` wording is matched by master's
+  // xdr-protocol-watch.yml to close an open issue as "not actionable yet".
+  if (crate.major < needed) {
     console.log(
       [
-        `notice: stellar-xdr ${pinned} lags the protocol core already supports (${network.supported}) — WAITING: no stellar-xdr ${network.supported} is published yet.`,
+        behind
+          ? `notice: stellar-xdr ${pinned} is behind mainnet protocol ${network.current} — WAITING: no stellar-xdr ${needed} is published yet.`
+          : `notice: stellar-xdr ${pinned} lags the protocol core already supports (${network.supported}) — WAITING: no stellar-xdr ${needed} is published yet.`,
         '',
         `  ${summary} | newest on crates.io ${crate.stable}` +
           (crate.preRelease ? ` (pre-release ${crate.preRelease})` : ''),
         '',
-        'Nothing to do yet: there is no crate to bump to, and mainnet has not',
-        'voted. The watch fails and opens an issue the day a stable',
-        `stellar-xdr ${network.supported}.x appears on crates.io.`,
+        ...(behind
+          ? [
+              'Mainnet has voted, but there is no crate to bump to: either the',
+              'protocol changed no XDR (29 kept the XDR of 28) or the crate is late.',
+              'A real decode wall shows as frozen candles — the rollup-freshness and',
+              'ledger-processor-no-invocations alarms. The watch fails and opens an',
+              `issue the day a stable stellar-xdr ${needed}.x appears on crates.io.`,
+            ]
+          : [
+              'Nothing to do yet: there is no crate to bump to, and mainnet has not',
+              'voted. The watch fails and opens an issue the day a stable',
+              `stellar-xdr ${needed}.x appears on crates.io.`,
+            ]),
       ].join('\n'),
     );
     process.exit(0);
   }
+
+  if (behind)
+    die(
+      `error: stellar-xdr ${pinned} is BEHIND mainnet protocol ${network.current}.`,
+      '',
+      `  ${summary} | newest on crates.io ${crate.stable}`,
+      '',
+      'This is the proto27 condition: the decode wall is live or one ledger',
+      'away, and a stalled ledger-processor drains its queue and logs nothing.',
+      '',
+      'Bump the pin, then DEPLOY it — 0091 merged the proto27 fix and prod',
+      'stayed frozen until 0094 actually shipped the binary. Runbook:',
+      'docs/runbooks/deploy-ledger-processor.md',
+    );
 
   const lines = [
     `stellar-xdr ${pinned} lags the protocol core already supports (${network.supported}).`,

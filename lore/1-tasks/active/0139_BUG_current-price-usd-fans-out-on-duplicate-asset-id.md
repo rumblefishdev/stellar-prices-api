@@ -10,6 +10,16 @@ tags:
 milestone: 2
 links: []
 history:
+  - date: "2026-10-02"
+    status: active
+    who: akot
+    note: >
+      Window preparation. PR #382 holds all of 0139 (task 0208's PR #347
+      merged into it, ITs ported to derived ids). The operator runs the
+      window over mTLS as dev_shared, with no SSH. Phase 3 pauses after
+      202202. The second pass re-ingests every listed month, with no
+      --min-excluded-rows. GA3: one window. See "Window preparation,
+      2026-10-02".
   - date: "2026-10-01"
     status: active
     who: akot
@@ -348,6 +358,63 @@ plan is `.planning/quick/261001-fwh-*/261001-fwh-PLAN.md`.
 Colliding 1m rows per year (prod, 2026-10-01): 2016–2021 ~2.0M over 63 months,
 2022 33.3M, 2023 136.2M, 2024 6.5M (2 months), 2026 0.3M (4 months). Prod disk:
 871 GiB free against 48 GiB for the copy.
+
+## Window preparation, 2026-10-02
+
+Decided by Adam:
+
+- **GA3: one window.** Readers and writers deploy together in W11, from one PR
+  (#382) merged on window day.
+- **Operator identity:** Adam's write certificate (`dev_shared`) over mTLS,
+  from a workstation. The window does not use SSH or the `default` user.
+  `prices_admin` is not enough: it gets `497` on `system.view_refreshes` and
+  has no `SYSTEM` and no `CREATE/DROP VIEW`. Checked on prod: `dev_shared`
+  reads all five `system` tables the tool needs, with `readonly = 0`. The runbook
+  is rewritten for this (`rk` with `--mtls-*`, and `chq` sends one HTTP request
+  per statement).
+- **Phase 3 pause:** stopped with SIGINT at 202202's `sdex` step and resumed
+  with `--to-month 202202`. **`PAUSE_MONTH` = 202202.** 202201 had already
+  finished on the old ids, so variant A's 2021-12 boundary was no longer
+  available. The cost is two more months in the second pass.
+- **Second pass: no `--min-excluded-rows`.** Every listed month is
+  re-ingested. N = 1000 would skip 14 of 65 months (2016-08…2017-10, 2020-03;
+  1,611 rows) to save about one day of the 5–6 day pass. That was not worth a
+  permanent hole.
+- **Task 0208 merged first.** PR #347 is in #382 (43862a76). Its epoch guard
+  carries u64 ids, its ITs take ids from identities (`ch_enrich_it` 70/70
+  locally), and the repair-coarse runbook names no literal id.
+
+Measured on prod 2026-10-02 (`dev_read`, read-only):
+
+```
+asset_ids serving >1 identity                     3,316
+count() − uniqExact(asset_id) (the alarm metric)  3,322
+free disk                                         866 GiB of 1.72 TiB
+the 12 migrated tables                            48.1 GiB (1m: 20.8 GiB, 798M rows)
+GA1 backups (rollout_/reingest_0286_bak_*, *_bak)  50.8 GiB
+ledger catch-up r (SQS age, 2026-08-14 backlog)   ≈ 10.7 → 2 h window: C ≈ 12 min
+```
+
+Rows the window will leave out (colliding + orphan, `price_ohlcv_1m`), by
+year, months ≤ `PAUSE_MONTH`:
+
+| year | months listed | rows |
+|---|---|---|
+| 2016 | 3 of 12 | 29 |
+| 2017 | 12 of 12 | 9,990 |
+| 2018 | 12 of 12 | 452,072 |
+| 2019 | 12 of 12 | 539,952 |
+| 2020 | 12 of 12 | 513,853 |
+| 2021 | 12 of 12 | 405,496 |
+| 2022 (01–02) | 2 of 2 | 109,958 |
+| **≤ 202202** | **65** | **2,031,350** |
+
+After 202202: 176.2M rows. Phase 3's first pass re-ingests those months on the
+new ids anyway.
+
+AWS state before the window: the ledger-processor ESM
+`2ac67754-b92b-426c-b690-203d91b861a5` is `Enabled`. The five writer rules are
+`ENABLED` and `prices-production-cleanup` is `DISABLED`.
 
 ## The deeper question this exposes
 

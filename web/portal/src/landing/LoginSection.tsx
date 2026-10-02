@@ -23,12 +23,12 @@ import { LOGIN_ANCHOR } from './links';
  * rendered in place rather than on a route of its own.
  *
  * **In place, deliberately.** Every redirect in the OAuth flow lands back on
- * `/api/`, so a login route would be a URL the flow returns *from* and never
- * *to* — a section keeps refresh, Back and the callback all working. (The
+ * `/prices-api/`, so a login route would be a URL the flow returns *from* and
+ * never *to* — a section keeps refresh, Back and the callback all working. (The
  * original reason was different and no longer applies: a hard refresh on
- * `/api/login` used to resolve against S3 and come back `403 AccessDenied`.
- * The host rewrites extensionless paths to the bundle now, so `/login` IS a
- * route — see `app.tsx` — and this component is what it renders.)
+ * `/api/login` used to resolve against S3 and come back `403 AccessDenied`. The
+ * host rewrites extensionless paths to the bundle now, so `/login` IS a route —
+ * see `app.tsx` — and this component is what it renders.)
  *
  * The backdrop repeats the hero's grid and glow, at the same 80 px pitch. That
  * is what makes the scroll read as arriving somewhere rather than as the page

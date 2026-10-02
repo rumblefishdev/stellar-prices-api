@@ -426,10 +426,12 @@ jobs:
   # ingestion for six days with no commit of ours anywhere near it.
   #
   # Soft here — no `--watch`. On a pull request this can only fail when we are
-  # already BEHIND mainnet; a newly announced protocol or a Horizon hiccup
-  # prints a notice and passes, because a developer can fix neither and a gate
-  # that red-lights unrelated PRs gets switched off within a week. The strict
-  # run is the scheduled one, in xdr-protocol-watch.yml.
+  # already BEHIND mainnet and a crate to bump to exists (task 0325: protocol
+  # 29 changed no XDR and shipped no crate); a newly announced protocol, a
+  # Horizon hiccup or a vote with no crate prints a notice and passes, because
+  # a developer can fix none of them and a gate that red-lights unrelated PRs
+  # gets switched off within a week. The strict run is the scheduled one, in
+  # xdr-protocol-watch.yml.
   xdr-protocol:
     name: XDR protocol lag
     runs-on: ubuntu-latest
