@@ -77,9 +77,9 @@ impl SweepRow {
     }
 }
 
-/// Why a sweep failed. Every variant fails the invocation: the unclassified
-/// alarm is NOT_BREACHING, so an error mapped to "nothing found" would read
-/// healthy forever.
+/// Why a sweep failed. Every variant fails the invocation: an error mapped to
+/// "nothing found" would publish a `0` and clear the unclassified alarm
+/// without having looked.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
     #[error("not a bare SQL identifier: {0:?}")]

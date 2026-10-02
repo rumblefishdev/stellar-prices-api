@@ -16,7 +16,7 @@
 //! 2026-09-21 (verified live as `prices_writer`, runbook §4.2). If they are
 //! ever lost, every run fails with Code 497 ACCESS_DENIED and pages through the
 //! probe's `-errors` alarm. That is intended: a swallowed error would publish
-//! nothing, and the NOT_BREACHING unclassified alarm would read green forever.
+//! a `0`, and the unclassified alarm would read green without having looked.
 
 #[cfg(feature = "lambda")]
 #[tokio::main]
@@ -119,8 +119,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "coverage sweep complete"
             );
 
-            // Propagated: a failed PutMetricData leaves the NOT_BREACHING alarm
-            // green, so it must fail the invocation and fire -errors instead.
+            // Propagated: a failed PutMetricData leaves the alarm in its last
+            // state (IGNORE), so it must fail the invocation and fire -errors.
             publish(&cw, &environment, &metrics).await?;
 
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({

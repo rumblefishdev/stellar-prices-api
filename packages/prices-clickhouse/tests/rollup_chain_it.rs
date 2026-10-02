@@ -241,6 +241,18 @@ async fn enrichment_propagates_through_full_rollup_chain() {
         .await
         .expect("create rollup MV chain");
 
+    // Task 0203: `rollups.sql` also ships six hourly reconciliation MVs. This
+    // test never drives reconciliation, and a real `:00` crossing mid-test would
+    // otherwise append reconcile rows into the targets under assertion — so
+    // they are STOPped (which also cancels their CREATE-time refresh).
+    for tier in prices_clickhouse::rollup_sql::TIERS {
+        mv_client
+            .query(&format!("SYSTEM STOP VIEW {db}.{}", tier.reconcile_mv))
+            .execute()
+            .await
+            .unwrap_or_else(|e| panic!("stop {}: {e}", tier.reconcile_mv));
+    }
+
     // One fixed bucket boundary, reused by BOTH the un-enriched and the enriched
     // INSERT so the enrichment re-INSERT dedups against the original (same PKs)
     // even if wall-clock crosses a 15-minute boundary mid-test.

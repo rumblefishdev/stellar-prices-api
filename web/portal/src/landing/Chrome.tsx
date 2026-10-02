@@ -9,7 +9,7 @@ import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
-import { useState } from 'react';
+import { type MouseEvent, useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color, font } from '../theme/tokens';
@@ -385,8 +385,23 @@ function MobileMenu({
   );
 }
 
+// HubSpot's loader (`index.html`, task 0316) exposes `_hsp`; pushing
+// `showBanner` re-opens its cookie consent banner. Declared optional and
+// created on demand so the click is a no-op if the script never loaded. The
+// same mechanism as the explorer's footer (`libs/ui/src/layout/Footer.tsx`).
+declare global {
+  interface Window {
+    _hsp?: unknown[];
+  }
+}
+
 export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
-  const links: { label: string; href?: string; to?: string }[] = [
+  const links: {
+    label: string;
+    href?: string;
+    to?: string;
+    onClick?: (e: MouseEvent) => void;
+  }[] = [
     // `to`: the API reference is a route of this app (task 0195), and the
     // same basename argument as the dashboard link below applies.
     { label: 'Documentation', to: DOCS_ROUTE },
@@ -402,6 +417,17 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
     ...(canOfferKey ? [{ label: 'Dashboard', to: DASHBOARD_ROUTE }] : []),
     { label: 'Contact', href: RUMBLEFISH_CONTACT },
     { label: 'Privacy policy', to: PRIVACY_POLICY_ROUTE },
+    // The only way to withdraw consent once given, so it sits on every page.
+    // `#` + preventDefault keeps it a real, focusable anchor like its
+    // neighbours.
+    {
+      label: 'Cookie settings',
+      href: '#',
+      onClick: (e) => {
+        e.preventDefault();
+        (window._hsp = window._hsp ?? []).push(['showBanner']);
+      },
+    },
   ];
 
   return (
@@ -437,10 +463,11 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
             component="nav"
             aria-label="Footer"
           >
-            {links.map(({ label, href, to }) => (
+            {links.map(({ label, href, to, onClick }) => (
               <Link
                 key={label}
                 {...(to ? { component: RouterLink, to } : { href })}
+                onClick={onClick}
                 sx={{
                   color: color.text.secondary,
                   fontFamily: font.secondary,

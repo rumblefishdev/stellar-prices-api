@@ -114,8 +114,7 @@ export default defineConfig(({ mode }) => {
   // are read HERE, in the Node config, and only `VITE_`-prefixed vars are
   // exposed to `import.meta.env` in the client bundle. A dev key put in
   // `VITE_API_KEY` would be compiled into the JavaScript and served to every
-  // visitor — see the acceptance criterion "no API key, no secret and no
-  // third-party script in the bundle".
+  // visitor. No API key and no secret may reach the bundle.
   const env = loadEnv(mode, import.meta.dirname, '');
 
   const proxyTarget = env['DEV_API_PROXY_TARGET'];

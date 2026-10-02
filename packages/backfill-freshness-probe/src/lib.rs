@@ -32,6 +32,10 @@
 //! Split for testability: the pure metric-shaping ([`age_metrics`]) is compiled
 //! in every build and unit-tested without the AWS SDK; the actual CloudWatch
 //! publish ([`publish`]) is gated behind the `lambda` feature.
+//!
+//! The weekly claim reconcile (task 0272) lives in [`reconcile`].
+
+pub mod reconcile;
 
 /// CloudWatch namespace for the backfill freshness metric. Must match the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
@@ -67,8 +71,7 @@ pub struct StreamAge {
     pub age_seconds: i64,
 }
 
-/// One CloudWatch datum: the stream it belongs to and its push-age value in
-/// seconds.
+/// One CloudWatch datum: the stream it belongs to and its value in seconds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metric {
     pub stream: String,
@@ -131,14 +134,37 @@ pub const AGE_QUERY: &str = "SELECT \
    ORDER BY task_name \
    SETTINGS optimize_move_to_prewhere_if_final = 0";
 
+/// Which check an invocation runs (task 0272).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    PushAge,
+    Reconcile,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("unknown backfill-freshness-probe check {0}; expected none or \"reconcile\"")]
+pub struct UnknownCheck(pub String);
+
+/// No `check` key (the 15-minute scheduled event) → push-age; `"reconcile"` →
+/// reconcile; anything else is an error, so a typo in the payload fails loudly
+/// instead of silently running push-age.
+pub fn check_from_event(event: &serde_json::Value) -> Result<Check, UnknownCheck> {
+    match event.get("check") {
+        None => Ok(Check::PushAge),
+        Some(serde_json::Value::String(s)) if s == "reconcile" => Ok(Check::Reconcile),
+        Some(other) => Err(UnknownCheck(other.to_string())),
+    }
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`] as
-/// [`METRIC_NAME`], each tagged with `Environment` + `Stream` dimensions. One
-/// `PutMetricData` call for the whole batch. Best-effort at the call site: the
-/// Lambda logs a warning on failure rather than failing the invocation.
+/// `metric_name`, each tagged with `Environment` + `Stream` dimensions. One
+/// `PutMetricData` call for the whole batch. The Lambda propagates an error so
+/// the invocation fails and the probe's `-errors` alarm fires.
 #[cfg(feature = "lambda")]
 pub async fn publish(
     client: &aws_sdk_cloudwatch::Client,
     environment: &str,
+    metric_name: &str,
     metrics: &[Metric],
 ) -> Result<(), aws_sdk_cloudwatch::Error> {
     use aws_sdk_cloudwatch::types::{Dimension, MetricDatum, StandardUnit};
@@ -156,7 +182,7 @@ pub async fn publish(
         .iter()
         .map(|m| {
             MetricDatum::builder()
-                .metric_name(METRIC_NAME)
+                .metric_name(metric_name)
                 .value(m.value)
                 .unit(StandardUnit::Seconds)
                 .dimensions(env_dim.clone())
@@ -224,6 +250,20 @@ mod tests {
         // FINAL + non-sort-key predicate must not be moved to PREWHERE (stale
         // pre-merge version guard).
         assert!(AGE_QUERY.contains("optimize_move_to_prewhere_if_final = 0"));
+    }
+
+    #[test]
+    fn check_from_event_dispatch() {
+        use serde_json::json;
+        let scheduled =
+            json!({ "detail-type": "Scheduled Event", "source": "aws.events", "detail": {} });
+        assert_eq!(check_from_event(&scheduled).unwrap(), Check::PushAge);
+        assert_eq!(
+            check_from_event(&json!({ "check": "reconcile" })).unwrap(),
+            Check::Reconcile
+        );
+        assert!(check_from_event(&json!({ "check": "reconcil" })).is_err());
+        assert!(check_from_event(&json!({ "check": 1 })).is_err());
     }
 
     #[test]

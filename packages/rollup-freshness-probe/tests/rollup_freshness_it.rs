@@ -46,8 +46,46 @@ fn ch_url() -> String {
 /// The probe binds the client to the `prices` database (`client_from_lambda_env
 /// ("prices")` in `main.rs`), which is why the query references tables
 /// unqualified. The IT must do the same so the exact production query resolves.
-fn client() -> Client {
-    Client::default().with_url(ch_url()).with_database("prices")
+///
+/// ⚠️ **It also STOPs the reconciliation MVs in the shared `prices` database**
+/// (review WR-05) — see [`stop_shared_reconcile`]. Every test here that uses
+/// the shared database comes through this function, so none can run while an
+/// hourly reconcile pass is free to rewrite the rows it seeded.
+async fn client() -> Client {
+    let c = Client::default().with_url(ch_url()).with_database("prices");
+    stop_shared_reconcile(&c).await;
+    c
+}
+
+/// `SYSTEM STOP VIEW` every `prices.mv_reconcile_*` that is not already
+/// stopped (review WR-05).
+///
+/// CI applies `schema/rollups.sql` to the shared `prices` database
+/// (`prices-clickhouse-init --rollups`), so it holds the six hourly
+/// reconciliation MVs on the REAL clock, reaching seven days back. These tests
+/// seed `_1m` and `_1h` independently, with deliberately different values, 3 h
+/// to 5 days old — rows no fast MV window reaches. A reconcile pass firing on a
+/// `:00` crossing mid-suite would roll the `_1m` seed up through every tier and
+/// overwrite or add the `_1h`/coarse rows the stranded, peg, freshness and
+/// zero-invariant assertions count: an hourly flake window.
+///
+/// Found LIVE, so a server without the reconcile MVs (a schema applied before
+/// task 0203) needs nothing. The views stay stopped afterwards: that is the
+/// state the whole shared-database suite wants, and STOP is lost on a server
+/// restart anyway (a fresh CI server, or `SYSTEM START VIEW` by hand locally).
+async fn stop_shared_reconcile(c: &Client) {
+    let views: Vec<String> = c
+        .query(
+            "SELECT view FROM system.view_refreshes \
+             WHERE database = 'prices' AND startsWith(view, 'mv_reconcile_') \
+               AND status != 'Disabled'",
+        )
+        .fetch_all()
+        .await
+        .expect("list the shared reconcile MVs");
+    for view in views {
+        exec(c, &format!("SYSTEM STOP VIEW prices.{view}")).await;
+    }
 }
 
 async fn exec(c: &Client, sql: &str) {
@@ -80,7 +118,7 @@ fn bound(table: &str) -> i64 {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
-    let c = client();
+    let c = client().await;
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
@@ -207,7 +245,7 @@ async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
-    let c = client();
+    let c = client().await;
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
@@ -262,7 +300,7 @@ async fn disk_query_executes_and_deserializes() {
         DISK_FREE_PERCENT_METRIC, DiskUsage, disk_metrics, disk_query, free_percent,
     };
 
-    let c = client();
+    let c = client().await;
     let usage =
         c.query(disk_query()).fetch_one::<DiskUsage>().await.expect(
             "disk query must execute and deserialize into DiskUsage (two non-nullable u64)",
@@ -309,7 +347,7 @@ async fn disk_query_executes_and_deserializes() {
 async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
     use rollup_freshness_probe::disk::{DiskUsage, disk_query};
 
-    let admin = client();
+    let admin = client().await;
     exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
     exec(
         &admin,
@@ -491,7 +529,7 @@ async fn read_peg(c: &Client) -> PegCounts {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -517,7 +555,7 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_counts_both_induced_defects() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -548,7 +586,7 @@ async fn usd_sanity_counts_both_induced_defects() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_written_zero_is_not_yet_stranded() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -570,7 +608,7 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -594,7 +632,7 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -613,7 +651,7 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -647,7 +685,7 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     // Deliberately no USDT identity seeded.
     insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
@@ -682,7 +720,7 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -719,7 +757,7 @@ async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean(
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn each_direction_only_scans_its_own_tier() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -759,7 +797,7 @@ async fn each_direction_only_scans_its_own_tier() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -785,7 +823,7 @@ async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_empty_peg_scan_does_not_suppress_the_stranded_metric() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -835,7 +873,7 @@ fn drift_value(metrics: &[DriftMetric], name: &str) -> f64 {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_applied_schema_reports_no_drift() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("prices"))
         .fetch_one()
@@ -873,7 +911,7 @@ async fn a_freshly_applied_schema_reports_no_drift() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_edited_declaration_is_detected_as_drift() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("prices"))
         .fetch_one()
@@ -919,7 +957,7 @@ async fn an_edited_declaration_is_detected_as_drift() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_live_mv_without_append_is_detected_as_critical() {
-    let c = client();
+    let c = client().await;
     exec(&c, "DROP VIEW IF EXISTS prices.mv_gap3_probe").await;
     exec(&c, "DROP TABLE IF EXISTS prices.gap3_probe_target").await;
     exec(
@@ -972,7 +1010,7 @@ async fn a_live_mv_without_append_is_detected_as_critical() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("no_such_database"))
         .fetch_one()
@@ -1239,7 +1277,7 @@ async fn read_zero_invariants(
 async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
     use rollup_freshness_probe::zero_invariants::{ZeroInvariantCounts, zero_invariant_metric};
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     let ts: u32 = c
         .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
@@ -1276,7 +1314,7 @@ async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
 async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violation() {
     use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
 
     // No pf_trade_count, pf_volume or pf_price_volume in the column list.
@@ -1310,7 +1348,7 @@ async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violati
 async fn a_repaired_candle_stops_counting_as_a_zero_invariant_violation() {
     use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     let ts: u32 = c
         .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
@@ -1344,7 +1382,7 @@ async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
         ZERO_INVARIANT_LOOKBACK_SECONDS, ZeroInvariantCounts,
     };
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     let now: u32 = c
         .query("SELECT toUnixTimestamp(now())")
@@ -1366,4 +1404,356 @@ async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
     );
 
     reset_sanity_tables(&c).await;
+}
+
+// ---- Rollup MVs stuck behind a dependency (task 0203 / 0143) ----------------
+//
+// Since task 0143 the rollup MVs are chained with `DEPENDS ON`. A stopped,
+// failing or missing dependency leaves its dependents `WaitingForDependencies`
+// forever, with no error (BRIEF §2). These pin the probe's read of that state
+// against a live 26.3.10.60 scheduler, and its refusal to publish a 0 when the
+// table is denied.
+
+/// One declared view's `(status, next_refresh_time, last_success_time)` as
+/// epoch seconds, straight from `system.view_refreshes`.
+async fn view_state(c: &Client, db: &str, view: &str) -> (String, i64, i64) {
+    c.query(&format!(
+        "SELECT toString(status), \
+                toInt64(toUnixTimestamp(ifNull(next_refresh_time, toDateTime(0)))), \
+                toInt64(toUnixTimestamp(ifNull(last_success_time, toDateTime(0)))) \
+         FROM system.view_refreshes WHERE database = '{db}' AND view = '{view}'"
+    ))
+    .fetch_one::<(String, i64, i64)>()
+    .await
+    .unwrap_or_else(|e| panic!("{view} is listed in system.view_refreshes: {e}"))
+}
+
+/// ⚠️ **Induce the condition.** STOP `mv_ohlcv_1h_to_4h`, then move
+/// `mv_ohlcv_4h_to_1d`'s scheduler just past its next 4-hour slot with
+/// `SYSTEM TEST VIEW … SET FAKE TIME`. The dependent fires for that slot, finds
+/// its dependency has not refreshed for it, and waits — forever, with no error.
+/// The probe's own query must see it `WaitingForDependencies` and its
+/// dependency `Disabled`.
+///
+/// ⚠️ The classifier is handed the FAKE clock (`slot + period + 1`), not the
+/// row's `db_now_unix`: fake time moves only the view's scheduler, not `now()`,
+/// so the wait has not yet aged in wall time. A real stall reaches the same
+/// state by waiting out one period of wall time — which is what the probe's
+/// server clock measures in production.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, refresh_wait_metrics, refresh_waits_query,
+    };
+
+    const DEPENDENT: &str = "mv_ohlcv_4h_to_1d";
+    const DEPENDENCY: &str = "mv_ohlcv_1h_to_4h";
+    const PERIOD: i64 = 14_400; // mv_ohlcv_4h_to_1d REFRESH EVERY 4 HOUR
+
+    let db = "it_refresh_waits_0203";
+    let c = scratch_db(db).await;
+    let rmv = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&rmv, &scratch_rewrite(prices_clickhouse::ROLLUPS_SQL, db))
+        .await
+        .expect("apply the generated rollup chain");
+
+    // Let the CREATE-time refreshes settle, then switch the dependency off.
+    for view in [DEPENDENCY, DEPENDENT] {
+        exec(&rmv, &format!("SYSTEM WAIT VIEW {db}.{view}")).await;
+    }
+    exec(&rmv, &format!("SYSTEM STOP VIEW {db}.{DEPENDENCY}")).await;
+
+    // The dependent's next slot on the real clock, and a fake clock 30 s past
+    // it (FAKE TIME takes a string literal; the server renders it in its TZ).
+    let (_, slot, _) = view_state(&c, db, DEPENDENT).await;
+    assert!(slot > 0, "{DEPENDENT} has a scheduled next refresh");
+    let fake: String = c
+        .query(&format!("SELECT toString(toDateTime({}))", slot + 30))
+        .fetch_one()
+        .await
+        .expect("render the fake time");
+    exec(
+        &rmv,
+        &format!("SYSTEM TEST VIEW {db}.{DEPENDENT} SET FAKE TIME '{fake}'"),
+    )
+    .await;
+
+    // Poll until the dependent either waits or (without DEPENDS ON) runs.
+    let mut state = view_state(&c, db, DEPENDENT).await;
+    for _ in 0..80 {
+        if state.0 == "WaitingForDependencies" || state.2 >= slot {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        state = view_state(&c, db, DEPENDENT).await;
+    }
+
+    // Collect everything before asserting, and drop the scratch DB (its MVs
+    // keep firing) before any assertion can unwind past the cleanup.
+    let rows = c
+        .query(&refresh_waits_query(db))
+        .fetch_all::<ViewRefreshRow>()
+        .await;
+    drop_scratch_db(db).await;
+    let rows = rows.expect("the probe's refresh-waits query executes and deserializes");
+
+    let find = |view: &str| {
+        rows.iter()
+            .find(|r| r.view == view)
+            .unwrap_or_else(|| panic!("{view} is among the probe's rows: {rows:?}"))
+    };
+    let dependent = find(DEPENDENT);
+    assert_eq!(
+        dependent.status, "WaitingForDependencies",
+        "with its dependency STOPped, {DEPENDENT} must wait for slot {slot} instead of \
+         running (last_success_time {}); rows: {rows:?}",
+        state.2
+    );
+    assert_eq!(
+        dependent.next_refresh_unix, slot,
+        "a waiting view keeps the slot it waits for as next_refresh_time"
+    );
+    assert_eq!(find(DEPENDENCY).status, "Disabled");
+    assert_eq!(rows.len(), 12, "all twelve declared views are listed");
+
+    let value_of = |m: &[rollup_freshness_probe::mv_drift::DriftMetric], name: &str| {
+        m.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} published"))
+            .value
+    };
+
+    // A whole period later on the scheduler's clock: stuck, and the STOP shows.
+    let m = refresh_wait_metrics(&rows, slot + PERIOD + 1);
+    assert!(value_of(&m, MV_REFRESH_WAITING_METRIC) >= 1.0, "{m:?}");
+    assert!(value_of(&m, MV_REFRESH_DISABLED_METRIC) >= 1.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_UNREADABLE_METRIC), 0.0);
+
+    // The threshold, on the two views this test controls. The other ten run
+    // on the REAL clock, so judging them against a fake "now" hours ahead could
+    // count an ordinary momentary wait of theirs.
+    let pair: Vec<ViewRefreshRow> = rows
+        .iter()
+        .filter(|r| r.view == DEPENDENT || r.view == DEPENDENCY)
+        .cloned()
+        .collect();
+    assert_eq!(
+        value_of(
+            &refresh_wait_metrics(&pair, slot + PERIOD + 1),
+            MV_REFRESH_WAITING_METRIC
+        ),
+        1.0
+    );
+    // Review WR-07: one stall is counted once — the waiting view's and the
+    // STOPped view's stale successes belong to their own counts, not failing.
+    // Judged where both successes ARE stale (more than two own periods old),
+    // so only the waiting/disabled exclusion keeps them out of the count.
+    let last_success = |view: &str| {
+        find(view)
+            .last_success_unix
+            .unwrap_or_else(|| panic!("{view} succeeded at CREATE: {rows:?}"))
+    };
+    let stale_now = (slot + PERIOD + 1)
+        .max(last_success(DEPENDENT) + 2 * PERIOD + 1)
+        .max(last_success(DEPENDENCY) + 2 * 3_600 + 1);
+    let m = refresh_wait_metrics(&pair, stale_now);
+    assert_eq!(value_of(&m, MV_REFRESH_WAITING_METRIC), 1.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_DISABLED_METRIC), 1.0, "{m:?}");
+    assert_eq!(
+        value_of(&m, MV_REFRESH_FAILING_METRIC),
+        0.0,
+        "a waiting or STOPped view is never also failing, however old its last success: {m:?}"
+    );
+    for not_yet in [slot + 1, slot + PERIOD] {
+        assert_eq!(
+            value_of(
+                &refresh_wait_metrics(&pair, not_yet),
+                MV_REFRESH_WAITING_METRIC
+            ),
+            0.0,
+            "a wait of at most one period (now = slot + {}) is an ordinary slot",
+            not_yet - slot
+        );
+    }
+}
+
+/// ⚠️ **Induce the condition** (review WR-07). The two monthly LEAVES —
+/// `mv_ohlcv_1d_to_1M` and `mv_reconcile_1d_to_1M` — fail on every pass: the
+/// column `vwap` of their shared target is renamed away, so the `INSERT` each
+/// pass makes into it fails at analysis, whatever the data and whatever the
+/// clock (a data-driven failure would need a CLOSED month inside the 7-day
+/// reconcile window, which exists only in a month's first week). Nothing
+/// `DEPENDS ON` a leaf, so neither makes anything wait: after its retries
+/// ClickHouse puts it back to `Scheduled` with the error in `exception`. The
+/// waiting and disabled counts therefore read 0 — the gap — and only the
+/// failing count, from the probe's exact read and classification, sees them.
+///
+/// Real clock throughout (no fake time), so the row's own `db_now_unix` is
+/// the probe's `now`, exactly as in production.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_failing_leaf_is_reported_as_failing_though_nothing_waits_on_it() {
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, metrics_for_read,
+        refresh_waits_query,
+    };
+
+    const LEAVES: [&str; 2] = ["mv_ohlcv_1d_to_1M", "mv_reconcile_1d_to_1M"];
+
+    let db = "it_refresh_failing_0203";
+    let c = scratch_db(db).await;
+    let rmv = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&rmv, &scratch_rewrite(prices_clickhouse::ROLLUPS_SQL, db))
+        .await
+        .expect("apply the generated rollup chain");
+    for (view, _) in prices_clickhouse::rollup_sql::rollup_views() {
+        exec(&rmv, &format!("SYSTEM WAIT VIEW {db}.{view}")).await;
+    }
+
+    exec(
+        &c,
+        &format!("ALTER TABLE {db}.price_ohlcv_1M RENAME COLUMN vwap TO vwap_renamed_by_it"),
+    )
+    .await;
+    for view in LEAVES {
+        // SYSTEM REFRESH VIEW ignores DEPENDS ON, so each leaf runs now.
+        exec(&rmv, &format!("SYSTEM REFRESH VIEW {db}.{view}")).await;
+    }
+
+    // Poll until both leaves are back to Scheduled with their error (retries
+    // spent), or give up after ~20 s and let the assertions say what is left.
+    let mut rows: Result<Vec<ViewRefreshRow>, clickhouse::error::Error> = Ok(vec![]);
+    for _ in 0..80 {
+        rows = c
+            .query(&refresh_waits_query(db))
+            .fetch_all::<ViewRefreshRow>()
+            .await;
+        let settled = rows.as_ref().is_ok_and(|rows| {
+            LEAVES.iter().all(|leaf| {
+                rows.iter()
+                    .any(|r| r.view == *leaf && r.status == "Scheduled" && !r.exception.is_empty())
+            })
+        });
+        if settled {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    // Everything collected; drop the scratch DB (its MVs keep firing) before
+    // any assertion can unwind past the cleanup.
+    drop_scratch_db(db).await;
+    let rows = rows.expect("the probe's refresh-waits query executes and deserializes");
+    assert_eq!(
+        rows.len(),
+        12,
+        "all twelve declared views are listed: {rows:?}"
+    );
+
+    for leaf in LEAVES {
+        let row = rows
+            .iter()
+            .find(|r| r.view == leaf)
+            .unwrap_or_else(|| panic!("{leaf} is among the probe's rows"));
+        assert_eq!(
+            row.status, "Scheduled",
+            "{leaf}: a failing leaf is Scheduled, not waiting — the state no \
+             other count can see; row: {row:?}"
+        );
+        assert!(
+            row.exception.contains("vwap"),
+            "{leaf}: the induced failure is the one recorded: {row:?}"
+        );
+    }
+
+    let value_of = |m: &[DriftMetric], name: &str| {
+        m.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} published: {m:?}"))
+            .value
+    };
+    let detail = describe_failing(&rows, rows[0].db_now_unix);
+    let m =
+        metrics_for_read::<clickhouse::error::Error>(Ok(rows)).expect("a readable table publishes");
+    assert_eq!(
+        value_of(&m, MV_REFRESH_FAILING_METRIC),
+        2.0,
+        "exactly the two failing leaves: {detail}"
+    );
+    assert_eq!(value_of(&m, MV_REFRESH_WAITING_METRIC), 0.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_DISABLED_METRIC), 0.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_UNREADABLE_METRIC), 0.0, "{m:?}");
+    for leaf in LEAVES {
+        assert!(
+            detail.contains(&format!("{leaf}: Code: ")),
+            "the log detail names {leaf} and its error: {detail}"
+        );
+    }
+}
+
+/// `system.view_refreshes` is DENIED — not grant-filtered like `system.tables`
+/// — to a user holding only `SELECT ON prices.*`, the shape of the probe's
+/// `prices_writer` identity (measured on 26.3.10.60, RESEARCH §3). The probe's
+/// exact read must come back as the unreadable flag ALONE: a waiting/disabled/failing
+/// 0 would read as a healthy chain the probe cannot see.
+///
+/// Creates and drops its own least-privileged user; both results are
+/// collected and the user dropped before anything can panic.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn view_refreshes_is_denied_to_a_prices_only_user_and_reads_as_unreadable() {
+    use rollup_freshness_probe::refresh_waits::{
+        ViewRefreshRow, is_access_denied, metrics_for_read, refresh_waits_query, unreadable_metrics,
+    };
+
+    let admin = client().await;
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
+    exec(
+        &admin,
+        "CREATE USER rollup_probe_waits_it IDENTIFIED WITH no_password",
+    )
+    .await;
+    exec(&admin, "GRANT SELECT ON prices.* TO rollup_probe_waits_it").await;
+
+    let restricted = Client::default()
+        .with_url(ch_url())
+        .with_database("prices")
+        .with_user("rollup_probe_waits_it");
+
+    let read = restricted
+        .query(&refresh_waits_query("prices"))
+        .fetch_all::<ViewRefreshRow>()
+        .await
+        .map_err(|e| e.to_string());
+    // The control: the same user CAN read the grant-filtered system.tables.
+    let tables: Result<u64, _> = restricted
+        .query("SELECT count() FROM system.tables WHERE database = 'prices'")
+        .fetch_one()
+        .await;
+
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
+
+    assert!(
+        tables.expect("system.tables is filtered, not denied") > 0,
+        "the control: a prices-only user sees its own schema"
+    );
+    let err = read
+        .clone()
+        .expect_err("system.view_refreshes must be denied to a prices-only user");
+    assert!(
+        is_access_denied(&err),
+        "the refusal must be recognised as a grant gap, got: {err}"
+    );
+    assert_eq!(
+        metrics_for_read(read),
+        Ok(unreadable_metrics()),
+        "a denied read publishes the unreadable flag and no count"
+    );
 }

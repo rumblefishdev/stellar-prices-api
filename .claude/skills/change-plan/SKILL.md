@@ -2,6 +2,8 @@
 name: change-plan
 description: Check, raise or lower a prices-api user's usage plan (free / basic / analyst / lite / pro) by their Discord id, in AWS API Gateway on production. Use when asked e.g. "podnieś plan userowi <id>", "zmień plan na pro", "obniż do free", "na jakim planie jest user X", "upgrade/downgrade user".
 argument-hint: '<discord-id> [free|basic|analyst|lite|pro] [profile=<aws-profile>]'
+metadata:
+  internal: true
 ---
 
 # /change-plan — Check or change a user's usage plan

@@ -5,7 +5,13 @@ cluster that already holds the six refreshable rollup MVs, without
 reintroducing the task 0090/0095 data loss.
 
 **Applies to:** `mv_ohlcv_1m_to_15m`, `_15m_to_1h`, `_1h_to_4h`, `_4h_to_1d`,
-`_1d_to_1w`, `_1d_to_1M` on ch-prod-01.
+`_1d_to_1w`, `_1d_to_1M` on ch-prod-01, and (since tasks 0143 + 0203) the six
+hourly reconciliation MVs `mv_reconcile_1m_to_15m` … `mv_reconcile_1d_to_1M`.
+
+> **Landing tasks 0143 + 0203 (the `DEPENDS ON` chain and the reconcile MVs)?**
+> Go to [Tasks 0143 + 0203](#tasks-0143--0203--dependency-order-and-reconciliation).
+> The five fast dependents change in place with `MODIFY REFRESH`; nothing is
+> dropped.
 
 > ⚠️ **If the re-CREATE you are here for is task 0286's**, follow
 > [`0286-candle-definitions-rollout.md`](0286-candle-definitions-rollout.md)
@@ -81,9 +87,11 @@ prices-clickhouse-drift --verbose
 ```
 
 Read-only: it issues `SELECT`s against `system.tables` and
-`formatQuerySingleLine`, and creates, alters and drops nothing. Exit 0 means all
-six are present, match the file and are in `APPEND` mode; exit 1 means at least
-one needs attention.
+`formatQuerySingleLine`, and creates, alters and drops nothing. Exit 0 means
+every declared MV (twelve since task 0203: six fast, six reconcile) is present,
+matches the file and is in `APPEND` mode; exit 1 means at least one needs
+attention. A missing or wrong `DEPENDS ON` is reported as `DRIFT` on the
+`refresh` field.
 
 Run this **before** you edit anything. A target that has already drifted is a
 different job from landing a new edit, and doing both in one pass makes the
@@ -192,15 +200,21 @@ it works, and confirm it returns to OK in step 5.
 
 ## Step 4 — drop and re-create, one MV at a time
 
-For each MV, **fine-to-coarse** — `_1m_to_15m` first, `_1w_to_1M` last — so that
-each MV is re-created only once its own source has already been corrected.
+For each MV, **fine-to-coarse** — `mv_ohlcv_1m_to_15m` first, the two dailies
+(`mv_ohlcv_1d_to_1w`, `mv_ohlcv_1d_to_1M`) last — so that each MV is re-created
+only once its own source has already been corrected.
 
 ⚠️ **The order is load-bearing, and the intuitive one is backwards.** Every MV
 reads the tier below it, and (per step 3) a freshly created MV refreshes
-_immediately_. Re-create `_1w_to_1M` first and its one and only refresh for the
-next 24 hours re-aggregates `price_ohlcv_1w` rows that the old `_1d_to_1w` wrote
-— so a correction propagates upward not at all. Going fine-to-coarse, each
-re-created MV reads a source its predecessor has already fixed.
+_immediately_. Re-create `mv_ohlcv_1d_to_1M` first and its one and only refresh
+for the next 24 hours re-aggregates `price_ohlcv_1d` rows that the old
+`mv_ohlcv_4h_to_1d` wrote — so a correction propagates upward not at all. Going
+fine-to-coarse, each re-created MV reads a source its predecessor has already
+fixed.
+
+Since task 0143 the five dependents carry `DEPENDS ON` — see
+[DROP + CREATE with dependencies](#3-fallback--drop--create-with-dependencies)
+for what happens to them while their dependency is dropped.
 
 ```sql
 -- 1. drop
@@ -287,6 +301,333 @@ even once, the target table has lost everything outside its window, and recovery
 is a pre-roll — see `docs/runbooks/0136-coarse-rollup-merge-recovery.md` and the
 `preroll-live-gap.sql` path, not this runbook.
 
+## Tasks 0143 + 0203 — dependency order and reconciliation
+
+What changed in `schema/rollups.sql` (decision record:
+`lore/2-adrs/0317_rollup-mvs-dependency-order-and-reconciliation.md`):
+
+- **0143.** The five fast MVs above `mv_ohlcv_1m_to_15m` wait for the MV that
+  writes their source (`REFRESH … DEPENDS ON prices.<mv> APPEND`). At 00:00 the
+  two dailies no longer read `price_ohlcv_1d` before `mv_ohlcv_4h_to_1d` has
+  written the day that just closed. Bodies, windows and cadences are unchanged.
+- **0203.** Six new MVs, `mv_reconcile_1m_to_15m` … `mv_reconcile_1d_to_1M`,
+  run `EVERY 1 HOUR` over a bucket-aligned 7-day window. Each writes into the
+  same table as its fast MV, and only the buckets whose `trade_count` or
+  `volume_base` disagree with the tier below (missing buckets included). They
+  are chained among themselves the same way, so one hourly pass repairs
+  15m → 1h → 4h → 1d → {1w, 1M}. No fast MV depends on a reconcile MV, and
+  `mv_reconcile_1m_to_15m` depends on nothing.
+
+**When.** Only after task 0286 phase 3 has finished on prod: the re-ingest
+rewrites `price_ohlcv_1m` under the reconcile window (see
+[0286-reingest-history §1a](0286-reingest-history.md#1a-stop-the-reconcile-mvs-tasks-0143--0203)).
+Everything below runs as the ClickHouse admin, as in
+[Where these commands run](#where-these-commands-run).
+
+**Before you start.**
+
+- `SHOW GRANTS FOR prices_writer` includes `SELECT ON system.view_refreshes`.
+  The probe reads it with that identity, and the table is DENIED
+  (`Code: 497 ACCESS_DENIED`), not grant-filtered, to a user holding only
+  `SELECT ON prices.*`. Without the grant `prices-production-mv-refresh-unreadable`
+  fires by design. The users are XML-managed on BE's side (BE task 0477).
+- Size the first reconcile pass. Its memory scales with the number of
+  (series, 15-minute bucket) groups over 7 days, not with rows. Read-only:
+
+  ```sql
+  SELECT uniq(asset_id, quote_asset_id, source) AS series,
+         uniq(asset_id, quote_asset_id, source,
+              toStartOfInterval(timestamp, INTERVAL 15 MINUTE)) AS groups_15m
+  FROM prices.price_ohlcv_1m
+  WHERE timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 15 MINUTE);
+  ```
+
+  Measured locally on 26.3.10.60 (~3 M `_1m` rows, full emit into an empty
+  target): 200 k groups → 238 MiB, 1.2 M → 1.19 GiB, 3.0 M (one row per group,
+  the worst case) → 2.26 GiB, i.e. 40 % of the 5.59 GiB per-query quota. If
+  `groups_15m` is well above 3 M, stop and re-measure before creating anything.
+
+- Run `prices-clickhouse-drift` built from this change. Expected before the
+  rollout: five `DRIFT` (the `refresh` field of the five fast dependents) and
+  six `MISSING` (the reconcile MVs). Anything else is a different job — see
+  Step 1.
+- **Order, and one session.** The MVs change first (§1, §2), the probe Lambda
+  and ObservabilityStack from this change are deployed after them (§2b), and
+  §1 → §2 → §2b run in ONE session. `prices-production-mv-drift` fires for
+  the whole of that window from the probe deployed today, whichever order you
+  choose — see §2b for why, and for when it clears.
+
+### 1. Preferred rollout — `MODIFY REFRESH` on the five fast dependents
+
+The fast bodies do not change, so nothing is dropped and there is no exposure
+window. Apply bottom-up, one at a time:
+
+```sql
+ALTER TABLE prices.mv_ohlcv_15m_to_1h MODIFY REFRESH EVERY 15 MINUTE DEPENDS ON prices.mv_ohlcv_1m_to_15m APPEND;
+ALTER TABLE prices.mv_ohlcv_1h_to_4h MODIFY REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_ohlcv_15m_to_1h APPEND;
+ALTER TABLE prices.mv_ohlcv_4h_to_1d MODIFY REFRESH EVERY 4 HOUR DEPENDS ON prices.mv_ohlcv_1h_to_4h APPEND;
+ALTER TABLE prices.mv_ohlcv_1d_to_1w MODIFY REFRESH EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_4h_to_1d APPEND;
+ALTER TABLE prices.mv_ohlcv_1d_to_1M MODIFY REFRESH EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_4h_to_1d APPEND;
+```
+
+These are the generator's output (`rollup_sql::mv_modify_refresh`), and the
+unit test `the_reapply_runbook_quotes_every_generated_modify_refresh_statement`
+fails if this block and the generator disagree. Do not hand-edit them.
+
+- ⚠️ **`MODIFY REFRESH` replaces ALL refresh parameters.** The whole clause is
+  repeated on purpose: a statement without `DEPENDS ON` removes it, and one
+  without `APPEND` is refused (`Code: 48 … Adding or removing APPEND is not
+supported`). Replace mode cannot be reintroduced this way.
+- `mv_ohlcv_1m_to_15m` has no dependency, so its clause does not change and
+  there is no statement for it.
+- After each statement, confirm it landed before the next:
+
+  ```sql
+  SELECT name, create_table_query LIKE '%DEPENDS ON prices.%APPEND TO %' AS chained
+  FROM system.tables WHERE database = 'prices' AND name = 'mv_ohlcv_15m_to_1h';
+  ```
+
+  `chained = 1`, and `system.view_refreshes` shows the view `Scheduled` with an
+  empty `exception`.
+
+### 2. Create the six reconcile MVs
+
+Paste each `CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_…`
+statement from `schema/rollups.sql` verbatim, **fine to coarse** (the file
+order: `1m_to_15m`, `15m_to_1h`, `1h_to_4h`, `4h_to_1d`, `1d_to_1w`, `1d_to_1M`),
+**one at a time, off-peak**.
+
+A new refreshable MV refreshes immediately at `CREATE`, even with `DEPENDS ON`
+(measured on 26.3.10.60). So each `CREATE` runs a full 7-day comparison of its
+tier right away. Wait for it before the next:
+
+```sql
+SYSTEM WAIT VIEW prices.mv_reconcile_1m_to_15m;
+
+SELECT view, status, last_success_time, last_success_duration_ms, exception
+FROM system.view_refreshes
+WHERE database = 'prices' AND view = 'mv_reconcile_1m_to_15m';
+
+-- the reconcile passes' peak memory, per target table
+SYSTEM FLUSH LOGS;
+SELECT extract(query, '^INSERT INTO prices\\.(\\w+)') AS target,
+       max(event_time) AS last_pass,
+       argMax(query_duration_ms, memory_usage) AS duration_ms,
+       formatReadableSize(max(memory_usage)) AS peak
+FROM system.query_log
+WHERE type = 'QueryFinish' AND query_kind = 'Insert'
+  AND event_time >= now() - INTERVAL 15 MINUTE
+  AND query LIKE 'INSERT INTO prices.price_ohlcv_%'
+  AND query LIKE '%NOT IN (%'   -- only a reconcile body has it
+GROUP BY target
+ORDER BY max(memory_usage) DESC;
+```
+
+`status = Scheduled`, `last_success_time` at or after the `CREATE`, an empty
+`exception`, and a peak well under the 5.59 GiB quota. The `15m` pass is the
+heaviest: it is the only one that reads `price_ohlcv_1m`.
+
+⚠️ **Keep the `NOT IN (` filter.** A refresh pass is logged as
+`INSERT INTO prices.<target> (<columns>) SELECT …`, and each fast MV writes the
+same target with the same prefix — `mv_ohlcv_1m_to_15m` every minute, so about
+15 fast inserts for every reconcile pass in a 15-minute window. Without the
+filter the query reports a small, healthy-looking fast pass instead of the
+heaviest one. Only a reconcile body contains `NOT IN (` (the unit test
+`only_the_reconcile_bodies_contain_not_in` pins that). Read the maximum
+(`ORDER BY max(memory_usage)`), not the latest.
+
+`system.view_refreshes.written_rows` reads **0 when a pass wrote nothing**. A
+non-zero value is not a row count on 26.3.10.60 (it was measured at 256 × the
+buckets appended), so read it as "something was written", never quote it as a
+number of rows. A pass rewrites only closed buckets that ended at least 2 h ago
+(`MISMATCH_GRACE`), never the open bucket, which stays the fast MV's. So on a
+live system `0` is the usual steady state after the first pass, and a non-zero
+value means the pass repaired something (a back-fill, a missed bucket). Expect
+a routine non-zero around each day boundary: minutes that land late after
+midnight make the pass after the grace (≈ 02:00 UTC) rewrite yesterday's `1d`
+bucket, and at week and month ends the `1w` / `1M` bucket too. That is the
+self-heal working, not a fault.
+
+### 2b. Deploy the probe and ObservabilityStack — after §1 and §2
+
+Only once the twelve MVs are in place, and in the same session as §1–§2.
+
+**Why after, and why in one session.** The probe deployed on production
+today embeds the OLD `rollups.sql` (six MVs, no `DEPENDS ON`). Its drift check
+counts refresh drift and undeclared writers in `MvDriftCount`, not in the
+critical count (the reconcile MVs keep `APPEND`). So:
+
+- from the first §1 statement it reports up to five refresh drifts, and from
+  the first §2 `CREATE` up to six undeclared writers into the coarse tables:
+  **`prices-production-mv-drift` fires** (up to 11), and stays in ALARM until
+  the new probe runs. That is expected; `-mv-drift-critical` stays OK;
+- deploying the new probe FIRST does not avoid it: the new probe declares
+  twelve MVs, so against the old chain it reports five `DRIFT` + six
+  `MISSING` and `prices-production-mv-drift` fires just the same (and the
+  mismatch and `mv-refresh-*` alarms would judge a chain that does not exist
+  yet).
+
+Either order has a `mv-drift` window; MVs first keeps it to the length of this
+session. Do not leave §1–§2 applied overnight with the old probe.
+
+**Steps.**
+
+1. `prices-clickhouse-drift` built from this change: exit 0, twelve lines
+   `ok`. `system.view_refreshes` (query in §4) shows twelve views, none
+   `WaitingForDependencies` or `Disabled`. Do not deploy on anything else.
+2. **The grant, again, before the stack:** `SHOW GRANTS FOR prices_writer`
+   includes `SELECT ON system.view_refreshes`. Without it the new probe
+   publishes `MvRefreshUnreadable = 1` and `prices-production-mv-refresh-unreadable`
+   fires as soon as the stack lands (by design: the waiting/disabled/failing
+   counts are suppressed, not zero). If it is missing, deploy only when you accept that
+   alarm, and chase the grant with BE (task 0477).
+3. Deploy, reading the diff for removals first (`--require-approval
+broadening` prompts on IAM/security-group widening only, and the
+   EventBridge stack carries the CleanupRule hazard of task 0200, guarded at
+   synth by `assertCleanupRuleStaysDisabled` — still read it):
+
+   ```bash
+   make diff-production
+   make deploy-production-eventbridge     # the probe Lambda (rollup-freshness-probe)
+   make deploy-production-observability   # rollup-mismatch-*, mv-refresh-* alarms
+   ```
+
+   The probe first: that is what ends the `mv-drift` window.
+
+4. Expected afterwards: `prices-production-mv-drift` returns to OK within two
+   probe runs (≤ 30 min: the alarm is 1 of 2 fifteen-minute periods). The six
+   `prices-production-rollup-mismatch-*` and four `mv-refresh-*` alarms leave
+   `INSUFFICIENT_DATA` once the new probe has published, and read OK on a
+   healthy chain. Then continue with §4.
+
+### 3. Fallback — DROP + CREATE with dependencies
+
+If `MODIFY REFRESH` is refused, or a body has to change as well, use Steps 2–5
+above, bottom-up, with these differences:
+
+- **Create bottom-up.** A dependent created before its dependency waits
+  (`WaitingForDependencies`) from its first scheduled slot on.
+- **Dropping a dependency does not touch its dependents.** They keep their
+  `DEPENDS ON` in the stored DDL. They stay `Scheduled` until their next slot,
+  then wait (`WaitingForDependencies`) **with no error** for as long as the
+  dependency is absent. When it is re-created under the same name they re-link
+  by name. So a DROP + CREATE of `mv_ohlcv_4h_to_1d` also stalls both dailies
+  for as long as it is gone.
+- A stopped (`SYSTEM STOP VIEW`), failing or misspelled dependency blocks its
+  dependents the same way, silently. `prices-production-mv-refresh-waiting`
+  and `prices-production-mv-refresh-disabled` exist for that. A view that fails
+  itself goes back to `Scheduled` with the error in `exception`; nothing waits
+  on the four 1w/1M leaves, so for them only
+  `prices-production-mv-refresh-failing` fires (error left, or no success for
+  more than two of its own periods).
+- `SYSTEM REFRESH VIEW` ignores dependencies. Use it to force one view, never to
+  "unstick" a chain whose dependency is still missing.
+- Reconcile MVs are dropped and re-created the same way, from the file, fine to
+  coarse. Each re-`CREATE` runs its 7-day comparison again (Step 2).
+
+### 4. Verify
+
+```sql
+SELECT view, status, last_success_time, next_refresh_time, exception
+FROM system.view_refreshes
+WHERE database = 'prices'
+  AND (view LIKE 'mv_ohlcv_%' OR view LIKE 'mv_reconcile_%')
+ORDER BY view;
+```
+
+- Twelve rows. None `WaitingForDependencies` or `Disabled` for longer than one
+  of its own periods (a dependent waits a few seconds at every shared slot;
+  that is the ordering working). Every `exception` empty, and every
+  `last_success_time` younger than two of the view's own periods —
+  `prices-production-mv-refresh-failing` watches both once the probe is
+  deployed, and its log line names the failing views
+  (`mv_refresh_failing_views`).
+- `prices-clickhouse-drift` (built from this change): exit 0, twelve lines `ok`.
+- Once the probe is deployed (§2b): `RollupMismatchBuckets` reads 0 for every coarse
+  table within one to two hourly cycles. It counts only closed buckets that
+  ended at least 2 h ago. A `_1m` hole shows on `price_ohlcv_15m` first: each
+  tier is compared only with the tier directly below, so the coarser tiers agree
+  with their (equally holed) source until the reconcile pass propagates the
+  repair upward. A coarser table mismatching on its own means the chain broke
+  part-way.
+- `SHOW GRANTS FOR prices_writer` includes `SELECT ON system.view_refreshes`;
+  otherwise `prices-production-mv-refresh-unreadable` stays in ALARM.
+- **The probe's time budget.** Over the first day after §2b, read the
+  `prices-production-rollup-freshness-probe` Lambda's `Duration` (p95 and
+  maximum) against its 1-minute timeout, and check that
+  `prices-production-rollup-freshness-probe-duration-near-timeout` stays OK.
+  The six mismatch reads run last, 15m first, each bounded by what is left of
+  the invocation. A tier that cannot get 2 s is skipped: the invocation log
+  shows `rollup_mismatch=… price_ohlcv_1M=skipped` and the probe's errors alarm
+  fires with `rollup-mismatch … skipped`. If that happens, or Duration sits near
+  the timeout, raise the timeout of the probe in `eventbridge-stack.ts` as its
+  own change (that stack's deploy carries the CleanupRule hazard, task 0200).
+
+### 5. An outage longer than 7 days
+
+The reconcile window is 7 days (`RECONCILE_WINDOW` in `src/rollup_sql.rs`), so
+buckets older than that are never compared or repaired. `price_ohlcv_1m`
+retention sets the ceiling of what any repair can reach (task 0200). For a hole
+older than the window, pre-roll the range with the bounded, generated
+`schema/preroll-live-gap.sql` and its `{start_ts}` (inclusive) / `{end_ts}`
+(exclusive) parameters, fine to coarse, exactly as
+[0286-reingest-history §4g](0286-reingest-history.md#4g-drop-the-overlapping-coarse-partitions-and-pre-roll-the-month)
+does. Never `preroll.sql` on populated tables (the task 0090 history loss). If
+the range overlaps the last 7 days, stop the reconcile MVs for the duration
+([0286-reingest-history §1a](0286-reingest-history.md#1a-stop-the-reconcile-mvs-tasks-0143--0203)).
+
+### 6. Rollback
+
+If the probe Lambda and ObservabilityStack from this change are deployed, roll
+them back first (`make deploy-production-eventbridge` and
+`make deploy-production-observability` from the commit before this change),
+then run the steps below in the same session. What that order buys, and what it
+does not:
+
+- **It removes** the `prices-production-rollup-mismatch-*` and
+  `mv-refresh-*` alarms, which would otherwise judge a chain that is being
+  taken apart (a dropped reconcile MV's dependents wait, and the probe cannot
+  tell a rollback from a stall).
+- **It does NOT avoid `prices-production-mv-drift`.** The previous probe
+  embeds the six-MV `rollups.sql`, so while steps 1–2 run it sees the six
+  reconcile MVs as undeclared writers into the coarse tables and the five
+  `DEPENDS ON` clauses as refresh drift (up to 11 in `MvDriftCount`, none
+  critical). The alarm fires until step 2 finishes and clears within two probe
+  runs after. That is expected. Rolling the probe back LAST instead fires it
+  too (the new probe reads the rolled-back chain as five `DRIFT` + six
+  `MISSING`), so neither order avoids it — keep the window short.
+
+1. Drop the reconcile MVs **coarse to fine**, so no remaining reconcile MV is
+   left waiting on a dropped one:
+
+   ```sql
+   DROP VIEW prices.mv_reconcile_1d_to_1M;
+   DROP VIEW prices.mv_reconcile_1d_to_1w;
+   DROP VIEW prices.mv_reconcile_4h_to_1d;
+   DROP VIEW prices.mv_reconcile_1h_to_4h;
+   DROP VIEW prices.mv_reconcile_15m_to_1h;
+   DROP VIEW prices.mv_reconcile_1m_to_15m;
+   ```
+
+   The rows they wrote stay. They are ordinary rollup rows over the same source,
+   and the fast MVs keep re-rolling their own windows.
+
+2. Take the dependencies off the five fast MVs. `APPEND` is repeated, because
+   `MODIFY REFRESH` replaces every parameter and refuses to remove it:
+
+   ```sql
+   ALTER TABLE prices.mv_ohlcv_1d_to_1M MODIFY REFRESH EVERY 1 DAY APPEND;
+   ALTER TABLE prices.mv_ohlcv_1d_to_1w MODIFY REFRESH EVERY 1 DAY APPEND;
+   ALTER TABLE prices.mv_ohlcv_4h_to_1d MODIFY REFRESH EVERY 4 HOUR APPEND;
+   ALTER TABLE prices.mv_ohlcv_1h_to_4h MODIFY REFRESH EVERY 1 HOUR APPEND;
+   ALTER TABLE prices.mv_ohlcv_15m_to_1h MODIFY REFRESH EVERY 15 MINUTE APPEND;
+   ```
+
+3. Verify with `prices-clickhouse-drift` built from the commit before this
+   change: six lines `ok`. The binary from this change reports the rolled-back
+   chain as five `DRIFT` and six `MISSING`, which is the expected reading of a
+   rollback, not a failure.
+
 ## Related
 
 - `docs/runbooks/0136-coarse-rollup-merge-recovery.md` — per-table surgery on
@@ -296,3 +637,8 @@ is a pre-roll — see `docs/runbooks/0136-coarse-rollup-merge-recovery.md` and t
   documented at length in its header.
 - `packages/prices-clickhouse/src/drift.rs` — why the check compares a
   fingerprint rather than the DDL text.
+- `packages/prices-clickhouse/src/rollup_sql.rs` — the generator of every
+  statement in `rollups.sql`, including `mv_modify_refresh` and the reconcile
+  window, cadence and mismatch grace.
+- [`0286-reingest-history.md`](0286-reingest-history.md) §1a — stopping the
+  reconcile MVs during a re-ingest.

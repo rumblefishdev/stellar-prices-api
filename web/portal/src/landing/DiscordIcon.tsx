@@ -3,12 +3,11 @@ import SvgIcon, { type SvgIconProps } from '@mui/material/SvgIcon';
 /**
  * The Discord mark, inline.
  *
- * Inline rather than an exported asset or an icon-font glyph, for the reason
- * that governs every asset on this page: the portal renders a credential and
- * ships with a `default-src 'self'` CSP, so nothing may be fetched from a
- * third-party host — and Discord's own CDN is exactly the kind of host that
- * would force the policy open. As a path in the bundle it costs one gzipped
- * kilobyte and no request.
+ * Inline rather than an exported asset or an icon-font glyph: the portal
+ * renders a credential, and no asset is fetched from a third-party host such
+ * as Discord's CDN. The only exception is the explorer's GTM and HubSpot
+ * (task 0316). No CSP enforces this; the explorer distribution sets none. As
+ * a path in the bundle it costs one gzipped kilobyte and no request.
  *
  * `currentColor`, so one component serves the white glyph on the blurple
  * button and the muted one in the checklist without a second copy.

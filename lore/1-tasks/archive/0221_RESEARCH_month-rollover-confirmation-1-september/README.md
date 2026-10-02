@@ -2,7 +2,7 @@
 id: "0221"
 title: "Confirm the MONTH quota rollover instant on production, on or after 1 September 2026"
 type: RESEARCH
-status: backlog
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0191", "0180", "0157"]
 tags: [layer-backend, priority-low, effort-small, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, measurement]
@@ -36,6 +36,25 @@ history:
       Decided: pin the instant with the 2026-10-01 one-request probe before
       the M3 evidence is submitted, instead of closing on the day-level
       result. Added as an acceptance criterion.
+  - date: "2026-10-01"
+    status: backlog
+    who: okarcz
+    note: >
+      Probe run: one request at 2026-10-01 00:05:00.496 UTC, HTTP 200.
+      GetUsage for key 6ncoc0c655 reads 09-30 [0, 99993] and 10-01
+      [1, 99999] — the request counted against October's fresh quota, so
+      AWS reset between 00:00 and 00:05:00 UTC on the 1st. Our rule (00:00
+      UTC, portal/period.rs) matches AWS to within 5 minutes. ADR 0010
+      correction #2 closed as measured.
+  - date: "2026-10-01"
+    status: completed
+    who: okarcz
+    note: >
+      Closed. Every acceptance criterion met: AWS resets the MONTH quota
+      between 00:00 and 00:05 UTC on the 1st, measured with a one-request
+      probe and GetUsage (raw output below). Our rule (00:00 UTC on the
+      1st, portal/period.rs) stands, with no label change. ADR 0010
+      correction #2 closed (750b25d2). No follow-up work.
 
 ---
 
@@ -75,7 +94,7 @@ plan.
 
 ## Acceptance Criteria
 
-- [ ] The `MONTH` reset instant and its timezone are recorded with the date and
+- [x] The `MONTH` reset instant and its timezone are recorded with the date and
       the source (log line or measurement), or recorded as still unobserved
       with the reason. **Partly met, 2026-09-25:** the day is measured (the
       1st), and resets at midnight in any timezone east of UTC are ruled out.
@@ -83,23 +102,57 @@ plan.
       handler doesn't log the calling key). See the measurement below.
       Closes with the 2026-10-01 probe (next criterion). Decided 2026-09-25:
       the day-level result isn't enough; the instant is pinned before the M3
-      evidence ([[0294]]) is submitted.
-- [ ] **The 2026-10-01 probe is run and recorded** (decided 2026-09-25, before
+      evidence ([[0294]]) is submitted. **Met, 2026-10-01:** the reset falls
+      between 00:00 and 00:05:00 UTC on the 1st (the probe below); UTC.
+- [x] **The 2026-10-01 probe is run and recorded** (decided 2026-09-25, before
       the M3 evidence goes out):
-  - [ ] **[local machine] 2026-09-30:** choose a key the operator owns on a
+  - [x] **[local machine] 2026-09-30:** choose a key the operator owns on a
         `MONTH` plan, with September usage (balance below its limit). Record its
         id, plan and `get-usage` balance for 09-30.
-  - [ ] **[local machine] 2026-10-01 00:05 UTC (02:05 CEST):** send exactly
+        **Recorded 2026-09-30 21:30 UTC:** key id `6ncoc0c655`, plan `71t9im`
+        (`pricing-api-free-production`, `MONTH`, limit 100 000). Balance on
+        09-30: **99 993** — 7 used in September, all on 09-02, none since.
+        `get-usage … --start-date 2026-09-30 --end-date 2026-10-01` returns
+        `"items": {}` (a key with no requests in the window is omitted, not
+        reported as zero); the balance comes from the 09-01 → 09-30 read, whose
+        last bucket is `[0, 99993]`. Expected on 10-01 after the probe:
+        `[1, 99999]` if AWS reset before 00:05 UTC, `[1, 99992]` if later. The
+        request is sent by a one-shot user timer on the local machine
+        (`probe-0221.timer`, 00:05:00 UTC, the key read from the gitignored env
+        file, a marker set before sending so it cannot fire twice).
+  - [x] **[local machine] 2026-10-01 00:05 UTC (02:05 CEST):** send exactly
         **one** keyed request, and nothing else with that key that day:
         `curl -si -H "x-api-key: $KEY" https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price`.
         Record the UTC time and the status (must be 200).
-  - [ ] **[local machine] 2026-10-02:**
+        **Sent 2026-10-01T00:05:00.496Z, HTTP 200** (response `date: Thu, 01
+        Oct 2026 00:05:01 GMT`, `x-amzn-requestid:
+        529697e9-05ab-4bea-8f8a-e24063571786`). The only request with that
+        key on 10-01.
+  - [x] **[local machine] 2026-10-02:** (read 2026-10-01 07:10 UTC; the
+        10-01 bucket was already populated)
         `aws apigateway get-usage --profile soroban-readonly --region eu-central-1 --usage-plan-id <plan> --key-id <key> --start-date 2026-09-30 --end-date 2026-10-01`.
         `remaining = limit − 1` on 10-01 ==> AWS reset before 00:05 UTC, and
         our rule matches within 5 minutes. `remaining = 09-30 balance − 1` ==>
         the reset is later; bracket it with one more request at a later hour
         on the next boundary.
-  - [ ] Result written here and in ADR 0010 correction #2, with the date and
+        **Result: `remaining = limit − 1`** — AWS reset before 00:05 UTC.
+        Combined with the 2026-09-01 reading (the 08-31 bucket still ends on
+        August's balance), the reset falls in **[00:00, 00:05:00] UTC on the
+        1st**. Raw output:
+        ```json
+        {
+            "items": {
+                "6ncoc0c655": [
+                    [0, 99993],
+                    [1, 99999]
+                ]
+            },
+            "usagePlanId": "71t9im",
+            "startDate": "2026-09-30",
+            "endDate": "2026-10-01"
+        }
+        ```
+  - [x] Result written here and in ADR 0010 correction #2, with the date and
         the raw `get-usage` output.
 - [x] ADR 0010 correction #2 updated: either closed with the measured value, or
       restated with what is now known. Restated 2026-09-25, and the stale
@@ -174,3 +227,11 @@ A one-request probe pins the instant without new infrastructure:
    `remaining = limit − 1`, the reset happened before 00:05 UTC and our rule
    matches AWS to within 5 minutes. If it shows the September balance − 1,
    the reset is later, and a second request at a later hour brackets it.
+
+### Result of the probe (2026-10-01)
+
+The probe ran as planned: one request at 00:05:00.496 UTC, HTTP 200. The
+10-01 bucket read `[1, 99999]` (`remaining = limit − 1`), so the request
+counted against October's fresh quota. With the 09-01 reading as the lower
+bound, AWS resets in **[00:00, 00:05:00] UTC on the 1st**. That is our
+rule to within 5 minutes; the cap and the dashboard label stay as they are.

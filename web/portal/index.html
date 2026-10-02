@@ -2,6 +2,43 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- Google Consent Mode: everything denied until the HubSpot banner says
+         otherwise. Must run before GTM; the listener after the HubSpot loader
+         sends the update. Copied from soroban-block-explorer `web/index.html`
+         (explorer task 0589). The GTM blocklist below it has to be in place
+         before GTM loads as well. -->
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag() {
+        dataLayer.push(arguments);
+      }
+      gtag('consent', 'default', {
+        analytics_storage: 'denied',
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied',
+        wait_for_update: 500,
+      });
+      // No Custom HTML tags or Custom JavaScript variables, whatever the
+      // container holds: a published tag must not be able to read the key
+      // this page renders (explorer task 0593).
+      dataLayer.push({ 'gtm.blocklist': ['customScripts'] });
+    </script>
+    <!-- Google Tag Manager — the explorer's container, copied verbatim from
+         soroban-block-explorer `web/index.html` (task 0316). -->
+    <script>
+      (function (w, d, s, l, i) {
+        w[l] = w[l] || [];
+        w[l].push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' });
+        var f = d.getElementsByTagName(s)[0],
+          j = d.createElement(s),
+          dl = l != 'dataLayer' ? '&l=' + l : '';
+        j.async = true;
+        j.src = 'https://www.googletagmanager.com/gtm.js?id=' + i + dl;
+        f.parentNode.insertBefore(j, f);
+      })(window, document, 'script', 'dataLayer', 'GTM-TBF2GP5S');
+    </script>
+    <!-- End Google Tag Manager -->
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- Not a page anyone should reach from a search result: it renders an API
          key once task 0187 lands, and until then it says the portal is shut. -->
@@ -27,12 +64,59 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <!-- No third-party scripts, ever — no analytics, no CDN fonts. This page
-         renders a credential from task 0187 on, and the CSP stays trivial only
-         while nothing external is loaded. The reference app this one mirrors
-         (soroban-block-explorer) carries Google Tag Manager here; that is the
-         one thing deliberately not copied from it. -->
+    <!-- Analytics exactly as on the explorer root (task 0316, decided
+         2026-09-28): GTM loads GA4, HubSpot shows the consent banner. Same
+         container and banner as the rest of sorobanscan.rumblefish.dev, so one
+         consent choice covers the whole host.
+
+         Until then this page loaded no third-party script (tasks 0162, 0193),
+         to protect the API key it renders. The explorer's GTM already runs on
+         this origin, which is the one origin the API accepts credentialed calls
+         from (`portalWebOrigin`), so loading the same container here gives
+         nobody new access.
+
+         This page repeats the explorer's configuration 1:1, including the
+         Consent Mode wiring (explorer task 0589): GA starts denied and only
+         the banner's choice grants it. -->
+    <!-- Google Tag Manager (noscript) -->
+    <noscript
+      ><iframe
+        src="https://www.googletagmanager.com/ns.html?id=GTM-TBF2GP5S"
+        height="0"
+        width="0"
+        style="display: none; visibility: hidden"
+      ></iframe
+    ></noscript>
+    <!-- End Google Tag Manager (noscript) -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- Start of HubSpot Embed Code -->
+    <script
+      type="text/javascript"
+      id="hs-script-loader"
+      async
+      defer
+      src="//js.hs-scripts.com/8102665.js"
+    ></script>
+    <!-- End of HubSpot Embed Code -->
+    <!-- Forward the banner choice to Google Consent Mode. HubSpot calls this on
+         load with a stored choice and on every change (footer Cookie Settings
+         included). Blocked HubSpot = never called = stays denied. -->
+    <script>
+      var _hsp = (window._hsp = window._hsp || []);
+      _hsp.push([
+        'addPrivacyConsentListener',
+        function (consent) {
+          var analytics = consent.categories.analytics ? 'granted' : 'denied';
+          var ads = consent.categories.advertisement ? 'granted' : 'denied';
+          gtag('consent', 'update', {
+            analytics_storage: analytics,
+            ad_storage: ads,
+            ad_user_data: ads,
+            ad_personalization: ads,
+          });
+        },
+      ]);
+    </script>
   </body>
 </html>
