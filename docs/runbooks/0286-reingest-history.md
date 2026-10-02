@@ -1082,7 +1082,7 @@ old id space, and `prices.asset_id_map_0139` decodes them. Check the rename
 before resuming, and finish it if anything is left: **after the window (W14
 green), before the first `run`.**
 
-Host shell, `chq` as defined in the 0139 runbook:
+CH shell, `chq` as defined in the 0139 runbook:
 
 ```bash
 chq <<'SQL' > ~/rekey-0139/bak-before.tsv
@@ -1161,11 +1161,11 @@ python3 $R run <the run's flags> $P2 --ack-0139-binaries
 
 - `--second-pass` takes every listed month up to `--to-month`. It refuses
   without `--to-month`, before the swap, and when the plan lacks a listed month.
-- **Open decision (Adam): `--min-excluded-rows N`.** Default 0 means every
-  listed month. With N, a listed month with at most N excluded `1m` rows
-  (colliding + orphan) is skipped. Each skip is printed, written to `run.log` on
-  `run`, and kept in the state file under `second_pass.skipped`. Those
-  identities keep a hole in that month; record the list on task 0139.
+- **No `--min-excluded-rows`** (Adam, 2026-10-02): every listed month is
+  re-ingested. With N, a listed month with at most N excluded `1m` rows
+  (colliding + orphan) would be skipped and its identities would keep a hole
+  there. Measured 2026-10-02 at N = 1000: 14 of 65 months and 1,611 rows, about
+  a day of a 5–6 day pass, not worth a permanent hole.
 - After each month, run the 0139 runbook's month post-check block with
   `?param_m=<month>`. Every line must be `1`.
 
