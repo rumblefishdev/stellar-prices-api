@@ -13,7 +13,7 @@ use prices_clickhouse::asset_id::fixture::fetch_id;
 use prices_clickhouse::rekey::gap::{Postcheck, postcheck_sql};
 use prices_clickhouse::rekey::swap::{FORCE_LOSE, MvSource};
 use prices_clickhouse::rekey::{
-    COPIED_TABLES, DDL_TABLE, Fill, LOG_TABLE, MAP_FINAL, Rekey, RekeyError,
+    COPIED_TABLES, DDL_TABLE, Fill, LOG_TABLE, MAP_FINAL, MAP_TABLE, Rekey, RekeyError,
 };
 use prices_clickhouse::rollup_sql::{TIERS, mv_ddl};
 use prices_clickhouse::{CURRENT_SQL, INIT_SQL, USDC_ISSUER, VIEWS_SQL};
@@ -741,6 +741,47 @@ async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier
         "swap has not run",
     );
     let r = migrate(&c, &db, MvSource::ProdText).await;
+
+    // A swap resumed after its per-table rows keeps (last_live_1m_ts, swap_at):
+    // drop the final row, as if the run had stopped after the last EXCHANGE.
+    stop_views(&c, &db).await;
+    for _ in 0..60 {
+        let running: u64 = c
+            .query(
+                "SELECT count() FROM system.view_refreshes WHERE database = ? \
+                 AND toString(status) != 'Disabled'",
+            )
+            .bind(&db)
+            .fetch_one()
+            .await
+            .unwrap();
+        if running == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let swap_range = |status: &str| {
+        format!(
+            "SELECT (toUInt32(range_from), toUInt32(range_to)) FROM {db}.{LOG_TABLE} \
+             WHERE step = 'swap' AND status = '{status}' ORDER BY at DESC LIMIT 1"
+        )
+    };
+    let started: (u32, u32) = c.query(&swap_range("started")).fetch_one().await.unwrap();
+    assert!(started.0 > 0, "the swap logged last_live_1m_ts");
+    exec(
+        &c,
+        &format!("DELETE FROM {db}.{LOG_TABLE} WHERE step = 'swap' AND status = 'ok'"),
+    )
+    .await;
+    r.swap(false).await.unwrap();
+    let resumed: (u32, u32) = c.query(&swap_range("ok")).fetch_one().await.unwrap();
+    assert_eq!(
+        resumed, started,
+        "a resumed swap logs the range it started with"
+    );
+    for mv in TIERS.iter().map(|t| t.mv).chain(["mv_current_prices"]) {
+        exec(&c, &format!("SYSTEM START VIEW {db}.{mv}")).await;
+    }
     refresh_all(&c, &db).await;
 
     catch_up(&c, &db, ("STW", "GSTW"), ("XLM", ""), 3).await;
@@ -885,16 +926,32 @@ async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier
             s("month_1d_equals_1m", 1)
         ]
     );
+    let row_202401 = |code: &str, issuer: &str| {
+        format!(
+            "INSERT INTO {db}.price_ohlcv_1m (timestamp, base_code, base_issuer, base_contract, \
+             quote_code, quote_issuer, quote_contract, source, open, high, low, close, vwap, \
+             trade_count, version) SELECT toDateTime('2024-01-01 00:00:00'), '{code}', \
+             '{issuer}', '', 'XLM', '', '', 'sdex', 1, 1, 1, 1, 1, 1, 1"
+        )
+    };
+    // STW also sits under a clean old id, whose rows the copy kept: a row under
+    // STW's new id proves nothing about the colliding rows.
     exec(
         &c,
         &format!(
-            "INSERT INTO {db}.price_ohlcv_1m (timestamp, base_code, base_issuer, base_contract, \
-             quote_code, quote_issuer, quote_contract, source, open, high, low, close, vwap, \
-             trade_count, version) SELECT toDateTime('2024-01-01 00:00:00'), 'STW', 'GSTW', '', \
-             'XLM', '', '', 'sdex', 1, 1, 1, 1, 1, 1, 1"
+            "INSERT INTO {db}.{MAP_TABLE} (old_id, new_id, asset_code, issuer_address, \
+             contract_address, status) VALUES (98, {stw}, 'STW', 'GSTW', '', 'mapped')"
         ),
     )
     .await;
+    exec(&c, &row_202401("STW", "GSTW")).await;
+    let copied = postchecks(&c, &db, Postcheck::Month, Some(202401)).await;
+    assert_eq!(
+        copied[1],
+        s("colliding_restored", 0),
+        "a row from a clean old id is not a restored colliding row"
+    );
+    exec(&c, &row_202401("ARBRIDGE", "GARB")).await;
     let restored = postchecks(&c, &db, Postcheck::Month, Some(202401)).await;
     assert_eq!(restored[1], s("colliding_restored", 1));
     let unlisted = postchecks(&c, &db, Postcheck::Month, Some(202403)).await;

@@ -595,10 +595,14 @@ impl Rekey {
                 self.t(&pre)
             ))
             .await?;
+            // Every swap row carries the range: a resumed swap reads it back
+            // from the newest one, whichever row that is.
             self.log(Log {
                 step: "swap",
                 target: t,
                 status: action,
+                range_from: from,
+                range_to: to,
                 ..Log::default()
             })
             .await?;

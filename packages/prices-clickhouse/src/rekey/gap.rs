@@ -185,8 +185,13 @@ pub fn postcheck_sql(set: Postcheck, db: &str) -> Vec<(String, String)> {
         }
         Postcheck::PeriodClose => gaps(set.gap_tiers()),
         Postcheck::Month => {
-            let colliding =
-                format!("SELECT new_id FROM {db}.{MAP_TABLE} WHERE status = '{STATUS_COLLIDING}'");
+            // A new id that some clean old id also maps to already has copied
+            // rows, so it cannot show the colliding rows came back.
+            let colliding = format!(
+                "SELECT new_id FROM {db}.{MAP_TABLE} GROUP BY new_id \
+                 HAVING countIf(status = '{STATUS_COLLIDING}') > 0 \
+                 AND countIf(status IN ('{STATUS_MAPPED}', '{STATUS_SENTINEL}')) = 0"
+            );
             vec![
                 assets_unique,
                 check(

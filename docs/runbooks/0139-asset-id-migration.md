@@ -787,7 +787,7 @@ SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backf
 
 ```sql
 SELECT ifNull(count() = uniqExact(asset_id), 0) AS assets_unique FROM prices.assets FINAL
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_reingest_months WHERE month = {m:UInt32} AND colliding_rows > 0) = 0 OR (SELECT count() FROM prices.price_ohlcv_1m WHERE toYYYYMM(timestamp) = {m:UInt32} AND (asset_id IN (SELECT new_id FROM prices.asset_id_map_0139 WHERE status = 'colliding') OR quote_asset_id IN (SELECT new_id FROM prices.asset_id_map_0139 WHERE status = 'colliding'))) > 0, 0) AS colliding_restored
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_reingest_months WHERE month = {m:UInt32} AND colliding_rows > 0) = 0 OR (SELECT count() FROM prices.price_ohlcv_1m WHERE toYYYYMM(timestamp) = {m:UInt32} AND (asset_id IN (SELECT new_id FROM prices.asset_id_map_0139 GROUP BY new_id HAVING countIf(status = 'colliding') > 0 AND countIf(status IN ('mapped', 'sentinel')) = 0) OR quote_asset_id IN (SELECT new_id FROM prices.asset_id_map_0139 GROUP BY new_id HAVING countIf(status = 'colliding') > 0 AND countIf(status IN ('mapped', 'sentinel')) = 0))) > 0, 0) AS colliding_restored
 SELECT ifNull((SELECT sum(trade_count) FROM prices.price_ohlcv_1d FINAL WHERE toYYYYMM(timestamp) = {m:UInt32}) = (SELECT sum(trade_count) FROM prices.price_ohlcv_1m FINAL WHERE toYYYYMM(timestamp) = {m:UInt32}), 0) AS month_1d_equals_1m
 ```
 
