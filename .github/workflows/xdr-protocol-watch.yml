@@ -13,12 +13,14 @@
 #     protocol newer than our pin AND a stable stellar-xdr for it is on
 #     crates.io, so the bump can be made. Horizon publishes `core_supported_
 #     protocol_version` weeks before the vote; that gap is the lead time.
-#   * WAITING does NOT fail (task 0319): core supports the new protocol but no
-#     stellar-xdr for it is published, so there is nothing to bump to. A red
-#     run, a failure email and an issue are for something someone can act on.
-#     The run stays green, the report says WAITING, and no issue opens until
-#     the crate appears — that day it becomes LAGGING.
-#   * BEHIND (mainnet already voted past our pin) always fails.
+#   * WAITING does NOT fail (tasks 0319, 0325): core supports, or mainnet
+#     already runs, a protocol newer than our pin, but no stellar-xdr for it
+#     is published, so there is nothing to bump to. A red run, a failure email
+#     and an issue are for something someone can act on. The run stays green,
+#     the report says WAITING, and no issue opens until the crate appears —
+#     that day it becomes LAGGING, or BEHIND once mainnet has voted.
+#   * BEHIND (mainnet already voted past our pin and a stable crate for that
+#     protocol is published) always fails.
 #   * A check that could not complete (Horizon or crates.io unreachable) FAILS
 #     too — a scheduled watch that quietly checks nothing is the shape of the
 #     outage being guarded against — but it opens no issue: the failure email
@@ -161,7 +163,7 @@ jobs:
             fi
             case "$REPORT" in
               *"— WAITING: no stellar-xdr"*)
-                msg="Closed as not actionable yet — core supports a newer protocol, but no \`stellar-xdr\` for it is on crates.io, so there is nothing to bump to. A new issue opens the day one is published. [This run]($RUN_URL)." ;;
+                msg="Closed as not actionable yet — core supports, or mainnet already runs, a newer protocol, but no \`stellar-xdr\` for it is on crates.io, so there is nothing to bump to. A new issue opens the day one is published. [This run]($RUN_URL)." ;;
               *)
                 msg="Resolved — the pinned \`stellar-xdr\` is level with mainnet again. Closed automatically by [this run]($RUN_URL)." ;;
             esac
