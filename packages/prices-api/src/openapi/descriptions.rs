@@ -249,6 +249,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "AssetListItem",
+        "price_basis",
+        "What `price_usd` rests on: `trades` or `offer_dust` (`\"\"` when there is no \
+         price, or on a row the current snapshot definition has not rewritten yet). Same \
+         meaning as `PriceResponse.price_basis`.",
+    ),
+    (
+        "AssetListItem",
         "price_usd",
         "Latest USD price for the asset; `\"0\"` when none is available. Same meaning as \
          `PriceResponse.price_usd`, including the `method` it is attributed to, the age \
@@ -663,6 +670,32 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "PriceResponse",
+        "price_basis",
+        "What `price_usd` rests on, over the same trailing 24-hour window it is read \
+         from:\n\n* `trades` — at least one priced minute in the window has a trade large \
+         enough that its price is not a rounding artefact. Prices taken from a rate read \
+         this too.\n* `offer_dust` — every priced minute in the window rests only on \
+         order-book trades too small to pin a price, each executed at the resting \
+         offer's own limit price. With `a` and `b` the two amounts of a fill in smallest \
+         units (0.0000001), the fill is too small unless `a > 1000`, `b > 1000` and \
+         `(a - 1000) * (b - 1000) >= 1000000`. Roughly: always under 0.0001 of the asset \
+         or of what it was traded for, and up to 0.0002 a side when both sides are \
+         small. \
+         A trade that small usually costs the taker next to nothing, so it shows the \
+         offer existed, not that the price clears; for an asset worth tens of thousands \
+         of dollars a unit it can still be a few dollars. The price is still published \
+         and is often right, but no trade large enough to confirm it exists; `price_xlm` \
+         inherits the same basis.\n* `\"\"` — no price (`price_usd` is `\"0\"`), or a row the current snapshot \
+         definition has not rewritten yet.\n\nIt describes the window, not the single \
+         minute `price_usd` was read from: an asset that traded for real earlier in the \
+         window reads `trades` even if its latest print was a tiny fill. It answers \
+         \"does any trade above the rounding bound support this asset's price\", not \"is this number \
+         right\".\n\nIndependent of `price_status`: an `offer_dust` price can be `priced` \
+         or `carried`. The API does not withhold such prices; to treat them as \
+         unavailable, filter on `offer_dust`.",
+    ),
+    (
+        "PriceResponse",
         "price_usd",
         "Latest USD price for the asset: its own last priced close in the trailing \
          24-hour window, or — for an asset that never trades as the base of a market — a \
@@ -811,11 +844,11 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
 /// the referenced schema. `every_property_has_an_example_or_a_reason` in
 /// `tests/openapi.rs` holds that to the document.
 ///
-/// Every value is from production except `as_of` and `price_status`: task
-/// 0216 had not reached it when these were taken, so they follow 0216's own
-/// example — a `carried` price minutes behind `updated_at`, as the hourly USD
-/// pass leaves it. Replace them from the first live response after 0216's
-/// rollout.
+/// Every value is from production except `as_of`, `price_status` and
+/// `price_basis`: tasks 0216 and 0274 had not reached it when these were
+/// taken, so they follow those tasks' own examples — a `carried` price minutes
+/// behind `updated_at`, as the hourly USD pass leaves it, resting on `trades`.
+/// Replace them from the first live response after those rollouts.
 pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("AmmStream", "status", r#""paused""#),
     ("AmmStream", "last_push_at", r#""2026-07-14T17:54:24Z""#),
@@ -867,6 +900,7 @@ pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("AssetListItem", "method", r#""traded""#),
     ("AssetListItem", "as_of", r#""2026-09-23T08:02:00Z""#),
     ("AssetListItem", "price_status", r#""carried""#),
+    ("AssetListItem", "price_basis", r#""trades""#),
     (
         "AssetListResponse",
         "cursor",
@@ -929,6 +963,7 @@ pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("PriceResponse", "method", r#""traded""#),
     ("PriceResponse", "as_of", r#""2026-09-23T08:02:00Z""#),
     ("PriceResponse", "price_status", r#""carried""#),
+    ("PriceResponse", "price_basis", r#""trades""#),
     ("SdexStream", "status", r#""completed""#),
     ("SdexStream", "current_ledger", r#"1"#),
     ("SdexStream", "start_ledger", r#"1"#),

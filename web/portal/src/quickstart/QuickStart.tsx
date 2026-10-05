@@ -448,6 +448,14 @@ export const RESPONSE_FIELDS: readonly {
     dot: STR,
     meaning: 'priced, carried or unpriced — what kind of price this is',
   },
+  {
+    key: 'price_basis',
+    value: <Tok c={STR}>&quot;trades&quot;</Tok>,
+    raw: '"trades"',
+    dot: STR,
+    meaning:
+      "trades or offer_dust — whether any real trade supports the price, or only tiny fills at an offer's own limit price",
+  },
 ];
 
 export const RESPONSE_TEXT = `{\n${RESPONSE_FIELDS.map(

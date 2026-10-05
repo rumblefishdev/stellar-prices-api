@@ -186,11 +186,26 @@ function getPriority(task) {
   return p ? p.replace('priority-', '') : 'medium';
 }
 
-function getAssignee(task) {
+// `assignee:` wins. Otherwise the newest history entry's `who`: tasks write
+// history in either order, so pick by date, and break a date tie in the
+// direction the file is written. An agent (`who: claude`) is never the
+// assignee (task 0327).
+export function getAssignee(task) {
   if (task._dir !== 'active' && task._dir !== 'archive') return null;
+  if (task.assignee) return task.assignee;
   const history = Array.isArray(task.history) ? task.history : [];
-  const lastEntry = history[history.length - 1];
-  return lastEntry?.who || null;
+  if (history.length === 0) return null;
+  const date = (e) => e?.date || '';
+  const newestFirst = date(history[0]) > date(history[history.length - 1]);
+  let newest = null;
+  history.forEach((entry) => {
+    if (!entry?.who || entry.who === 'claude') return;
+    const d = date(entry);
+    if (!newest || d > date(newest) || (d === date(newest) && !newestFirst)) {
+      newest = entry;
+    }
+  });
+  return newest?.who || null;
 }
 
 function extractDescription(content) {
@@ -233,13 +248,20 @@ function generateJSON(tasks) {
   }));
 }
 
-// Main
-const tasks = loadTasks();
-const json = generateJSON(tasks);
+function main() {
+  const tasks = loadTasks();
+  const json = generateJSON(tasks);
 
-writeFileSync(
-  OUT_JSON,
-  JSON.stringify({ generated: new Date().toISOString(), tasks: json }, null, 2),
-);
+  writeFileSync(
+    OUT_JSON,
+    JSON.stringify(
+      { generated: new Date().toISOString(), tasks: json },
+      null,
+      2,
+    ),
+  );
 
-console.log(`board.json generated (${tasks.length} tasks)`);
+  console.log(`board.json generated (${tasks.length} tasks)`);
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) main();

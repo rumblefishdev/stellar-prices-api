@@ -85,13 +85,24 @@ def state(months, tmp):
     return st
 
 
+TIER_TABLES = [f"price_ohlcv_{t}" for t in ("1m", "15m", "1h", "4h", "1d", "1w", "1M")]
+
+
+def pf_columns(sql):
+    """Three pf_* columns on every tier and on its __pre0139 copy; count what the SQL selects."""
+    tables = TIER_TABLES + [f"{t}__pre0139" for t in TIER_TABLES]
+    if "table LIKE 'price_ohlcv_%'" in sql:
+        return [[str(3 * len(tables))]]
+    return [[str(3 * sum(f"'{t}'" in sql for t in tables))]]
+
+
 def preflight_rules(width, old_baks=(), map_rows=5):
     return [
         ("startsWith(table, 'reingest_0286_bak_')", [[t] for t in old_baks]),
         id_types({"price_ohlcv_1m": width}),
         ("name = 'asset_id_map_0139'", [[str(map_rows)]]),
         ("SELECT version()", [["26.3.10.60", "UTC", "UTC"]]),
-        ("pf_trade_count", [["21"]]),
+        ("pf_trade_count", pf_columns),
         ("CREATE TABLE IF NOT EXISTS", []),
         ("PARTITION 190001", []),
         ("free_space", [[str(2 ** 50)]]),
@@ -140,6 +151,10 @@ class Preflight(unittest.TestCase):
         err, out = preflight(FakeCH(preflight_rules("UInt64")), args(*PF), self.st)
         self.assertIsNotNone(err)
         self.assertRegex(out, r"STOP 0139 binaries")
+
+    def test_the_pf_gate_counts_the_live_tiers_not_their_pre0139_copies(self):
+        err, out = preflight(FakeCH(preflight_rules("UInt64")), args(*PF, "--ack-0139-binaries"), self.st)
+        self.assertIn("ok   phase 1 schema: 21/21 pf columns", out)
 
     def test_post0139_passes_with_the_ack(self):
         err, out = preflight(FakeCH(preflight_rules("UInt64")), args(*PF, "--ack-0139-binaries"), self.st)

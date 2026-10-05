@@ -892,7 +892,8 @@
           "updated_at",
           "method",
           "as_of",
-          "price_status"
+          "price_status",
+          "price_basis"
         ],
         "properties": {
           "asset_code": {
@@ -984,6 +985,11 @@
             "type": "string",
             "description": "What kind of price `price_usd` is: `priced`, `carried` or `unpriced` (`\"\"` on a row the current snapshot definition has not rewritten yet). Same meaning as `PriceResponse.price_status`.",
             "example": "carried"
+          },
+          "price_basis": {
+            "type": "string",
+            "description": "What `price_usd` rests on: `trades` or `offer_dust` (`\"\"` when there is no price, or on a row the current snapshot definition has not rewritten yet). Same meaning as `PriceResponse.price_basis`.",
+            "example": "trades"
           }
         }
       },
@@ -1342,7 +1348,8 @@
           "updated_at",
           "method",
           "as_of",
-          "price_status"
+          "price_status",
+          "price_basis"
         ],
         "properties": {
           "asset": {
@@ -1426,6 +1433,11 @@
             "type": "string",
             "description": "What kind of price `price_usd` is:\n\n* `priced` — nothing newer is outstanding: `as_of` is the newest price-forming minute in the window, or no newer price-forming minute exists. Prices taken from a rate read this too.\n* `carried` — a real priced close, but a newer price-forming minute has not been priced yet. The price is genuine and stale; `as_of` says by how much.\n* `unpriced` — no priced trade in the window, so `price_usd` is `\"0\"`, `method` is `\"\"` and `as_of` is `\"\"`.\n* `\"\"` — this row predates the current snapshot definition and has not been rewritten yet. Not one of the three words above; it can only appear briefly after a schema change.\n\nA minute that traded only dust does not make a price `carried`: `carried` means a price is outstanding, and a dust-only minute forms no price.\n\nUSD values are computed by a pass that runs hourly, so `carried` for up to about an hour after a trade is the ORDINARY state of an actively traded asset, not a fault. A freshness threshold tighter than that cadence rejects the whole market.\n\n`carried` also covers the case where the newer trade happened on a pair with no USD conversion path. Then no newer USD price is coming at all, and `as_of` is the newest minute that could be converted.",
             "example": "carried"
+          },
+          "price_basis": {
+            "type": "string",
+            "description": "What `price_usd` rests on, over the same trailing 24-hour window it is read from:\n\n* `trades` — at least one priced minute in the window has a trade large enough that its price is not a rounding artefact. Prices taken from a rate read this too.\n* `offer_dust` — every priced minute in the window rests only on order-book trades too small to pin a price, each executed at the resting offer's own limit price. With `a` and `b` the two amounts of a fill in smallest units (0.0000001), the fill is too small unless `a > 1000`, `b > 1000` and `(a - 1000) * (b - 1000) >= 1000000`. Roughly: always under 0.0001 of the asset or of what it was traded for, and up to 0.0002 a side when both sides are small. A trade that small usually costs the taker next to nothing, so it shows the offer existed, not that the price clears; for an asset worth tens of thousands of dollars a unit it can still be a few dollars. The price is still published and is often right, but no trade large enough to confirm it exists; `price_xlm` inherits the same basis.\n* `\"\"` — no price (`price_usd` is `\"0\"`), or a row the current snapshot definition has not rewritten yet.\n\nIt describes the window, not the single minute `price_usd` was read from: an asset that traded for real earlier in the window reads `trades` even if its latest print was a tiny fill. It answers \"does any trade above the rounding bound support this asset's price\", not \"is this number right\".\n\nIndependent of `price_status`: an `offer_dust` price can be `priced` or `carried`. The API does not withhold such prices; to treat them as unavailable, filter on `offer_dust`.",
+            "example": "trades"
           }
         }
       },

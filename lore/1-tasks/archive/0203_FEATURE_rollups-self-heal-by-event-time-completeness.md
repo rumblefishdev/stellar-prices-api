@@ -2,8 +2,8 @@
 id: "0203"
 title: "Rollups should self-heal by comparing event-time completeness against the source, instead of trusting a 2-hour clock window"
 type: FEATURE
-status: active
-related_adr: []
+status: completed
+related_adr: ["0317"]
 related_tasks: ["0202", "0142", "0137", "0095", "0200", "0111", "0064"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "rollups", "data-correctness", "resilience", "milestone-M2"]
@@ -33,6 +33,17 @@ history:
       with DEPENDS ON. Mismatch-count metric + alarm in
       rollup-freshness-probe. New ADR. Implementation via /gsd-quick --full.
       Deploy after 0286 phase 3 via the 0142 runbook.
+  - date: "2026-10-05"
+    status: completed
+    who: akot
+    note: >
+      Closed. PR #365 merged 2026-09-29 (f7e40eda) together with [[0143]];
+      the six reconcile MVs created on prod 2026-10-05 09:42 UTC by Adam via
+      runbook 0142. First passes 0.1-1 s, peak 875 MiB (1h); the 1w pass
+      rewrote 9,664 buckets, so the change took effect rather than no-opping.
+      Catch-up criterion accepted by Adam as met by the 7-day bound, 40% peak
+      memory and a manual preroll-live-gap.sql beyond 7 days. ADR 0317.
+      Re-ingests now stop the reconcile MVs first (runbook §1a).
 ---
 
 # Rollups self-heal by event-time completeness, not by a clock window
@@ -157,16 +168,19 @@ correctness machinery.
 
 ## Acceptance Criteria
 
-- [ ] A stall longer than the current window self-heals with no operator action,
+- [x] A stall longer than the current window self-heals with no operator action,
       demonstrated by test: stop writes, resume with back-dated rows, assert
       every tier converges to the `_1m FINAL` totals
-- [ ] The rebuild is selected by **event time**, proven by a test where arrival
+- [x] The rebuild is selected by **event time**, proven by a test where arrival
       order is reversed relative to event order
-- [ ] A partially-built bucket that later receives more source data is rebuilt
+- [x] A partially-built bucket that later receives more source data is rebuilt
       — the [[0202]] failure mode, pinned as a regression test
-- [ ] Completeness signal exists and is alarmable — a hole behind a healthy tip
+- [x] Completeness signal exists and is alarmable — a hole behind a healthy tip
       is detected (0137 cannot do this today)
-- [ ] Verified non-vacuous: restore each defect, confirm the matching test fails
-- [ ] Catch-up over a multi-day gap is chunked and bounded in memory
-- [ ] 0142's DROP/CREATE path used, and the change verified to have actually
-      taken effect on prod rather than silently no-opping
+- [x] Verified non-vacuous: restore each defect, confirm the matching test fails
+- [x] Catch-up over a multi-day gap is chunked and bounded in memory — accepted
+      by Adam as the 7-day window, 2.26 GiB worst-case peak (40% of the quota) and
+      a manual `preroll-live-gap.sql` beyond 7 days
+- [x] 0142's DROP/CREATE path used, and the change verified to have actually
+      taken effect on prod rather than silently no-opping — 2026-10-05: 13 views
+      Scheduled, the 1w pass rewrote 9,664 buckets

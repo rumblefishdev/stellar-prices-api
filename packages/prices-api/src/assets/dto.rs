@@ -111,6 +111,32 @@ pub struct PriceResponse {
     /// distinguishable here — "does this quote have a conversion path" is not
     /// data this snapshot holds (task 0147).
     pub price_status: String,
+    /// What `price_usd` rests on (task 0274), over the same 24-hour window it
+    /// is read from:
+    ///
+    /// * `"trades"` — at least one priced candle in the window has a trade
+    ///   large enough that its price is not rounding (a measured rate reads
+    ///   this too).
+    /// * `"offer_dust"` — every priced candle in the window rests only on
+    ///   order-book trades below the ingest's rounding bound, each executed at
+    ///   the resting offer's own limit price. With `a` and `b` the two amounts
+    ///   in smallest units, a fill clears the bound only when `a > 1000`,
+    ///   `b > 1000` and `(a - 1000)(b - 1000) >= 1_000_000`: always flagged
+    ///   under 0.0001 on either side, and up to 0.0002 a side when both are
+    ///   small (1 999 / 2 000 is flagged). Such a trade shows the offer existed, not that the price
+    ///   clears: the price is published and is often right, but no trade large
+    ///   enough to confirm it exists. For a dear asset these are not pennies —
+    ///   at $84k a unit the bound is about $8.50 (BTC `GBVFOW…`, measured
+    ///   2026-09-30). `price_xlm` inherits the same basis.
+    /// * `""` — no price (`price_usd` is `"0"`), or a row the snapshot's current
+    ///   definition has not rewritten yet. Not a vocabulary word.
+    ///
+    /// It describes the WINDOW, not the minute `price_usd` was read from: an
+    /// asset with a real trade earlier in the window reads `"trades"` even when
+    /// its latest print was a 1-stroop fill (a price-choice question, not this
+    /// field's). Independent of `price_status`: an `"offer_dust"` price can be
+    /// `"priced"` or `"carried"`.
+    pub price_basis: String,
 }
 
 /// One `sources` entry, as `toJSONString` in the current-price MV writes it.
@@ -252,6 +278,7 @@ impl PriceResponse {
             method: row.method,
             as_of: row.as_of,
             price_status: row.price_status,
+            price_basis: row.price_basis,
         }
     }
 }
@@ -324,6 +351,10 @@ pub struct AssetListItem {
     /// What kind of price this is; same vocabulary as
     /// [`PriceResponse::price_status`].
     pub price_status: String,
+    /// What the price rests on; same vocabulary as
+    /// [`PriceResponse::price_basis`]. On this row it also bounds
+    /// `market_cap_usd`'s surfaces' reading of `price_usd`.
+    pub price_basis: String,
 }
 
 /// `GET /assets` paginated response.
