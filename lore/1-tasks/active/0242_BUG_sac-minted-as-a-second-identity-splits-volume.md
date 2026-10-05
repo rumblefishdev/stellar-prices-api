@@ -203,6 +203,12 @@ Prior art: soroban-block-explorer ADR 0051 (a SAC is a facet of the classic asse
   - The heal is a runbook section, with no window.
   - The new `events-backfill` binary is swapped on ch-prod-01 only between phase-3 stages, never during an `amm` step.
 
+Plan choices confirmed by Adam on 2026-10-05 (GSD plan `261005-htu`):
+
+- **PC3 Fail closed at the live cold start.** If the Lambda cannot read BE's `is_sac` set, Init fails, like the other cold reads. An empty set would mint `Contract` identities, which D2 forbids. The cost: if BE's `default.soroban_contracts` breaks, live ingest stops until it is fixed.
+- **PC6 A summary without the new line passes.** The orchestrator STOPs only when `unproven sac swaps:` is present and non-zero. A binary built before 0242 prints no such line, so phase 3 keeps running on it, which is why D4 holds.
+- **PC9 Residual rows of a SAC with no classic.** Such a row is the only copy of its trades, so it is never deleted silently. The operator either re-runs that month through phase 3 or records the loss on this task. The rows are copied beside the 72 metadata rows for rollback. The 202404 Z/Q row, from stage B before the seed, is the expected case.
+
 Open: **U3**. About 75.6k Soroswap swaps on BLTA/BLTB/BLTC/PPRIME/LumenJoule produce no candle under any id, and the cause is not established. It must be settled before AC3 promises numbers for those assets.
 
 ## Acceptance Criteria
