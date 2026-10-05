@@ -674,7 +674,12 @@ def require_transport_flag(a):
             "(run it on the CH host as `default`) or --amm wait + amm-done.")
 
 
-def amm_summary(text, logfile):
+# events-backfill's task-0242 line (run.rs UNPROVEN_SAC_LABEL). Absent from a
+# pre-0242 binary, which passes (D4: phase 3 is not held for the code).
+UNPROVEN_SAC_LABEL = "unproven sac swaps:"
+
+
+def amm_summary(text, logfile, *, dry_run):
     """Read events-backfill's closing summary, or Stop naming what is missing.
 
     Called after the --dry-run pass as well as the write, so a binary whose
@@ -691,6 +696,17 @@ def amm_summary(text, logfile):
                        f"see {logfile}. A binary without it predates task 0304: rebuild events-backfill "
                        "from develop (on the CH host for --amm ssh)")
         found[key] = int(hit.group(1))
+    hit = re.search(rf"^{re.escape(UNPROVEN_SAC_LABEL)}\s*(\d+)", text, re.M)
+    found["unproven_sacs"] = int(hit.group(1)) if hit else None
+    if found["unproven_sacs"]:
+        m = Path(logfile).parent.name
+        state = (f"This was the --dry-run pass: no AMM candle was written, but {m}'s 1m partition is "
+                 "already dropped and holds SDEX-only candles. Fix it today and `run` again, or "
+                 f"`rollback {m}`" if dry_run else
+                 f"This was the write pass: {m}'s AMM candles are in without those swaps. `rollback {m}`")
+        raise Stop(f"events-backfill skipped {found['unproven_sacs']} swaps because their SAC could not be "
+                   f"proven (task 0242 D2) — the contracts are in the WARN in {logfile}. {state}: "
+                   "docs/runbooks/0242-sac-identity-heal.md §4c")
     return found
 
 
@@ -915,7 +931,7 @@ def run_month(a, ch, st, m, pw):
                     code, text = stream(cmd, env, mdir / "events-backfill.log")
                     if code != 0 or "=== events-backfill complete ===" not in text:
                         raise Stop(f"events-backfill {' '.join(flag)} exit {code} — see {mdir}/events-backfill.log")
-                    summary = amm_summary(text, mdir / "events-backfill.log")
+                    summary = amm_summary(text, mdir / "events-backfill.log", dry_run=bool(flag))
                 record_amm_summary(ms, m, summary)
             elif a.amm == "ssh":
                 for flag in (" --dry-run", ""):
@@ -924,7 +940,7 @@ def run_month(a, ch, st, m, pw):
                                         mdir / "events-backfill.log", stdin_text=pw)
                     if code != 0 or "=== events-backfill complete ===" not in text:
                         raise Stop(f"events-backfill{flag} exit {code} — see {mdir}/events-backfill.log")
-                    summary = amm_summary(text, mdir / "events-backfill.log")
+                    summary = amm_summary(text, mdir / "events-backfill.log", dry_run=bool(flag))
                 record_amm_summary(ms, m, summary)
             else:
                 marker = mdir / "amm.done"

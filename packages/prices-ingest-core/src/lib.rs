@@ -54,7 +54,10 @@ pub use price::{
 };
 pub use registry_io::PoolRegistryRow;
 pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
-pub use sac_proof::{BE_DATABASE, load_sac_contracts};
+pub use sac_proof::{
+    BE_DATABASE, PRICES_DATABASE, SacPreload, SacProofRow, apply_sac_proofs, load_sac_contracts,
+    load_sac_proofs, preload_sac_resolver,
+};
 pub use safe_log::safe_response_token;
 pub use soroban::{
     LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, learn_factory_event,

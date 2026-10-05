@@ -21,9 +21,9 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, DEFAULT_BACKOFF_MS, LedgerSoroban, OhlcvCandle, OhlcvWriter,
-    RawSorobanEvent, Registries, UnresolvedPool, UnresolvedPoolSwap, process_soroban_event_rows,
-    retry_with_backoff,
+    AssetRegistry, BE_DATABASE, CandleAccumulator, DEFAULT_BACKOFF_MS, LedgerSoroban, OhlcvCandle,
+    OhlcvWriter, PRICES_DATABASE, RawSorobanEvent, Registries, UnresolvedPool, UnresolvedPoolSwap,
+    preload_sac_resolver, process_soroban_event_rows, retry_with_backoff,
 };
 
 use crate::cli::Cli;
@@ -69,6 +69,7 @@ fn accumulate_ledger(
     ticks_by_source: &mut HashMap<&'static str, u64>,
     failed_by_source: &mut HashMap<&'static str, u64>,
     raw_unresolved: &mut Vec<UnresolvedPoolSwap>,
+    sac_unproven: &mut Vec<String>,
 ) {
     let mut out = LedgerSoroban::default();
     process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
@@ -80,6 +81,7 @@ fn accumulate_ledger(
         *failed_by_source.entry(source).or_default() += *swaps as u64;
     }
     raw_unresolved.extend(out.unresolved);
+    sac_unproven.extend(out.sac_unproven);
 
     // Minute-START timestamp of this ledger — the same key the accumulator buckets
     // on (`(closed_at/60)*60`), NOT the minute index; flush_older_than compares
@@ -184,6 +186,25 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // write only newly seen assets and resolve every seeded pool.
     let existing_assets = writer.load_assets().await?;
     let mut assets = AssetRegistry::from_existing(existing_assets);
+    // Task 0242 D1: BE's is_sac set, then one proof per SAC `assets` cannot
+    // resolve, both before the first chunk (this path reads no SAC events).
+    // Dry-run too, so its `unproven sac swaps` matches the write's.
+    // `execute_preloads_the_sac_resolver_before_the_first_chunk` pins this call.
+    let sac =
+        preload_sac_resolver(writer.client(), BE_DATABASE, PRICES_DATABASE, &mut assets).await?;
+    info!(
+        sac_contracts = sac.candidates,
+        sac_proofs = sac.proofs,
+        sacs_verified = sac.verified,
+        sacs_rejected = sac.rejected,
+        "preloaded SAC proofs (task 0242)"
+    );
+    if sac.rejected > 0 {
+        warn!(
+            sacs_rejected = sac.rejected,
+            "SAC proofs that did not verify: their swaps are skipped, not minted (task 0242 D2)"
+        );
+    }
     let mut reg = reprice_registry(writer.load_pool_registry().await?)?;
 
     // Every AMM pool has a `venue` entry (the registry superset); its strkeys are
@@ -214,6 +235,8 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     let mut total_events: u64 = 0;
     let mut total_candles: u64 = 0;
     let mut raw_unresolved: Vec<UnresolvedPoolSwap> = Vec::new();
+    // One entry per swap skipped on an is_sac leg with no proof (task 0242 D2).
+    let mut sac_unproven: Vec<String> = Vec::new();
     // Ledgers present in soroban_events but absent from default.ledgers (no close
     // time): their events are skipped but COUNTED, so the gap is visible instead
     // of a silent LEFT-JOIN drop.
@@ -266,6 +289,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                         &mut ticks_by_source,
                         &mut failed_by_source,
                         &mut raw_unresolved,
+                        &mut sac_unproven,
                     );
                 }
                 cur_ledger = Some(r.ledger_sequence);
@@ -359,6 +383,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 &mut ticks_by_source,
                 &mut failed_by_source,
                 &mut raw_unresolved,
+                &mut sac_unproven,
             );
         }
 
@@ -428,6 +453,18 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         );
     }
 
+    if !sac_unproven.is_empty() {
+        let contracts: std::collections::BTreeSet<&str> =
+            sac_unproven.iter().map(String::as_str).collect();
+        let sample: Vec<&str> = contracts.iter().copied().take(20).collect();
+        warn!(
+            swaps = sac_unproven.len(),
+            contracts = contracts.len(),
+            ?sample,
+            "swaps skipped on SACs with no proof (task 0242 D2); the month is NOT complete"
+        );
+    }
+
     if ledgers_missing_close > 0 {
         warn!(
             ledgers_missing_close,
@@ -456,6 +493,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         unresolved_genuine.len(),
         dropped_swaps,
         apply_order_fallbacks,
+        sac_unproven.len() as u64,
     );
     info!(
         elapsed_s = run_start.elapsed().as_secs(),
@@ -558,6 +596,9 @@ pub(crate) fn resolve_transaction_index(application_order: i16) -> (u16, bool) {
     (application_order as u16, false)
 }
 
+/// Summary label the 0286 orchestrator reads (`tools/scripts/reingest_0286.py`).
+pub(crate) const UNPROVEN_SAC_LABEL: &str = "unproven sac swaps:";
+
 #[allow(clippy::too_many_arguments)]
 fn print_summary(
     ticks_by_source: &HashMap<&'static str, u64>,
@@ -568,6 +609,7 @@ fn print_summary(
     unresolved_contracts: usize,
     dropped_swaps: u64,
     apply_order_fallbacks: u64,
+    unproven_sac_swaps: u64,
 ) {
     println!();
     println!("=== events-backfill complete ===");
@@ -596,6 +638,9 @@ fn print_summary(
     // event row, not a missing join row (task 0304). Non-zero means the range
     // is not repaired.
     println!("negative apply order:      {apply_order_fallbacks}");
+    // Always printed, 0 included. Non-zero means swaps were skipped on SACs with
+    // no proof, and the 0286 orchestrator STOPs on it (task 0242 D2).
+    println!("{UNPROVEN_SAC_LABEL:<27}{unproven_sac_swaps}");
 }
 
 /// The registry the reprice reads events for: the LOADED `pool_registry` plus
@@ -693,6 +738,7 @@ mod tests {
                 ticks,
                 &mut HashMap::new(),
                 unresolved,
+                &mut Vec::new(),
             );
         }
 
@@ -780,6 +826,92 @@ mod tests {
             (0, true),
             "the whole negative range degrades, not just -1"
         );
+    }
+
+    // ---- task 0242: a SAC leg is proven or skipped, never minted ----------
+
+    const XCR_ISSUER: &str = "GBLJBHWVORDFI4J7CLBDRPECMYT3XO5S6GERXGC74VXOJMZPLI6ZU3S7";
+    const XCR_SAC: &str = "CDJQXBQO5ICVQUPHZHW7SHOM56K2UNNPPAIXUUSA3XACEI6Q4JQLXNVI";
+
+    fn xcr() -> prices_ingest_core::AssetIdentity {
+        prices_ingest_core::AssetIdentity::Credit {
+            code: "XCR".to_string(),
+            issuer: XCR_ISSUER.to_string(),
+        }
+    }
+
+    /// One XLM-SAC / XCR-SAC Soroswap swap through `accumulate_ledger`: the
+    /// candles of its minute and the run's unproven list.
+    fn xcr_swap(assets: &mut AssetRegistry) -> (Vec<OhlcvCandle>, Vec<String>) {
+        let mut reg = Registries::new();
+        reg.venue.insert(POOL.to_string(), Venue::Soroswap);
+        reg.soroswap
+            .register(POOL.to_string(), T0.to_string(), XCR_SAC.to_string());
+        let mut accs = HashMap::new();
+        let mut unproven = Vec::new();
+        accumulate_ledger(
+            100,
+            1_700_000_000,
+            &[soroswap_swap(100, 1_700_000_000)],
+            &mut reg,
+            assets,
+            &mut accs,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut Vec::new(),
+            &mut unproven,
+        );
+        let candles = accs
+            .values_mut()
+            .flat_map(CandleAccumulator::flush_all)
+            .collect();
+        (candles, unproven)
+    }
+
+    #[test]
+    fn a_swap_on_an_unproven_sac_is_skipped_and_counted_and_a_proven_one_prices() {
+        let candidates = || std::collections::HashSet::from([XCR_SAC.to_string()]);
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        assert_eq!(assets.sac_address_of(&xcr()).as_deref(), Some(XCR_SAC));
+        assets.set_sac_candidates(candidates());
+        let (candles, unproven) = xcr_swap(&mut assets);
+        assert!(candles.is_empty(), "no tick");
+        assert_eq!(unproven, [XCR_SAC]);
+        assert_eq!(assets.pending_new().count(), 0, "nothing interned");
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        assets.set_sac_candidates(candidates());
+        let proof = prices_ingest_core::SacProofRow {
+            contract_id: XCR_SAC.to_string(),
+            sep11: format!("XCR:{XCR_ISSUER}"),
+        };
+        assert_eq!(
+            prices_ingest_core::apply_sac_proofs(&mut assets, &[proof]),
+            (1, 0)
+        );
+        let (candles, unproven) = xcr_swap(&mut assets);
+        assert!(unproven.is_empty());
+        assert_eq!(candles.len(), 1, "one tick, one candle");
+        assert_eq!(
+            (&candles[0].base, &candles[0].quote),
+            (&xcr(), &prices_ingest_core::AssetIdentity::Native)
+        );
+    }
+
+    /// `execute` needs BE's and our tables, so no test runs it. It must arm the
+    /// registry before its first chunk: without the preload every swap on a SAC
+    /// whose classic is not in `assets` is skipped, and with the candidates gone
+    /// too it would be minted again (task 0242 D1/D2). `sac_proof_it` runs the
+    /// preload itself against real tables.
+    #[test]
+    fn execute_preloads_the_sac_resolver_before_the_first_chunk() {
+        let src = include_str!("run.rs");
+        let execute = &src[src.find("pub async fn execute(").unwrap()..];
+        let preload = execute.find("preload_sac_resolver(").unwrap();
+        let first_chunk = execute.find("stream_chunk(").unwrap();
+        assert!(preload < first_chunk, "the preload runs before any chunk");
     }
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
