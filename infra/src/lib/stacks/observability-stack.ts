@@ -340,6 +340,11 @@ export class ObservabilityStack extends cdk.Stack {
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
   public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
   /**
+   * Task 0242 D2: live skipped trades on a token BE flags `is_sac` that no SAC
+   * event proved, rather than minting it as a second identity.
+   */
+  public readonly ledgerProcessorSacUnprovenAlarm: cloudwatch.Alarm;
+  /**
    * Task 0100: the weekly coverage sweep found swap/trade emitters in neither
    * `pool_registry` nor the committed allow-list (layer 3).
    */
@@ -386,6 +391,12 @@ export class ObservabilityStack extends cdk.Stack {
    * 0139): a writer sent ids, not identities. Keyed by count.
    */
   public readonly assetIdOrphanCandleAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * Contract identities in `assets FINAL` that are SACs (task 0242 D6). Actions
+   * behind `opsAlarms.sacContractIdentitiesActionsEnabled`: the baseline is 36
+   * until the heal.
+   */
+  public readonly sacContractIdentitiesAlarm: cloudwatch.Alarm;
   /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
@@ -1468,6 +1479,38 @@ export class ObservabilityStack extends cdk.Stack {
     this.ledgerProcessorUnregisteredPoolAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorUnregisteredPoolAlarm.addOkAction(snsAction);
 
+    // Task 0242 D2 — live skipped trades on an unproven SAC. A SAC leg resolves
+    // to its classic asset only when the same transaction carries the SAC's own
+    // transfer/mint/burn/clawback event; a token BE flags `is_sac` with no such
+    // proof is skipped rather than minted as a second identity. Same shape as
+    // the 0291 alarm above: `SacUnprovenSkipped` is published only when
+    // non-zero.
+    this.ledgerProcessorSacUnprovenAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorSacUnprovenAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-sac-unproven`,
+        alarmDescription:
+          'The ledger-processor skipped AMM trades with a leg that BE flags is_sac (default.soroban_contracts) but that no SAC transfer/mint/burn/clawback event in the same transaction proved (task 0242 D2). Those trades produce no candle; they are skipped rather than minted as a second, Contract identity of the asset. The WARN "skipped trades on is_sac contracts with no SAC proof (task 0242)" lists the contracts. Fix: docs/runbooks/0242-sac-identity-heal.md.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'SacUnprovenSkipped',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were skipped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorSacUnprovenAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorSacUnprovenAlarm.addOkAction(snsAction);
+
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage
     // sweep looks at EVERY contract emitting swap/trade-shaped events over a
@@ -1749,6 +1792,40 @@ export class ObservabilityStack extends cdk.Stack {
         `${count} or more price_ohlcv_1m candles of the last 2 h carry an asset_id or quote_asset_id that prices.assets does not hold. Since task 0139 a writer sends the identity and ClickHouse derives both ids; an orphan means a writer sent ids itself (a stale pre-0139 binary or Lambda version: RowBinary is width-exact, so an old u32 writer misaligns rather than failing) or wrote candles before their assets rows. Stop that writer first, then find it from the rows' source column. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
       zeroLadder,
     );
+
+    // SAC contract identities (task 0242 D6). A SAC is a facet of its classic
+    // asset; a contract row of assets FINAL that is a SAC is the 0242 defect.
+    // One alarm, not the ladder: usdSanityRungs takes no actionsEnabled, and the
+    // actions must start off because production reads 36 until the heal
+    // (13 split pairs + 23 SACs whose classic was never held, 2026-10-05).
+    // Actions off does not stop evaluation: the alarm sits in ALARM, red on the
+    // Row-0 strip, until the heal. It stays on the strip, which shows every
+    // alarm (SCF Tranche 3 AC 8); the description says the red is expected.
+    this.sacContractIdentitiesAlarm = new cloudwatch.Alarm(
+      this,
+      'SacContractIdentitiesAlarm',
+      {
+        alarmName: `prices-${config.envName}-sac-contract-identities`,
+        alarmDescription:
+          "Contract rows of prices.assets FINAL whose address is a SAC: the sac_address of a classic row, or a contract BE flags is_sac in default.soroban_contracts (task 0242 D6). Baseline 36 until the 0242 heal, which is why actions start disabled (opsAlarms.sacContractIdentitiesActionsEnabled) and the state reads ALARM until then: that red tile on the dashboard's alarm strip is expected, not an incident. After the heal it reads 0, and a non-zero value means a SAC was minted as a Contract identity: a second asset_id for an asset we hold, splitting its candles and volume. Find it: SELECT asset_id, contract_address FROM prices.assets FINAL WHERE contract_address IN (SELECT sac_address FROM prices.assets WHERE sac_address != '') OR contract_address IN (SELECT contract_id FROM default.soroban_contracts WHERE is_sac). Runbook: docs/runbooks/0242-sac-identity-heal.md.",
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'SacContractIdentities',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        actionsEnabled: config.opsAlarms.sacContractIdentitiesActionsEnabled,
+      },
+    );
+    this.sacContractIdentitiesAlarm.addAlarmAction(snsAction);
+    this.sacContractIdentitiesAlarm.addOkAction(snsAction);
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
     // `prices-clickhouse-drift` and NOTHING RAN IT — a check nobody runs is a

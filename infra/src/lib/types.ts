@@ -478,6 +478,14 @@ export interface EnvironmentConfig {
      */
     readonly usdSanityEscalationCounts: readonly number[];
     /**
+     * Actions of the `SacContractIdentities` alarm (task 0242 D6). Starts
+     * `false`: production holds 36 SAC contract identities until the 0242 heal,
+     * so an enabled alarm would latch from its first datum. The last step of
+     * docs/runbooks/0242-sac-identity-heal.md sets it `true`. A config key, not
+     * a console toggle, because the next CDK deploy would undo the toggle.
+     */
+    readonly sacContractIdentitiesActionsEnabled: boolean;
+    /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
@@ -1079,6 +1087,11 @@ export function validateConfig(config: EnvironmentConfig): void {
       // gets muted.
       errors.push(
         `opsAlarms.currentPricesFreshnessSeconds must be an integer above the healthy peak of ${CURRENT_PRICES_HEALTHY_PEAK_SECONDS}s (60 s refresh interval + 40 s worst accepted refresh), or the alarm fires on a healthy table; got: ${ops.currentPricesFreshnessSeconds}`,
+      );
+    }
+    if (typeof ops.sacContractIdentitiesActionsEnabled !== 'boolean') {
+      errors.push(
+        `opsAlarms.sacContractIdentitiesActionsEnabled must be a boolean, got: ${ops.sacContractIdentitiesActionsEnabled}`,
       );
     }
     if (

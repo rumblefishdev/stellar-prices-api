@@ -18,8 +18,9 @@
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use rollup_freshness_probe::asset_id_uniqueness::{
-        AssetIdCounts, OrphanCandleCounts, collisions_metric, collisions_query,
-        orphan_candles_metric, orphan_candles_query,
+        AssetIdCounts, BE_DATABASE, OrphanCandleCounts, SacContractCounts, collisions_metric,
+        collisions_query, orphan_candles_metric, orphan_candles_query,
+        sac_contract_identities_metric, sac_contract_identities_query,
     };
     use rollup_freshness_probe::current_prices::{
         CurrentPricesAge, current_prices_age_query, current_prices_metric,
@@ -56,7 +57,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // secret/endpoint surfaces on the first query (the invocation fails and the
     // probe's error alarm fires) — no separate `SELECT 1` liveness probe is
     // needed. The `ingestion` mTLS identity (prices_writer) has SELECT on
-    // prices.*, which is all this probe needs.
+    // prices.*, and on `default.soroban_contracts`, which the SAC-identity
+    // read joins (task 0242).
     //
     // ⚠️ This comment used to claim the probe touches no `system.*` table. Since
     // task 0204 gap 3 it reads `system.tables`, and that is fine — `system.tables`
@@ -74,6 +76,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let zero_invariant_query = Arc::new(zero_invariant_query());
     let collisions_query = Arc::new(collisions_query());
     let orphan_candles_query = Arc::new(orphan_candles_query());
+    let sac_contract_identities_query = Arc::new(sac_contract_identities_query(BE_DATABASE));
     let refresh_waits_query = Arc::new(refresh_waits_query("prices"));
     // The mismatch reads are the only ones here whose cost grows with a week
     // of the child tier (the 15m read scans seven days of `_1m`: 0.7–4.0 s on
@@ -103,6 +106,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let zero_invariant_query = zero_invariant_query.clone();
         let collisions_query = collisions_query.clone();
         let orphan_candles_query = orphan_candles_query.clone();
+        let sac_contract_identities_query = sac_contract_identities_query.clone();
         let refresh_waits_query = refresh_waits_query.clone();
         let mismatch_queries = mismatch_queries.clone();
         let environment = environment.clone();
@@ -398,9 +402,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("zero-invariants read: {e}")),
             }
 
-            // ---- 5b. Asset-id uniqueness (task 0139) ----------------------
+            // ---- 5b. Asset-id uniqueness (tasks 0139, 0242) ---------------
             //
-            // Two independent reads, after the zero invariants for the same
+            // Three independent reads, after the zero invariants for the same
             // reason: they grow with the data (the registry, and the live tip
             // of `_1m` against it). A refusal is an empty read, recorded as a
             // failure rather than published as a healthy 0.
@@ -444,6 +448,31 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     }
                 }
                 Err(e) => failures.push(format!("asset-id-orphans read: {e}")),
+            }
+
+            let mut sac_counts: Option<SacContractCounts> = None;
+            match ch
+                .query(&sac_contract_identities_query)
+                .fetch_one::<SacContractCounts>()
+                .await
+            {
+                Ok(counts) => {
+                    sac_counts = Some(counts);
+                    match sac_contract_identities_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("sac-contract-identities publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => {
+                            failures.push(format!("sac-contract-identities: {refusal}"))
+                        }
+                    }
+                }
+                Err(e) => failures.push(format!("sac-contract-identities read: {e}")),
             }
 
             // ---- 6. Coarse buckets disagreeing with their source (0203) ---
@@ -592,6 +621,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "ids": id_counts.map(|c| c.ids),
                     "orphan_candles": orphan_counts.map(|c| c.orphans),
                     "orphan_scanned": orphan_counts.map(|c| c.scanned),
+                    "sac_contract_rows": sac_counts.map(|c| c.sac_rows),
+                    "sac_contract_scanned": sac_counts.map(|c| c.scanned),
+                    "be_sac_contracts": sac_counts.map(|c| c.be_sacs),
                 },
                 "mv_drift": {
                     "critical": drift_critical,
