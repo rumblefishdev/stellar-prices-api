@@ -30,8 +30,10 @@
 >    Developers server. A key is issued at once on the free plan, one request a
 >    second and a hundred thousand a month, and the dashboard shows it with its
 >    plan, limits and usage. The quick start matches the published contract,
->    and the portal carries its own privacy policy. `<TO FILL: the recorded
-walk — sign-in, key, a /v1 call, revocation — with its timestamps>`
+>    and the portal carries its own privacy policy. The video records the walk
+>    on production on 2026-10-05: sign-in at 13:00:40 UTC, a `/v1` call with the
+>    key at 13:01:28 (200), the key revoked at 13:06:01 and refused with a 403
+>    from 13:07.
 > 2. **A published contract.** The API serves its own OpenAPI 3.1.0 document
 >    at `/api-docs-json`, generated from the handler code, with 74
 >    production-shaped examples. CI lints it on every Rust change with
@@ -125,8 +127,9 @@ walk — sign-in, key, a /v1 call, revocation — with its timestamps>`
 >    Reproduce: `npm run openapi:lint`
 > 3. **Portal accessible; self-service key flow works.**
 >    `https://sorobanscan.rumblefish.dev/prices-api/`, anonymous since
->    2026-09-23; Discord sign-in for keys. `<TO FILL: the recorded walk with
-its timestamps>`
+>    2026-09-23; Discord sign-in for keys. Met: recorded on 2026-10-05,
+>    sign-in 13:00:40 UTC, `/v1` call 13:01:28 (200), revoked 13:06:01, 403
+>    from 13:07 (evidence AC 3).
 > 4. **Integration suite passes on CI.** Met: first run on `master` after the
 >    release, `https://github.com/rumblefishdev/stellar-prices-api/actions/runs/37298469682`
 >    (2026-10-05): 1,407 unit and 306 ClickHouse integration tests, 0 failed.

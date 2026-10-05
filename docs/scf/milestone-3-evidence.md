@@ -36,17 +36,17 @@ still land on it.
 
 State of the nine Tranche 3 acceptance criteria on 2026-10-01:
 
-| AC  | Criterion (short)                                           | State on 2026-10-01                                                                                                                                                             |
-| --- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met: 2015-11-18.** Liveness graded on the amended wording (deviations §1); every signal OK on 10-01                                                                     |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | **Met on 2026-10-05:** lint clean on the release run on `master` (Redocly CLI 2.44.0, no errors or warnings); reference at `…/prices-api/docs` (deviations §3)                  |
-| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk                                                       |
-| 4   | Integration suite passes on CI, link provided               | **Met:** 1,407 unit and 306 ClickHouse integration tests pass on the release run on `master` (10-05), linked in §5; PR CI runs the suite since #327 (09-22)                     |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §4                                                 |
-| 6   | Security checklist signed off                               | **Met.** ClickHouse over mTLS only, secrets in Secrets Manager, inputs validated, no `Action: "*"` or `service:*`; every `Resource: "*"` statement inventoried in §5            |
-| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo public, `README.md` → `infra/README.md` on `develop`, on `master` from the next release. Not run in an empty account |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, all 83 alarms OK on 10-05. Access on request for each named reviewer, through IAM Identity Center                                       |
-| 9   | 7-day post-launch report                                    | **Met on 2026-09-30: uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live signals (deviations §2)  |
+| AC  | Criterion (short)                                           | State on 2026-10-01                                                                                                                                                                      |
+| --- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met: 2015-11-18.** Liveness graded on the amended wording (deviations §1); every signal OK on 10-01                                                                              |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | **Met on 2026-10-05:** lint clean on the release run on `master` (Redocly CLI 2.44.0, no errors or warnings); reference at `…/prices-api/docs` (deviations §3)                           |
+| 3   | Portal accessible; self-service key flow works              | **Met:** recorded walk on 2026-10-05, sign-in 13:00:40, `/v1` call 13:01:28 (200), key revoked 13:06:01, 403 from 13:07 (UTC); portal public since 09-23, guild-gated since 09-02 (0254) |
+| 4   | Integration suite passes on CI, link provided               | **Met:** 1,407 unit and 306 ClickHouse integration tests pass on the release run on `master` (10-05), linked in §5; PR CI runs the suite since #327 (09-22)                              |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §4                                                          |
+| 6   | Security checklist signed off                               | **Met.** ClickHouse over mTLS only, secrets in Secrets Manager, inputs validated, no `Action: "*"` or `service:*`; every `Resource: "*"` statement inventoried in §5                     |
+| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo public, `README.md` → `infra/README.md` on `develop`, on `master` from the next release. Not run in an empty account          |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, all 83 alarms OK on 10-05. Access on request for each named reviewer, through IAM Identity Center                                                |
+| 9   | 7-day post-launch report                                    | **Met on 2026-09-30: uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live signals (deviations §2)           |
 
 Work items without a numbered criterion are in §6, known issues in §7,
 limitations in §8.
@@ -173,7 +173,7 @@ _To fill:_ a screenshot of `/prices-api/docs`.
 
 ### AC 3 — Onboarding portal accessible; self-service API key request flow functional
 
-**Verdict: _to fill_ — the recorded walk is not in this document yet.** The
+**Verdict: met; the walk below is in the video (scene 2).** The
 portal is public since 2026-09-23 09:40 CEST, at
 `https://sorobanscan.rumblefish.dev/prices-api/` since 2026-10-02 (`/api/`
 before, which now redirects). The flow is Discord OAuth → eligibility check
@@ -184,8 +184,22 @@ project to run the integration itself (task 0179). A member the guild has not
 screened yet is refused with its own answer (`pending_rules`). The team has run
 through the flow on production several times (task 0164).
 
-_To fill:_ the recorded walk — a sign-in, a key issued, a `/v1` call with it,
-the key revoked — with timestamps.
+**The recorded walk, 2026-10-05** (video scene 2). The two `date -u` lines are on
+screen; the other times come from the portal's log, CloudTrail, X-Ray and the
+gateway's `4XXError` metric. All times UTC.
+
+| step                                        | time               | observed                                                                                                   |
+| ------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
+| sign-in through Discord                     | 13:00:40           | the portal returns the account's key (issued at its first sign-in, 12:37:13; `CreateApiKey` in CloudTrail) |
+| `date -u` on screen                         | 13:01:05           |                                                                                                            |
+| `GET /v1/assets/native/price` with that key | 13:01:28           | 200 and the XLM price (X-Ray)                                                                              |
+| Regenerate                                  | 13:06:01           | the portal revokes the key; `UpdateApiKey` with `/enabled` set to `false` in CloudTrail                    |
+| `date -u` on screen                         | 13:06:09           |                                                                                                            |
+| the same request, twice                     | 13:06:11, 13:06:17 | 200: the gateway still accepted the key while the change propagated                                        |
+| the same request                            | 13:07              | 403 (the gateway's `4XXError` metric gives the minute, not the second)                                     |
+
+The gateway accepted the revoked key for 10 to 16 seconds and refused it within
+the minute.
 
 ### AC 4 — Integration test suite: all tests pass on CI, link provided
 
