@@ -108,7 +108,7 @@
 
 ## Field 3 — Additional Deliverable Verification
 
-> **Evidence package (Google Drive):** `<EVIDENCE_FOLDER_URL>`
+> **Evidence package (Google Drive):** `https://drive.google.com/drive/folders/1XnHTsg1hI7e7XR9z5G1MZ2zuyjVmO2K0?usp=sharing`
 >
 > - Evidence PDF: `<EVIDENCE_PDF_URL>`
 > - Demo video: `https://drive.google.com/file/d/1KTFv9A58sU1FLtnqa4xBYYE8oaCI3DgW/view?usp=sharing`
