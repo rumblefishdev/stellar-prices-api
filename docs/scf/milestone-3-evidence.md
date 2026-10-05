@@ -39,13 +39,13 @@ State of the nine Tranche 3 acceptance criteria on 2026-10-01:
 | AC  | Criterion (short)                                           | State on 2026-10-01                                                                                                                                                             |
 | --- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met: 2015-11-18.** Liveness graded on the amended wording (deviations §1); every signal OK on 10-01                                                                     |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | **Met on 2026-10-05:** lint clean on the release run on `master` (Redocly CLI 2.44.0, no errors or warnings); reference at `…/prices-api/docs` (deviations §4)                  |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | **Met on 2026-10-05:** lint clean on the release run on `master` (Redocly CLI 2.44.0, no errors or warnings); reference at `…/prices-api/docs` (deviations §3)                  |
 | 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk                                                       |
 | 4   | Integration suite passes on CI, link provided               | **Met:** 1,407 unit and 306 ClickHouse integration tests pass on the release run on `master` (10-05), linked in §5; PR CI runs the suite since #327 (09-22)                     |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                                 |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §4                                                 |
 | 6   | Security checklist signed off                               | **Met.** ClickHouse over mTLS only, secrets in Secrets Manager, inputs validated, no `Action: "*"` or `service:*`; every `Resource: "*"` statement inventoried in §5            |
 | 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo public, `README.md` → `infra/README.md` on `develop`, on `master` from the next release. Not run in an empty account |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, all 83 alarms OK on 10-05. Access on request for each named reviewer, through IAM Identity Center (deviations §3)                       |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, all 83 alarms OK on 10-05. Access on request for each named reviewer, through IAM Identity Center                                       |
 | 9   | 7-day post-launch report                                    | **Met on 2026-09-30: uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live signals (deviations §2)  |
 
 Work items without a numbered criterion are in §6, known issues in §7,
@@ -58,7 +58,7 @@ Validation**, weeks 10 to 13. The work it names, and where each stands:
 
 | Work item                                                                 | State                                                                                                                                                                                                   |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §4), with 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                                              |
+| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §3), with 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                                              |
 | Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23, at `…/prices-api/` since 2026-10-02; quick start matches the spec (0163, 0233); privacy policy (0303); Discord sign-in on the Stellar Developers guild since 2026-09-02 (0254) |
 | Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests in CI since 2026-09-22 (task 0275), covering each of the seven `/v1` routes (§5, AC 4)                                                                                      |
 | Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md): all three rates on 2026-09-18 (task 0293)                                                                                        |
@@ -153,7 +153,7 @@ task 0306 it carries a production-shaped example for every field, and the lint
 fails on any example that no longer matches its schema
 (`no-invalid-schema-examples`, `redocly.yaml`). The rendered reference is the
 portal's own page, `https://sorobanscan.rumblefish.dev/prices-api/docs`. The lint tool,
-the reference and the OpenAPI version differ from the wording: deviations §4.
+the reference and the OpenAPI version differ from the wording: deviations §3.
 
 #### Reproduce it
 
@@ -243,7 +243,7 @@ default plan (1 req/s, 100,000 requests a month) cannot carry the run.
 | 500 req/s  | wide pool × 4 key variants       | 149,880  | 0                                     | 68.8 / **133.0** / 261  | 87–95 ms    | ~2.6 %     |
 | 1000 req/s | wide pool × 8 key variants       | 93,351   | 14,865 (15.9 %), all Lambda throttles | 637 / 1,730 / 2,700     | 1.4–1.5 s   | 0 %        |
 
-**Scope** (deviations §5). The AC scenario is 98.3 % cache hits. With every
+**Scope** (deviations §4). The AC scenario is 98.3 % cache hits. With every
 request a cache miss, p95 is 129.9 ms from Poland, about 45 ms of it network,
 and 45–90 ms at the gateway. At 500 req/s p95 moved by 3 ms. The ramp to
 1000 req/s reached the limit of the shared ClickHouse server, between 500 and
@@ -336,7 +336,7 @@ prerequisites named.
 
 ### AC 8 — CloudWatch dashboard accessible to the Stellar team (read-only IAM role); all alarms OK
 
-**Verdict: met on the amended wording (deviations §3); all alarms OK on
+**Verdict: met; all alarms OK on
 2026-10-05.** The dashboard is `prices-production-overview` in `eu-central-1`,
 with **83** `prices-production-*` alarms (53 at Milestone 2), including error
 and failed-portal-load alarms on the api-handler and liveness and duration
@@ -345,7 +345,9 @@ OK (`aws cloudwatch describe-alarms --alarm-name-prefix prices-production-`).
 
 **Access is set up on request for each named reviewer, with MFA, for the length
 of the review.** A cross-account role needs the AWS account it trusts, and none
-has been named, so access is granted per person instead (deviations §3). A
+has been named, so access is granted per person; at the first assignment IAM
+Identity Center provisions the permission set in the account as a read-only IAM
+role. A
 reviewer sends their name, e-mail, purpose and end date, and receives an IAM
 Identity Center user with the `PricesDashboardRead` permission set: the
 dashboard's nine CloudWatch read actions

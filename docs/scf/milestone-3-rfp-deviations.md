@@ -53,43 +53,7 @@ freshness alarms in the window is in the report's alarm history.
 
 Disclosed.
 
-## 3. AC 8: no standing "read-only IAM role" — access on request, per person, with MFA
-
-### The wording
-
-_"CloudWatch dashboard accessible to Stellar team (read-only IAM role); all
-alarms OK."_
-
-### The deviation
-
-No standing role or user exists for the Stellar team in `infra/`, by decision
-of the operator on 2026-09-25. Access is granted on request: a named reviewer —
-first name, surname, e-mail, purpose and end date — gets an IAM Identity Center
-user with the `PricesDashboardRead` permission set, assigned for the review
-window, with MFA at sign-in
-([`docs/runbooks/0295-dashboard-access-via-identity-center.md`](../runbooks/0295-dashboard-access-via-identity-center.md)).
-
-### Why
-
-- **There is no external principal to trust.** A cross-account role needs the
-  reviewer's AWS account id, and none has been named.
-- **The account is shared** with the Soroban Block Explorer and is otherwise
-  SSO-only. A standing credential nobody asked for would go against least
-  privilege (AC 6); the block explorer's Milestone 3 offers access "on request"
-  for its equivalent criterion.
-
-### What a reviewer gets
-
-The dashboard, its metrics and the alarm states — the nine CloudWatch read
-actions of the permission set — and nothing that can read a log group, a trace, a
-secret or a Lambda's configuration. The read actions cannot be scoped per
-dashboard, so the explorer's dashboard in the same account is visible too.
-
-### Status
-
-Disclosed.
-
-## 4. AC 2: Redocly lints the document, and the reference is the portal's own renderer
+## 3. AC 2: Redocly lints the document, and the reference is the portal's own renderer
 
 ### The wording
 
@@ -155,7 +119,7 @@ endpoints"_.
 Disclosed. _To fill on submission day:_ the Redocly summary line, and the IBM
 validator's error count on that day's document (five in task 0124).
 
-## 5. AC 5: met on the scenario it names, and what travels with that number
+## 4. AC 5: met on the scenario it names, and what travels with that number
 
 ### The wording
 

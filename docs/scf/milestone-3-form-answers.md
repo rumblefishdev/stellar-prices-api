@@ -71,11 +71,10 @@ walk — sign-in, key, a /v1 call, revocation — with its timestamps>`
 > reached early, in Milestone 2: the archive completed on 2026-07-27 and
 > reaches back to **2015-11-18**.
 >
-> **Declared deviations.** Five places where the delivery departs from the
+> **Declared deviations.** Four places where the delivery departs from the
 > wording, each with its reason in the deviations document: the backfill that
 > finished early (so liveness is graded on the ingestion signals), the two
-> monitoring-report metrics it made flat, dashboard access given to a named
-> reviewer instead of a standing role, Redocly and the portal's own renderer
+> monitoring-report metrics it made flat, Redocly and the portal's own renderer
 > in place of `openapi-validator` and Swagger UI, and the scope of the
 > load-test figure.
 >
@@ -122,7 +121,7 @@ walk — sign-in, key, a /v1 call, revocation — with its timestamps>`
 >    `GET https://prices-api.sorobanscan.rumblefish.dev/v1/backfill/status`
 > 2. **OpenAPI lints clean; reference deployed.** Met: the release run on
 >    `master` (2026-10-05) lints it with no errors or warnings. Reference:
->    `https://sorobanscan.rumblefish.dev/prices-api/docs` (deviation 4).
+>    `https://sorobanscan.rumblefish.dev/prices-api/docs` (deviation 3).
 >    Reproduce: `npm run openapi:lint`
 > 3. **Portal accessible; self-service key flow works.**
 >    `https://sorobanscan.rumblefish.dev/prices-api/`, anonymous since
@@ -135,7 +134,7 @@ its timestamps>`
 >    `tools/scripts/ignored-tests.sh`
 > 5. **Load test: met.** p95 49.0 ms at 100 req/s for five minutes, 0 errors
 >    in 30,001 requests, plan `prices-production-loadtest-plan`; scope in
->    deviation 5. Report:
+>    deviation 4. Report:
 >    `.../blob/master/docs/prices-api-load-test-100rps.md`
 > 6. **Security checklist: met.** mTLS-only ClickHouse, secrets in Secrets
 >    Manager, validated inputs, no `Action: "*"` or `service:*`; every
@@ -145,10 +144,10 @@ its timestamps>`
 >    `README.md` → `infra/README.md` §"Fresh-account deployment". Not run in an
 >    empty AWS account; the claim rests on the runbook, a credential-free synth
 >    in CI and a name-by-name check of the runbook against the code.
-> 8. **Dashboard and alarms: met on the amended wording.**
+> 8. **Dashboard and alarms: met.**
 >    `prices-production-overview`, `eu-central-1`; all 83 alarms OK on
 >    2026-10-05. Read-only access for a named reviewer on request
->    (deviation 3; see Field 4).
+>    (see Field 4).
 > 9. **7-day post-launch report: met.** Uptime 100.000 %, 0 × 5XX in 65,806
 >    requests, gateway p95 145.2 ms; two named metrics replaced by live
 >    signals (deviation 2). Reproduce offline:

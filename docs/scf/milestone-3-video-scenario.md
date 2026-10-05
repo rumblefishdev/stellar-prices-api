@@ -97,8 +97,9 @@ revocation, each with a timestamp.
 
 **On screen:** browser tab A, the top of the portal.
 
-> "This is Milestone 3 of the Stellar Prices API, Production Launch and
-> Validation, the last tranche. Milestone 1 built the ingestion; Milestone 2 put
+> "Hi, I'm Stan from Rumble Fish. This is Milestone 3 of the Stellar Prices API,
+> Production Launch and Validation, the last tranche. Milestone 1 built the
+> ingestion; Milestone 2 put
 > a public API in front of it. Milestone 3 opens it to developers: a
 > self-service portal, a published contract, integration tests in CI, a load
 > test, a security review, the public repository and a week of monitoring after
@@ -278,10 +279,10 @@ The public repository, logged out, on `master`. The root `README.md`, then
 
 **On screen:** editor, `milestone-3-rfp-deviations.md`.
 
-> "Five places where the delivery departs from the wording, each declared with
+> "Four places where the delivery departs from the wording, each declared with
 > its reason: the backfill that finished early, the two report metrics it made
-> flat, dashboard access given per reviewer instead of a standing role, the
-> linter and the renderer, and the scope of the load-test number. The evidence
+> flat, the linter and the renderer, and the scope of the load-test number. The
+> evidence
 > document also lists the known issues and the limitations: the history
 > recomputation that finishes after delivery, a slow path we measured but did
 > not instrument, and the ceiling of the shared server."
