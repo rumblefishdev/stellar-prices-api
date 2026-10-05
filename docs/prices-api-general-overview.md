@@ -1634,7 +1634,7 @@ post-delivery monitoring.
    > because the archive finished early.** The SDEX stream reached `completed` on
    > 2026-07-27, during Tranche 2, so it no longer reports `running` and nothing
    > pushes to keep `last_push_at` fresh. The depth clause stands and is met by
-   > six years (2015-11-18). The liveness half should be graded on the signals
+   > two years (2015-11-18). The liveness half should be graded on the signals
    > that are live post-backfill — the rollup-freshness and ledger-processor lag
    > alarms, and `realtime_tip_ledger` tracking the chain. Declared in
    > [`docs/scf/milestone-2-rfp-deviations.md`](scf/milestone-2-rfp-deviations.md)
