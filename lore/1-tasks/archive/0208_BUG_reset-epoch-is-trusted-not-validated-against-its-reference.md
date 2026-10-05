@@ -2,7 +2,7 @@
 id: "0208"
 title: "coarse-repair trusts --reset-not-before instead of checking it against the reference market's first candle — the 0182 run destroyed 157 candles through a 19-hour hole"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0182", "0172", "0114", "0145"]
 tags: ["priority-high", "effort-small", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
@@ -49,6 +49,13 @@ history:
       the check sat behind the oracle-shadow query (the operator would be told
       to purge live readings first) — moved before it. #347 now 26 commits;
       lib 189/0, ch_enrich_it --ignored 70/0, verified 13/13.
+  - date: "2026-10-05"
+    status: completed
+    who: akot
+    note: >
+      Closed. PR #347 merged 2026-10-02 (0f2d915e), all six criteria met;
+      also merged into [[0139]]'s #382 (43862a76), where the epoch guard
+      carries the UInt64 ids. No follow-up task.
 ---
 
 # The reset epoch is an operator assertion the tool never checks

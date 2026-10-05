@@ -2,7 +2,7 @@
 id: "0272"
 title: "Nothing compares backfill_progress's claims against the rows behind them — reconcile the stored watermarks on a schedule, not at the end of a run"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0264", "0263", "0176", "0243", "0127", "0200"]
 tags: [layer-backend, priority-medium, effort-small, milestone-M2, observability, backfill, data-correctness]
@@ -37,6 +37,15 @@ history:
       by synth. Not deployed; in review as PR #371. Created
       the wiki note `lore/3-wiki/project/amm-history-is-not-in-price-ohlcv-1m.md`,
       so the existing `[[amm-history-is-not-in-price-ohlcv-1m]]` links resolve.
+  - date: "2026-10-05"
+    status: completed
+    who: akot
+    note: >
+      Closed by Adam's decision. PR #371 merged 2026-09-30, deployed; the
+      first weekly reconcile datum (2026-10-05) was published for both
+      streams and both overclaim alarms went to OK. The induced alarm-to-Slack
+      check (post-deploy runbook steps 2-3) was not run, so criteria 1 and 5
+      are met locally and live only on the OK path. No follow-up task.
 ---
 
 # `backfill_progress` holds claims nobody compares to the data

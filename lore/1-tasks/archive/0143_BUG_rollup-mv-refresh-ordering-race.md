@@ -2,8 +2,8 @@
 id: "0143"
 title: "The rollup MV cascade has no DEPENDS ON — same-cadence tiers race daily and a tier can serve a stale tip"
 type: BUG
-status: active
-related_adr: []
+status: completed
+related_adr: ["0317"]
 related_tasks: ["0136", "0137", "0142", "0095"]
 tags: ["priority-medium", "effort-small", "clickhouse", "rollups", "correctness"]
 links: []
@@ -30,6 +30,16 @@ history:
       0286), not 1w→1M — text to be corrected. Alarm on MVs stuck in
       WaitingForDependencies is part of the scope. New ADR for rollup
       ordering + reconciliation. Deploy after 0286 phase 3.
+  - date: "2026-10-05"
+    status: completed
+    who: akot
+    note: >
+      Closed. PR #365 merged 2026-09-29 (f7e40eda) together with [[0203]];
+      rolled out to prod 2026-10-05 09:42 UTC by Adam via runbook 0142
+      (MODIFY REFRESH on the five fast MVs, DEPENDS ON in place, 13 views
+      Scheduled). ADR 0317. One criterion stays unticked: `_1M` reaching the
+      month bucket on the first refresh can only be observed after the
+      2026-11-01 boundary. No follow-up task.
 ---
 
 # Rollup MV cascade has no `DEPENDS ON` — tiers race and serve stale tips
@@ -137,16 +147,19 @@ month_bucket  rows_would_emit
 
 ## Acceptance Criteria
 
-- [ ] `rollups.sql` declares the cascade order explicitly; no tier can refresh
-      ahead of its source.
-- [ ] A test on CH 26.3.10.60 reproduces the race (fails without the fix) and
-      passes with it.
+- [x] `rollups.sql` declares the cascade order explicitly; no tier can refresh
+      ahead of its source. Fully qualified `DEPENDS ON`, derived from `TIERS` (#365).
+- [x] A test on CH 26.3.10.60 reproduces the race (fails without the fix) and
+      passes with it. Midnight-race IT in #365, shown red without `DEPENDS ON`.
 - [ ] On prod, `price_ohlcv_1M` reaches the current month bucket on the first
       refresh after `_1w` gains the month's first week — not the second.
-- [ ] Confirm the bounded `WHERE` windows are wide enough that a missed bucket
+      **Not observable before 2026-11-01**; rolled out 2026-10-05, closed without it.
+- [x] Confirm the bounded `WHERE` windows are wide enough that a missed bucket
       is still recoverable on the next refresh for **every** tier, or document
-      the tier where that is not true.
-- [ ] Coordinated with [[0142]] so the change actually lands on ch-prod-01.
+      the tier where that is not true. ADR 0317: [[0203]]'s reconcile MVs heal
+      every tier within 7 days; an outage longer than that stays manual.
+- [x] Coordinated with [[0142]] so the change actually lands on ch-prod-01.
+      Runbook 0142 `MODIFY REFRESH` in place, run on prod 2026-10-05 09:42 UTC.
 
 ## Notes
 
