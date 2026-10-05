@@ -52,8 +52,8 @@ walk — sign-in, key, a /v1 call, revocation — with its timestamps>`
 >    client certificates live in Secrets Manager, not in environment variables;
 >    every invalid input gets a 400. No IAM statement grants every action or a
 >    whole service, and every statement with a wildcard resource is listed
->    with what limits it. `<TO FILL: wildcard-resource count from the release
-templates>`
+>    with what limits it: 22 in the release's templates, each for an action
+>    that has no resource ARN.
 > 6. **Observability.** X-Ray tracing is active on the API handler, the ledger
 >    processor, the oracle and the enrichment worker, and on the gateway stage.
 >    The `prices-production-overview` dashboard covers API latency and errors,
