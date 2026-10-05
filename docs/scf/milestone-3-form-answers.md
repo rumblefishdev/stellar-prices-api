@@ -88,7 +88,7 @@
 >
 > **Full evidence — acceptance-criteria mapping with runnable commands, the
 > deviation rationale, known issues and limitations:**
-> `<EVIDENCE_PDF_URL>`
+> `https://drive.google.com/file/d/1AktIqEMocAW_DtaHiISdZTfptMu58Xg2/view?usp=sharing`
 
 ---
 
@@ -110,7 +110,7 @@
 
 > **Evidence package (Google Drive):** `https://drive.google.com/drive/folders/1XnHTsg1hI7e7XR9z5G1MZ2zuyjVmO2K0?usp=sharing`
 >
-> - Evidence PDF: `<EVIDENCE_PDF_URL>`
+> - Evidence PDF: `https://drive.google.com/file/d/1AktIqEMocAW_DtaHiISdZTfptMu58Xg2/view?usp=sharing`
 > - Demo video: `https://drive.google.com/file/d/1KTFv9A58sU1FLtnqa4xBYYE8oaCI3DgW/view?usp=sharing`
 >
 > The nine acceptance criteria, in order. Deviations are set out once, in
