@@ -1,7 +1,5 @@
 # Milestone 3 — deviations from the criteria wording, and why
 
-> ⚠️ **DRAFT — opened 2026-09-25.**
-
 This document is part of the Milestone 3 submission. It sets out each place
 where the delivered system departs from the literal wording of a Tranche 3
 acceptance criterion (technical design §9), with the measurement and the
