@@ -63,6 +63,15 @@ pub const FORCED_PARTIAL_FLUSH: &str = "ForcedPartialFlushes";
 /// factory, or a factory event missed before a cold start.
 pub const UNREGISTERED_POOL_EVENTS: &str = "UnregisteredPoolEvents";
 
+/// Trades a reconcile run skipped because a leg is a contract BE flags `is_sac`
+/// that no SAC proof in its transaction resolved (task 0242 D2). Minting it as
+/// a `Contract` identity would split one asset in two, so the trade is dropped.
+///
+/// Emitted ONLY when non-zero, so the alarm on it is `>= 1` over
+/// `NOT_BREACHING`. Non-zero means a SAC traded without a transfer naming its
+/// asset in the same transaction, a shape the resolver does not cover.
+pub const SAC_UNPROVEN_SKIPPED: &str = "SacUnprovenSkipped";
+
 /// `PutMetricData` accepts at most 150 entries in a datum's `Values` array, so
 /// a run with more INSERTs than that spills into further datums of the same
 /// metric rather than being truncated (or, worse, aggregated back into
@@ -170,6 +179,20 @@ pub fn unregistered_pool_event_metrics(total: u64) -> Vec<Metric> {
     }]
 }
 
+/// The unproven-SAC datapoint for one run (task 0242), or nothing when the run
+/// skipped none. Same absent-while-healthy rule as
+/// [`forced_partial_flush_metrics`].
+pub fn sac_unproven_metrics(total: u64) -> Vec<Metric> {
+    if total == 0 {
+        return Vec::new();
+    }
+    vec![Metric {
+        name: SAC_UNPROVEN_SKIPPED,
+        unit: Unit::Count,
+        values: vec![total as f64],
+    }]
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
 /// `Environment` dimension. One `PutMetricData` call for the whole batch.
 ///
@@ -249,6 +272,17 @@ mod tests {
         assert_eq!(m[0].name, UNREGISTERED_POOL_EVENTS);
         assert_eq!(m[0].unit, Unit::Count);
         assert_eq!(m[0].values, vec![7.0]);
+    }
+
+    /// Task 0242: absent while healthy, one count of the total otherwise.
+    #[test]
+    fn unproven_sac_skips_publish_only_when_non_zero() {
+        assert!(sac_unproven_metrics(0).is_empty());
+        let m = sac_unproven_metrics(3);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].name, SAC_UNPROVEN_SKIPPED);
+        assert_eq!(m[0].unit, Unit::Count);
+        assert_eq!(m[0].values, vec![3.0]);
     }
 
     #[test]

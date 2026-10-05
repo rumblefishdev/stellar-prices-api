@@ -8,12 +8,27 @@
 //! shared Hetzner cluster over mTLS via the task-0052 client. Tests use the
 //! in-memory [`CountingSink`].
 
+use std::collections::HashSet;
 use std::future::Future;
 
 use prices_ingest_core::{
     AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, PoolRegistryRow,
     Registries, retry_with_backoff,
 };
+
+/// `registry` with `sac_contracts` as its `is_sac` candidates (task 0242 D2):
+/// the step [`ClickHouseSink::load_ingest_registry`] adds to a plain load.
+pub fn with_sac_candidates(
+    mut registry: AssetRegistry,
+    sac_contracts: HashSet<String>,
+) -> AssetRegistry {
+    tracing::info!(
+        sac_contracts = sac_contracts.len(),
+        "loaded the is_sac contract set"
+    );
+    registry.set_sac_candidates(sac_contracts);
+    registry
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SinkError {
@@ -102,6 +117,30 @@ impl ClickHouseSink {
     pub async fn load_registry(&self) -> Result<AssetRegistry, SinkError> {
         let existing = self.writer.load_assets().await.map_err(redact)?;
         Ok(AssetRegistry::from_existing(existing))
+    }
+
+    /// The contracts BE flags `is_sac` (task 0242), for
+    /// [`AssetRegistry::set_sac_candidates`]. Separate from [`load_registry`]:
+    /// the local CLI has no BE tables, so `prices-cli` never calls it and still
+    /// mints an unproven SAC as a `Contract` identity. Local fixtures only.
+    ///
+    /// [`load_registry`]: ClickHouseSink::load_registry
+    pub async fn load_sac_contracts(&self) -> Result<HashSet<String>, SinkError> {
+        prices_ingest_core::load_sac_contracts(self.client(), prices_ingest_core::BE_DATABASE)
+            .await
+            .map_err(redact)
+    }
+
+    /// The registry the live processor ingests with: [`load_registry`] armed
+    /// with BE's `is_sac` set by [`with_sac_candidates`], the two reads joined.
+    /// Either failing fails the cold start: with no candidates an unproven SAC
+    /// would be minted as a `Contract` identity (task 0242 D2, PC3).
+    ///
+    /// [`load_registry`]: ClickHouseSink::load_registry
+    pub async fn load_ingest_registry(&self) -> Result<AssetRegistry, SinkError> {
+        let (registry, sac_contracts) =
+            tokio::join!(self.load_registry(), self.load_sac_contracts());
+        Ok(with_sac_candidates(registry?, sac_contracts?))
     }
 
     /// Preload the discovered AMM pool registry from `prices.pool_registry` so the

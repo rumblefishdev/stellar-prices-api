@@ -17,6 +17,7 @@
 //!   ([`STATIC_POOLS`], task 0300) merged into the AMM registries.
 //! - [`canonical`] — asset identity, the [`AssetRegistry`] of known and newly
 //!   seen identities, and `(base, quote)` canonicalisation.
+//! - [`sac_proof`] — the BE reads behind the SAC resolver (task 0242).
 //! - [`price`] / [`tick`] — per-trade price + the [`TradeTick`] the bucketer eats.
 //! - [`bucket`] — 1-minute OHLCV accumulation ([`CandleAccumulator`]).
 //! - [`writer`] — the transport-agnostic ClickHouse [`OhlcvWriter`] (works with a
@@ -32,6 +33,7 @@ pub mod filter;
 pub mod price;
 pub mod registry_io;
 pub mod retry;
+pub mod sac_proof;
 pub mod safe_log;
 pub mod soroban;
 pub mod static_pools;
@@ -52,6 +54,7 @@ pub use price::{
 };
 pub use registry_io::PoolRegistryRow;
 pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
+pub use sac_proof::{BE_DATABASE, load_sac_contracts};
 pub use safe_log::safe_response_token;
 pub use soroban::{
     LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, learn_factory_event,

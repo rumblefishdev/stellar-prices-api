@@ -118,6 +118,23 @@ fn identity_to_asset(identity: &AssetIdentity) -> Option<Asset> {
     }
 }
 
+/// A SEP-11 asset string as a SAC event's last topic carries it: `native`, or
+/// `CODE:ISSUER` with a 1–12 char alphanumeric code and a valid G-strkey.
+fn parse_sep11(s: &str) -> Option<AssetIdentity> {
+    if s == "native" {
+        return Some(AssetIdentity::Native);
+    }
+    let (code, issuer) = s.split_once(':')?;
+    if code.is_empty() || code.len() > 12 || !code.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    stellar_strkey::ed25519::PublicKey::from_string(issuer).ok()?;
+    Some(AssetIdentity::Credit {
+        code: code.to_string(),
+        issuer: issuer.to_string(),
+    })
+}
+
 /// The deterministic Stellar Asset Contract (SAC) address for a classic asset on
 /// the given network: `C…`-strkey of `sha256(HashIdPreimage::ContractId{network,
 /// ContractIdPreimage::Asset(asset)})`. This is the standard offline derivation —
@@ -168,6 +185,9 @@ pub struct AssetRegistry {
     /// intern order. Replaces the id watermark (task 0139): a set of
     /// identities says "new" without assuming ids are handed out in order.
     pending: Vec<AssetIdentity>,
+    /// Contracts BE flags `is_sac` (task 0242). One of these with no entry in
+    /// `sac_index` is never minted as a `Contract` identity.
+    sac_candidates: HashSet<String>,
 }
 
 impl AssetRegistry {
@@ -180,6 +200,7 @@ impl AssetRegistry {
             network_id: mainnet_network_id(),
             sac_index: HashMap::new(),
             pending: Vec::new(),
+            sac_candidates: HashSet::new(),
         };
         // Pre-seed the canonical quote SACs so an AMM-via-SAC USDC/USDT/XLM
         // collapses even before that asset's first classic (SDEX) sighting in the
@@ -230,6 +251,34 @@ impl AssetRegistry {
     /// and keeps its `Contract(address)` identity.
     pub fn resolve_sac(&self, contract_addr: &str) -> Option<AssetIdentity> {
         self.sac_index.get(contract_addr).cloned()
+    }
+
+    /// Map `contract` to the SEP-11 asset it names (`native` | `CODE:G…`), but
+    /// only when `contract` IS that asset's SAC (task 0242). Interns nothing.
+    pub fn learn_sac(&mut self, contract: &str, sep11: &str) -> bool {
+        let Some(identity) = parse_sep11(sep11) else {
+            return false;
+        };
+        if self.sac_index.get(contract) == Some(&identity) {
+            return true;
+        }
+        let derived = identity_to_asset(&identity).and_then(|a| sac_address(&a, &self.network_id));
+        if derived.as_deref() != Some(contract) {
+            return false;
+        }
+        self.sac_index.insert(contract.to_string(), identity);
+        true
+    }
+
+    /// The contracts BE flags `is_sac` (task 0242), replacing any earlier set.
+    pub fn set_sac_candidates(&mut self, contracts: HashSet<String>) {
+        self.sac_candidates = contracts;
+    }
+
+    /// True for an `is_sac` contract this registry cannot resolve: its trades
+    /// are skipped, never minted as a `Contract` identity (task 0242 D2).
+    pub fn is_unproven_sac(&self, contract: &str) -> bool {
+        self.sac_candidates.contains(contract) && !self.sac_index.contains_key(contract)
     }
 
     /// The SAC contract address that wraps a classic identity (Native / Credit),
@@ -415,6 +464,69 @@ mod tests {
             reg.resolve_sac("CNOTASACADDRESSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
             None
         );
+    }
+
+    // Task 0242 fixture: XCR and its SAC, public on-chain identifiers.
+    const XCR_ISSUER: &str = "GBLJBHWVORDFI4J7CLBDRPECMYT3XO5S6GERXGC74VXOJMZPLI6ZU3S7";
+    const XCR_SAC: &str = "CDJQXBQO5ICVQUPHZHW7SHOM56K2UNNPPAIXUUSA3XACEI6Q4JQLXNVI";
+
+    fn xcr() -> AssetIdentity {
+        AssetIdentity::Credit {
+            code: "XCR".to_string(),
+            issuer: XCR_ISSUER.to_string(),
+        }
+    }
+
+    #[test]
+    fn learn_sac_accepts_only_the_sac_of_the_named_asset() {
+        let mut reg = AssetRegistry::from_existing(vec![]);
+        assert_eq!(reg.sac_address_of(&xcr()).as_deref(), Some(XCR_SAC));
+        let known = reg.assets().count();
+
+        assert!(reg.learn_sac(XCR_SAC, &format!("XCR:{XCR_ISSUER}")));
+        assert_eq!(reg.resolve_sac(XCR_SAC), Some(xcr()));
+        assert!(
+            reg.learn_sac(XCR_SAC, &format!("XCR:{XCR_ISSUER}")),
+            "idempotent"
+        );
+        assert_eq!(reg.assets().count(), known, "interns nothing");
+        assert!(pending(&reg).is_empty());
+
+        assert!(reg.learn_sac(NATIVE_SAC, "native"));
+        assert!(!reg.learn_sac(XCR_SAC, "native"));
+    }
+
+    #[test]
+    fn learn_sac_rejects_impostors_and_malformed_assets() {
+        let usdc = format!("USDC:{USDC_ISSUER}");
+        let impostor = stellar_strkey::Contract([7; 32]).to_string();
+        let cases = [
+            (impostor.as_str(), usdc.clone()),
+            (XCR_SAC, usdc),
+            (XCR_SAC, String::new()),
+            (XCR_SAC, "XCR".to_string()),
+            (XCR_SAC, "XCR:".to_string()),
+            (XCR_SAC, format!(":{XCR_ISSUER}")),
+            (XCR_SAC, "XCR:GNOTAKEY".to_string()),
+            (XCR_SAC, format!("ABCDEFGHIJKLM:{XCR_ISSUER}")),
+            (XCR_SAC, format!("XC-R:{XCR_ISSUER}")),
+            (XCR_SAC, "NATIVE".to_string()),
+        ];
+        for (contract, sep11) in cases {
+            let mut reg = AssetRegistry::from_existing(vec![]);
+            assert!(!reg.learn_sac(contract, &sep11), "{contract} {sep11:?}");
+            assert_eq!(reg.resolve_sac(contract), None, "{contract} {sep11:?}");
+        }
+    }
+
+    #[test]
+    fn an_sac_candidate_is_unproven_until_learned() {
+        let mut reg = AssetRegistry::from_existing(vec![]);
+        reg.set_sac_candidates(HashSet::from([XCR_SAC.to_string()]));
+        assert!(reg.is_unproven_sac(XCR_SAC));
+        assert!(!reg.is_unproven_sac(NATIVE_SAC), "not a candidate");
+        reg.learn_sac(XCR_SAC, &format!("XCR:{XCR_ISSUER}"));
+        assert!(!reg.is_unproven_sac(XCR_SAC));
     }
 
     fn pending(reg: &AssetRegistry) -> Vec<AssetIdentity> {
