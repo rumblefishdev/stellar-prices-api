@@ -76,7 +76,7 @@ revocation, each with a timestamp.
 | Launch        | 2026-09-23, 09:40 CEST                                                      |
 | AC 5          | p95 49.0 ms, 0 errors in 30,001 requests, `prices-production-loadtest-plan` |
 | AC 9          | uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms          |
-| Alarms        | 65 `prices-production-*`, all OK                                            |
+| Alarms        | 83 `prices-production-*`, all OK                                            |
 | Earliest data | 2015-11-18                                                                  |
 | Dashboard     | `prices-production-overview`, `eu-central-1`                                |
 | Repository    | `https://github.com/rumblefishdev/stellar-prices-api`                       |
@@ -241,7 +241,7 @@ curl -s 'https://horizon.stellar.org/ledgers?order=desc&limit=1' | jq '._embedde
 **On screen:** browser tab E, the dashboard and its alarm strip.
 
 > "The dashboard: API latency and errors, ingestion lag, ClickHouse writes, the
-> workers, and an alarm strip with all 65 alarms, all OK. The Stellar team gets
+> workers, and an alarm strip with all 83 alarms, all OK. The Stellar team gets
 > read access to it on request, per reviewer, through IAM Identity Center."
 
 **On screen:** Terminal B.

@@ -45,7 +45,7 @@ State of the nine Tranche 3 acceptance criteria on 2026-10-01:
 | 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                                 |
 | 6   | Security checklist signed off                               | **Met.** ClickHouse over mTLS only, secrets in Secrets Manager, inputs validated, no `Action: "*"` or `service:*`; every `Resource: "*"` statement inventoried in §5            |
 | 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo public, `README.md` → `infra/README.md` on `develop`, on `master` from the next release. Not run in an empty account |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, all 65 alarms OK on 10-01. Access on request for each named reviewer, through IAM Identity Center (deviations §3)                       |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, all 83 alarms OK on 10-05. Access on request for each named reviewer, through IAM Identity Center (deviations §3)                       |
 | 9   | 7-day post-launch report                                    | **Met on 2026-09-30: uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live signals (deviations §2)  |
 
 Work items without a numbered criterion are in §6, known issues in §7,
@@ -64,7 +64,7 @@ Validation**, weeks 10 to 13. The work it names, and where each stands:
 | Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md): all three rates on 2026-09-18 (task 0293)                                                                                        |
 | Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; IAM detail in §5, AC 6                                                                                                                                                              |
 | X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                                                               |
-| CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`, with all 65 `prices-production-*` alarms on its alarm strip (§6)                                                                                                          |
+| CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`, with all 83 `prices-production-*` alarms on its alarm strip (§6)                                                                                                          |
 | GitHub repository public with README, architecture docs, deploy steps     | Public since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                                                                |
 
 The tranche's backfill milestone, SDEX history back to January 2018, was
@@ -324,10 +324,10 @@ prerequisites named.
 ### AC 8 — CloudWatch dashboard accessible to the Stellar team (read-only IAM role); all alarms OK
 
 **Verdict: met on the amended wording (deviations §3); all alarms OK on
-2026-10-01.** The dashboard is `prices-production-overview` in `eu-central-1`,
-with **65** `prices-production-*` alarms (53 at Milestone 2), including error
+2026-10-05.** The dashboard is `prices-production-overview` in `eu-central-1`,
+with **83** `prices-production-*` alarms (53 at Milestone 2), including error
 and failed-portal-load alarms on the api-handler and liveness and duration
-alarms on the scheduled workers (§3). On 2026-10-01 at 08:23 CEST all 65 were
+alarms on the scheduled workers (§3). On 2026-10-05 at 12:33 CEST all 83 were
 OK (`aws cloudwatch describe-alarms --alarm-name-prefix prices-production-`).
 
 **Access is set up on request for each named reviewer, with MFA, for the length
@@ -403,7 +403,7 @@ export.
 | Item                                    | State                                                                                                                                                                                        |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | X-Ray tracing enabled end-to-end        | `TracingConfig.Mode: Active` on `api-handler`, `oracle`, `enrichment`, `ledger-processor`; the gateway stage traces too (client IPs are in X-Ray for 30 days, as the privacy policy states)  |
-| CloudWatch dashboards                   | `prices-production-overview`: API latency and error rate, ingestion lag, ClickHouse write latency, mTLS NotAfter, backfill progress, worker duration and errors, alarm strip (all 65 alarms) |
+| CloudWatch dashboards                   | `prices-production-overview`: API latency and error rate, ingestion lag, ClickHouse write latency, mTLS NotAfter, backfill progress, worker duration and errors, alarm strip (all 83 alarms) |
 | Security review checklist               | see AC 6                                                                                                                                                                                     |
 | README, architecture docs, deploy steps | `README.md`, `docs/prices-api-general-overview.md`, `docs/runbooks/`, `infra/README.md` (the fresh-account runbook, AC 7)                                                                    |
 
