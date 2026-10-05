@@ -94,9 +94,9 @@
 
 ## Field 2 — Deliverable Verification - Video
 
-> `<VIDEO_URL>`
+> `https://drive.google.com/file/d/1KTFv9A58sU1FLtnqa4xBYYE8oaCI3DgW/view?usp=sharing`
 >
-> About seven minutes, all on production: (1) scope; (2) the portal, end to
+> About eight minutes, all on production: (1) scope; (2) the portal, end to
 > end — sign-in, a key, a `/v1` call with it, revocation; (3) the OpenAPI
 > document, the rendered reference and a 404 in the error envelope; (4) the
 > integration tests in CI and the load test; (5) the security checklist;
@@ -111,7 +111,7 @@
 > **Evidence package (Google Drive):** `<EVIDENCE_FOLDER_URL>`
 >
 > - Evidence PDF: `<EVIDENCE_PDF_URL>`
-> - Demo video: `<VIDEO_URL>`
+> - Demo video: `https://drive.google.com/file/d/1KTFv9A58sU1FLtnqa4xBYYE8oaCI3DgW/view?usp=sharing`
 >
 > The nine acceptance criteria, in order. Deviations are set out once, in
 > `.../blob/master/docs/scf/milestone-3-rfp-deviations.md`, and referred to

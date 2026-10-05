@@ -8,7 +8,7 @@ margin:
 
 > - **Project:** Stellar Prices API
 > - **Team:** Rumble Fish
-> - **Status of this document:** ⚠️ **DRAFT — opened 2026-09-25.** Every figure
+> - **Status of this document:** as of 2026-10-05. Every figure
 >   carries the date it was measured.
 >
 > This document maps each Tranche 3 acceptance criterion to its evidence: live
@@ -169,7 +169,7 @@ target/openapi.json: validated in 88ms
 Woohoo! Your API description is valid. 🎉
 ```
 
-_To fill:_ a screenshot of `/prices-api/docs`.
+![The rendered reference at /prices-api/docs, captured 2026-10-05: every route of the OpenAPI 3.1.0 document in the sidebar, with the base URL and the x-api-key header](./screenshots/m3-ac2-api-reference.png){width=95%}
 
 ### AC 3 — Onboarding portal accessible; self-service API key request flow functional
 

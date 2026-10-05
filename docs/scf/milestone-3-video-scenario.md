@@ -1,7 +1,5 @@
 # Milestone 3 — Deliverable Verification Video Script
 
-> ⚠️ **DRAFT — opened 2026-09-25.**
-
 Target length **about 7 minutes**. Milestone 3 opens the API to developers, so
 the video walks through what a developer and a reviewer meet: the portal, the
 contract, the tests, the load test, the security review, the operations view
