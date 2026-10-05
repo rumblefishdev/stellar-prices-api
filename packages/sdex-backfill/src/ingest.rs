@@ -132,11 +132,11 @@ impl RunAccumulators {
         Self::default()
     }
 
-    fn merge_sdex(&mut self, tick: &TradeTick) {
+    fn merge_sdex(&mut self, tick: TradeTick) {
         self.sdex.merge(tick);
     }
 
-    fn merge_amm(&mut self, source: &'static str, tick: &TradeTick) {
+    fn merge_amm(&mut self, source: &'static str, tick: TradeTick) {
         self.amm.entry(source).or_default().merge(tick);
     }
 
@@ -227,19 +227,79 @@ fn candles_at_partition_end(
     }
 }
 
+/// The writes whose order matters to a crash: an identity's `prices.assets`
+/// row before any candle that references it, and a ledger's resume marker
+/// after its candles. A trait so a recording sink can pin that order.
+pub(crate) trait RunSink {
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError>;
+    async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), BackfillError>;
+    async fn write_completed_ledgers(&self, sequences: &[u32]) -> Result<(), BackfillError>;
+}
+
+impl RunSink for Sink {
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError> {
+        Sink::write_new_assets(self, registry).await
+    }
+    async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), BackfillError> {
+        Sink::write_candles(self, candles, source).await
+    }
+    async fn write_completed_ledgers(&self, sequences: &[u32]) -> Result<(), BackfillError> {
+        Sink::write_completed_ledgers(self, sequences).await
+    }
+}
+
+/// Write the identities interned since the last persist, then forget them —
+/// only after `Ok`, so a failed write leaves them pending (task 0139).
+pub(crate) async fn persist_new_assets(
+    sink: &impl RunSink,
+    registry: &mut AssetRegistry,
+) -> Result<(), BackfillError> {
+    if registry.pending_new().next().is_some() {
+        sink.write_new_assets(registry).await?;
+        registry.clear_pending();
+    }
+    Ok(())
+}
+
+/// Write closed candles, their new identities FIRST. The end-of-run asset
+/// write this replaces let a crash leave candles under ids no `assets` row
+/// names — the orphans GA2 of task 0139 counts.
+async fn write_candles_after_assets(
+    sink: &impl RunSink,
+    registry: &mut AssetRegistry,
+    batches: Vec<(&'static str, Vec<OhlcvCandle>)>,
+    stats: &mut PartitionStats,
+) -> Result<(), BackfillError> {
+    if batches.is_empty() {
+        return Ok(());
+    }
+    persist_new_assets(sink, registry).await?;
+    for (source, candles) in batches {
+        sink.write_candles(&candles, source).await?;
+        stats.note_candles(&candles, source);
+    }
+    Ok(())
+}
+
 /// Write everything the run still holds open. Called once, after the last
 /// partition — including when that partition was skipped (S3-incomplete) and
 /// therefore never reached [`PartitionEnd::Drain`]. A no-op when the
 /// accumulators are already empty.
-pub async fn flush_open_minutes(
+pub(crate) async fn flush_open_minutes(
     accs: &mut RunAccumulators,
-    sink: &Sink,
+    sink: &impl RunSink,
+    registry: &mut AssetRegistry,
     totals: &mut PartitionStats,
 ) -> Result<(), BackfillError> {
-    for (source, candles) in accs.drain_all() {
-        sink.write_candles(&candles, source).await?;
-        totals.note_candles(&candles, source);
-    }
+    write_candles_after_assets(sink, registry, accs.drain_all(), totals).await?;
     // The markers held back for that minute are due now — and only now (review
     // WR-01). Written after the candles, so an interrupt in between costs a
     // re-read, never a row.
@@ -333,7 +393,7 @@ pub async fn index_partition(
             let trades = extract_trades(lcm);
             for trade in &trades {
                 let tick = raw_trade_to_tick(trade, registry);
-                accs.merge_sdex(&tick);
+                accs.merge_sdex(tick);
                 stats.trade_ticks += 1;
             }
 
@@ -342,7 +402,7 @@ pub async fn index_partition(
             // events, so SdexOnly skips the decode entirely.
             if mode == ExtractMode::Combined {
                 let sob = process_ledger(lcm, reg, registry);
-                for (source, tick) in &sob.amm_ticks {
+                for (source, tick) in sob.amm_ticks {
                     accs.merge_amm(source, tick);
                     stats.amm_ticks += 1;
                 }
@@ -357,11 +417,10 @@ pub async fn index_partition(
 
             let current_minute = ledger_minute(lcm);
             last_minute = current_minute;
-            for (source, candles) in accs.drain_closed(current_minute) {
-                sink.write_candles(&candles, source).await?;
-                stats.note_candles(&candles, source);
-            }
+            let closed = accs.drain_closed(current_minute);
+            write_candles_after_assets(sink, registry, closed, &mut stats).await?;
             if oracle_buf.len() >= ORACLE_FLUSH_THRESHOLD {
+                persist_new_assets(sink, registry).await?;
                 sink.write_oracle(&oracle_buf).await?;
                 oracle_buf.clear();
             }
@@ -371,11 +430,10 @@ pub async fn index_partition(
         stats.indexed += 1;
     }
 
-    for (source, candles) in candles_at_partition_end(accs, end) {
-        sink.write_candles(&candles, source).await?;
-        stats.note_candles(&candles, source);
-    }
+    let open = candles_at_partition_end(accs, end);
+    write_candles_after_assets(sink, registry, open, &mut stats).await?;
     if !oracle_buf.is_empty() {
+        persist_new_assets(sink, registry).await?;
         sink.write_oracle(&oracle_buf).await?;
     }
 
@@ -456,6 +514,7 @@ pub async fn peek_ledger_minute(partition: &Partition, seq: u32, temp_dir: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prices_ingest_core::AssetIdentity;
     use rust_decimal::Decimal;
 
     const MINUTE_M: i64 = 1_700_000_040; // minute start 1_700_000_040
@@ -473,8 +532,8 @@ mod tests {
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
+            base: AssetIdentity::Native,
+            quote: AssetIdentity::Contract("CQUOTE".to_string()),
             price,
             volume_base: Decimal::from(1),
             volume_quote: price,
@@ -495,7 +554,7 @@ mod tests {
         let mut accs = RunAccumulators::new();
 
         // Last ledgers of partition A: an ordinary, price-forming fill.
-        accs.merge_sdex(&fill(100, MINUTE_M, Decimal::from(2), true));
+        accs.merge_sdex(fill(100, MINUTE_M, Decimal::from(2), true));
         assert!(
             accs.drain_closed(minute_of(MINUTE_M)).is_empty(),
             "the minute the last ledger closed in is still open"
@@ -510,7 +569,7 @@ mod tests {
         );
 
         // First ledgers of partition B: only dust in the same minute.
-        accs.merge_sdex(&fill(
+        accs.merge_sdex(fill(
             101,
             MINUTE_M_LATE,
             Decimal::new(588_235_294, 10), // 1/17
@@ -536,7 +595,7 @@ mod tests {
     #[test]
     fn the_last_partition_of_a_run_writes_the_minute_it_still_holds_open() {
         let mut accs = RunAccumulators::new();
-        accs.merge_sdex(&fill(100, MINUTE_M, Decimal::from(2), true));
+        accs.merge_sdex(fill(100, MINUTE_M, Decimal::from(2), true));
 
         let drained = candles_at_partition_end(&mut accs, PartitionEnd::Drain);
         assert_eq!(drained.len(), 1, "the open minute is written, not dropped");
@@ -552,14 +611,11 @@ mod tests {
     #[test]
     fn an_amm_venues_open_minute_is_carried_across_the_boundary_too() {
         let mut accs = RunAccumulators::new();
-        accs.merge_amm("soroswap", &fill(100, MINUTE_M, Decimal::from(3), true));
+        accs.merge_amm("soroswap", fill(100, MINUTE_M, Decimal::from(3), true));
 
         assert!(candles_at_partition_end(&mut accs, PartitionEnd::Carry).is_empty());
 
-        accs.merge_amm(
-            "soroswap",
-            &fill(101, MINUTE_M_LATE, Decimal::from(4), true),
-        );
+        accs.merge_amm("soroswap", fill(101, MINUTE_M_LATE, Decimal::from(4), true));
         let drained = accs.drain_closed(minute_of(MINUTE_M_PLUS_1));
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].0, "soroswap");
@@ -634,5 +690,98 @@ mod tests {
             accs.take_held_markers().is_empty(),
             "taking twice does not write a marker twice"
         );
+    }
+
+    // ---- task 0139: identities land before the candles that name them ----
+
+    /// Records every ordered write; fails the asset write on demand.
+    #[derive(Default)]
+    struct RecordingSink {
+        calls: std::cell::RefCell<Vec<String>>,
+        fail_assets: std::cell::Cell<bool>,
+    }
+
+    impl RunSink for RecordingSink {
+        async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError> {
+            if self.fail_assets.get() {
+                return Err(std::io::Error::other("injected asset-write failure").into());
+            }
+            let n = registry.pending_new().count();
+            self.calls.borrow_mut().push(format!("assets {n}"));
+            Ok(())
+        }
+        async fn write_candles(
+            &self,
+            candles: &[OhlcvCandle],
+            source: &str,
+        ) -> Result<(), BackfillError> {
+            let n = candles.len();
+            self.calls
+                .borrow_mut()
+                .push(format!("candles {source} {n}"));
+            Ok(())
+        }
+        async fn write_completed_ledgers(&self, sequences: &[u32]) -> Result<(), BackfillError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("markers {sequences:?}"));
+            Ok(())
+        }
+    }
+
+    /// A registry that has just interned `fill`'s two identities.
+    fn registry_with_new_pair() -> AssetRegistry {
+        let mut registry = AssetRegistry::from_existing(vec![]);
+        let quote = AssetIdentity::Contract("CQUOTE".to_string());
+        registry.intern(&AssetIdentity::Native);
+        registry.intern(&quote);
+        registry
+    }
+
+    #[tokio::test]
+    async fn new_identities_are_written_before_the_candles_that_name_them() {
+        let sink = RecordingSink::default();
+        let mut registry = registry_with_new_pair();
+        let mut accs = RunAccumulators::new();
+        let mut stats = PartitionStats::default();
+
+        accs.merge_sdex(fill(100, MINUTE_M, Decimal::from(2), true));
+        let closed = accs.drain_closed(minute_of(MINUTE_M_PLUS_1));
+        write_candles_after_assets(&sink, &mut registry, closed, &mut stats)
+            .await
+            .unwrap();
+        // The next minute names no new identity: no asset write at all.
+        accs.merge_sdex(fill(101, MINUTE_M_PLUS_1, Decimal::from(3), true));
+        flush_open_minutes(&mut accs, &sink, &mut registry, &mut stats)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *sink.calls.borrow(),
+            ["assets 2", "candles sdex 1", "candles sdex 1", "markers []"]
+        );
+        assert_eq!(registry.pending_new().count(), 0, "cleared after Ok");
+        assert_eq!(stats.candles_written, 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_asset_write_writes_no_candle_and_keeps_the_identities_pending() {
+        let sink = RecordingSink::default();
+        sink.fail_assets.set(true);
+        let mut registry = registry_with_new_pair();
+        let mut accs = RunAccumulators::new();
+
+        accs.merge_sdex(fill(100, MINUTE_M, Decimal::from(2), true));
+        let flushed = flush_open_minutes(
+            &mut accs,
+            &sink,
+            &mut registry,
+            &mut PartitionStats::default(),
+        )
+        .await;
+
+        assert!(flushed.is_err());
+        assert!(sink.calls.borrow().is_empty(), "no candle, no marker");
+        assert_eq!(registry.pending_new().count(), 2, "retried by the re-run");
     }
 }

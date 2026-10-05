@@ -44,12 +44,12 @@ const FEATURES: readonly Feature[] = [
   {
     icon: livePricesIcon,
     title: 'Live Prices',
-    body: 'Real-time token prices for all Stellar assets. Sourced directly from Soroswap liquidity pools, updated on every block.',
+    body: 'USD and XLM prices for Stellar assets from SDEX, Soroswap, Aquarius, Phoenix and SushiSwap, with a 24h VWAP across venues and a per-venue breakdown.',
   },
   {
     icon: liquidityDataIcon,
-    title: 'Liquidity Data',
-    body: 'Pool reserves, trading depth and liquidity metrics. Essential for swap routing and price impact calculations.',
+    title: 'Volume Data',
+    body: '24-hour volume in total and per venue, a 24-hour VWAP across venues, and volume and trade counts in every candle.',
   },
   {
     icon: historicalDataIcon,
@@ -59,12 +59,12 @@ const FEATURES: readonly Feature[] = [
   {
     icon: fastResponseIcon,
     title: 'Fast Response Times',
-    body: 'API Gateway caching keeps latency low for repeated lookups. Optimized for high-frequency applications like trading bots.',
+    body: 'API Gateway caching keeps latency low for repeated lookups.',
   },
   {
     icon: secureAccessIcon,
     title: 'Secure Access',
-    body: 'Every request requires an API key. Rate limiting and monthly quotas protect the service for all users.',
+    body: 'Every price request requires an API key. Rate limiting and monthly quotas protect the service for all users.',
   },
   {
     icon: developerFriendlyIcon,

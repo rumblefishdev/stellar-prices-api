@@ -21,6 +21,7 @@
 //! exists for — `write_candles` hardcodes the production table name.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture;
 use prices_ingest_core::{
     AssetIdentity, AssetRegistry, CandleAccumulator, OhlcvCandle, OhlcvWriter, PriceSource,
     RawTrade, raw_trade_to_tick,
@@ -72,7 +73,7 @@ fn candles() -> Vec<OhlcvCandle> {
         (3, 17, 1),
     ] {
         let trade = fill(tx, sold, bought);
-        acc.merge(&raw_trade_to_tick(&trade, &mut registry));
+        acc.merge(raw_trade_to_tick(&trade, &mut registry));
     }
     acc.flush_all()
 }
@@ -122,8 +123,8 @@ async fn a_written_candle_round_trips_every_column_including_the_pf_ones() {
     // Identity, counts and version.
     let (timestamp, asset_id, quote_asset_id, source, trade_count, version, pf_trade_count): (
         u32,
-        u32,
-        u32,
+        u64,
+        u64,
         String,
         u32,
         u64,
@@ -138,7 +139,15 @@ async fn a_written_candle_round_trips_every_column_including_the_pf_ones() {
         .await
         .expect("identity columns");
     assert_eq!(timestamp, MINUTE_START);
-    assert_ne!(asset_id, quote_asset_id);
+    // Task 0139: the writer sent identities; the ids are ClickHouse's.
+    assert_eq!(
+        (asset_id, quote_asset_id),
+        (
+            fixture::fetch_id(&admin, "XLM", "", "").await,
+            fixture::fetch_id(&admin, "USDC", USDC_ISSUER_ADDR, "").await
+        ),
+        "XLM/USDC under the ids derived from their identities"
+    );
     assert_eq!(source, "sdex");
     assert_eq!(trade_count, 3, "the dust fill is still a trade");
     assert_eq!(version, 100_000, "ledger 100 * 1000 + operation index 0");

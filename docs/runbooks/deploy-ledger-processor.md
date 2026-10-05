@@ -244,6 +244,12 @@ protocol 27, 28 decodes 28. When mainnet advances past our pin, the processor
 hits an XDR **decode wall** — and the failure is silent in every way that
 matters.
 
+Usually. Protocol 29 changed apply rules and no XDR, so `stellar-xdr` 28 kept
+decoding and no 29 crate was published (task 0325). It still stalled us for 14
+hours, through BE's Galexie, whose captive core must match every protocol. After
+any vote, read the candle frontier (the `latest_candle` query in step 6)
+whatever the protocol check says.
+
 That is not hypothetical. Protocol 27 "Zipper" froze the live candle frontier
 at ledger `~63,384,067` for **six days**. Throughout, the SQS queue drained
 normally and both it and the DLQ were empty (nothing to redrive), the Lambda

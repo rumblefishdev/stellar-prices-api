@@ -207,7 +207,7 @@ impl CandleSink for PoolSink {
         Ok(())
     }
 
-    async fn write_new_assets(&self, _: &AssetRegistry, _: u32) -> Result<(), SinkError> {
+    async fn write_new_assets(&self, _: &AssetRegistry) -> Result<(), SinkError> {
         Ok(())
     }
 

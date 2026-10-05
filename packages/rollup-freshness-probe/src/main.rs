@@ -17,6 +17,10 @@
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
+    use rollup_freshness_probe::asset_id_uniqueness::{
+        AssetIdCounts, OrphanCandleCounts, collisions_metric, collisions_query,
+        orphan_candles_metric, orphan_candles_query,
+    };
     use rollup_freshness_probe::current_prices::{
         CurrentPricesAge, current_prices_age_query, current_prices_metric,
     };
@@ -68,17 +72,19 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let stranded_query = Arc::new(stranded_query());
     let peg_query = Arc::new(peg_query());
     let zero_invariant_query = Arc::new(zero_invariant_query());
+    let collisions_query = Arc::new(collisions_query());
+    let orphan_candles_query = Arc::new(orphan_candles_query());
     let refresh_waits_query = Arc::new(refresh_waits_query("prices"));
     // The mismatch reads are the only ones here whose cost grows with a week
     // of the child tier (the 15m read scans seven days of `_1m`: 0.7–4.0 s on
     // 26.3.10.60 over ~3 M rows with 8 threads, unmeasured on prod, where the
     // CPU is shared with the BE tenant). Six reads at a 10 s bound would be the
     // whole 60 s Lambda timeout (eventbridge-stack.ts) on their own, after the
-    // freshness, disk, USD, drift (~2 round trips per declared MV, 12 now) and
-    // zero-invariant reads. So the per-read bound is NOT fixed: each read gets
-    // `min(10 s, time left − 5 s reserve)` from the invocation's deadline, and a
-    // read that would get under 2 s is skipped and recorded as a failure — see
-    // `reconcile_mismatch` (review WR-04).
+    // freshness, disk, USD, drift (~2 round trips per declared MV, 12 now),
+    // zero-invariant and asset-id reads. So the per-read bound is NOT fixed:
+    // each read gets `min(10 s, time left − 5 s reserve)` from the invocation's
+    // deadline, and a read that would get under 2 s is skipped and recorded as
+    // a failure — see `reconcile_mismatch` (review WR-04).
     let mismatch_queries = Arc::new(mismatch_queries());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -95,6 +101,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let stranded_query = stranded_query.clone();
         let peg_query = peg_query.clone();
         let zero_invariant_query = zero_invariant_query.clone();
+        let collisions_query = collisions_query.clone();
+        let orphan_candles_query = orphan_candles_query.clone();
         let refresh_waits_query = refresh_waits_query.clone();
         let mismatch_queries = mismatch_queries.clone();
         let environment = environment.clone();
@@ -353,7 +361,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
             //
-            // Late on purpose (only the mismatch reads, 6, come after it). It is the one unscoped read here: `timestamp` is the
+            // Late on purpose (only 5b and the mismatch reads, 6, come after it). It is the one unscoped read here: `timestamp` is the
             // fourth sort-key column, so the 48 h window prunes only to the monthly
             // partition, which is then merged `FINAL` across every pair. Measured on
             // production 2026-09-18 it is cheap (0.04 s, 650k rows read) — but it
@@ -388,6 +396,54 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     }
                 }
                 Err(e) => failures.push(format!("zero-invariants read: {e}")),
+            }
+
+            // ---- 5b. Asset-id uniqueness (task 0139) ----------------------
+            //
+            // Two independent reads, after the zero invariants for the same
+            // reason: they grow with the data (the registry, and the live tip
+            // of `_1m` against it). A refusal is an empty read, recorded as a
+            // failure rather than published as a healthy 0.
+            let mut id_counts: Option<AssetIdCounts> = None;
+            match ch.query(&collisions_query).fetch_one::<AssetIdCounts>().await {
+                Ok(counts) => {
+                    id_counts = Some(counts);
+                    match collisions_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("asset-id-collisions publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("asset-id-collisions: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("asset-id-collisions read: {e}")),
+            }
+
+            let mut orphan_counts: Option<OrphanCandleCounts> = None;
+            match ch
+                .query(&orphan_candles_query)
+                .fetch_one::<OrphanCandleCounts>()
+                .await
+            {
+                Ok(counts) => {
+                    orphan_counts = Some(counts);
+                    match orphan_candles_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("asset-id-orphans publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("asset-id-orphans: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("asset-id-orphans read: {e}")),
             }
 
             // ---- 6. Coarse buckets disagreeing with their source (0203) ---
@@ -485,6 +541,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 usd_stranded_scanned = %reading(stranded_counts.map(|c| c.scanned), FAILED),
                 zero_invariant_violations = %reading(zero_counts.map(|c| c.violations), FAILED),
                 zero_invariant_scanned = %reading(zero_counts.map(|c| c.scanned), FAILED),
+                asset_identities = %reading(id_counts.map(|c| c.identities), FAILED),
+                asset_ids = %reading(id_counts.map(|c| c.ids), FAILED),
+                asset_id_orphan_candles = %reading(orphan_counts.map(|c| c.orphans), FAILED),
+                asset_id_orphan_scanned = %reading(orphan_counts.map(|c| c.scanned), FAILED),
                 mv_drift_critical = %reading(drift_critical, drift_missing),
                 mv_drift = %reading(drift_count, drift_missing),
                 mv_visible_objects = %reading(visible_objects, FAILED),
@@ -526,6 +586,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "zero_invariants": {
                     "violations": zero_counts.map(|c| c.violations),
                     "scanned": zero_counts.map(|c| c.scanned),
+                },
+                "asset_id_uniqueness": {
+                    "identities": id_counts.map(|c| c.identities),
+                    "ids": id_counts.map(|c| c.ids),
+                    "orphan_candles": orphan_counts.map(|c| c.orphans),
+                    "orphan_scanned": orphan_counts.map(|c| c.scanned),
                 },
                 "mv_drift": {
                     "critical": drift_critical,

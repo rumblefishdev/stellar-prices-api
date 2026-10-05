@@ -901,6 +901,10 @@ mod tests {
     /// Two rows for one identity means the registry is ambiguous — the counts
     /// would be a union across legs and the alarm would be reading something
     /// nobody designed. Refuse that too, rather than picking one.
+    ///
+    /// `assets FINAL` cannot produce it: it keeps one row per identity, and
+    /// since task 0139 that row's id is derived from the identity, so no other
+    /// identity can share it either. The guard stays as a cheap assertion.
     #[test]
     fn an_ambiguous_usdt_identity_is_refused() {
         assert_eq!(
@@ -917,8 +921,8 @@ mod tests {
 
     /// The guard `resolved_legs` cannot provide. The identity resolves cleanly,
     /// so the first guard passes — but the `asset_id` it resolves to is not the
-    /// `quote_asset_id` the candles carry (task 0139 renumbering, a registry
-    /// rewrite), so the scan matches nothing. The count is zero because nothing
+    /// `quote_asset_id` the candles carry (candles left in an old id space by
+    /// task 0139's migration, a registry rewrite), so the scan matches nothing. The count is zero because nothing
     /// was examined, and `NOT_BREACHING` would score that healthy.
     #[test]
     fn a_resolved_leg_that_matches_no_candles_is_refused() {

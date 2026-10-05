@@ -476,10 +476,10 @@ mod tests {
     use super::*;
 
     /// ClickHouse's rendering of the live `mv_ohlcv_1m_to_15m`, captured verbatim
-    /// from `system.tables` on 26.3.10.60. Carries all three server injections
-    /// the parser must skip: no `IF NOT EXISTS`, an injected column list, and a
-    /// `DEFINER` clause.
-    const LIVE: &str = "CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m REFRESH EVERY 1 MINUTE APPEND TO prices.price_ohlcv_15m (`timestamp` DateTime, `asset_id` UInt32, `close_usd` Decimal(38, 14), `vwap` Nullable(Decimal(38, 14)), `version` UInt64) DEFINER = default SQL SECURITY DEFINER AS SELECT toStartOfInterval(t.timestamp, toIntervalMinute(15)) AS timestamp, argMax(close_usd, t.timestamp) AS close_usd, sum(version) AS version FROM prices.price_ohlcv_1m AS t FINAL WHERE t.timestamp >= toStartOfInterval(now() - toIntervalHour(2), toIntervalMinute(15)) GROUP BY timestamp, asset_id";
+    /// from `system.tables` on 26.3.10.60 (the id's type since task 0139).
+    /// Carries all three server injections the parser must skip: no `IF NOT
+    /// EXISTS`, an injected column list, and a `DEFINER` clause.
+    const LIVE: &str = "CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m REFRESH EVERY 1 MINUTE APPEND TO prices.price_ohlcv_15m (`timestamp` DateTime, `asset_id` UInt64, `close_usd` Decimal(38, 14), `vwap` Nullable(Decimal(38, 14)), `version` UInt64) DEFINER = default SQL SECURITY DEFINER AS SELECT toStartOfInterval(t.timestamp, toIntervalMinute(15)) AS timestamp, argMax(close_usd, t.timestamp) AS close_usd, sum(version) AS version FROM prices.price_ohlcv_1m AS t FINAL WHERE t.timestamp >= toStartOfInterval(now() - toIntervalHour(2), toIntervalMinute(15)) GROUP BY timestamp, asset_id";
 
     /// The same statement as the file declares it, after `formatQuerySingleLine`:
     /// `IF NOT EXISTS` survives, and neither injection is present.

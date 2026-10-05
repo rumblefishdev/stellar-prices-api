@@ -12,7 +12,8 @@
 //! against a shared/prod cluster.
 
 use clickhouse::Client;
-use prices_ingest_core::{CandleAccumulator, OhlcvCandle, TradeTick};
+use prices_clickhouse::asset_id::id_of;
+use prices_ingest_core::{AssetIdentity, CandleAccumulator, OhlcvCandle, TradeTick};
 use rust_decimal::Decimal;
 use sdex_backfill::sink::Sink;
 
@@ -27,15 +28,15 @@ fn ch_url() -> String {
 /// One flushed candle for (asset, quote) at the minute containing `closed_at`.
 fn candle(asset: u32, quote: u32, closed_at: i64, ledger: u32) -> Vec<OhlcvCandle> {
     let mut acc = CandleAccumulator::new();
-    acc.merge(&TradeTick {
+    acc.merge(TradeTick {
         ledger_sequence: ledger,
         closed_at,
         // Task 0286: a single ordinary fill in the ledger's first transaction.
         transaction_index: 0,
         operation_index: 0,
         claim_index: 0,
-        base_id: asset,
-        quote_id: quote,
+        base: AssetIdentity::Contract(format!("C{asset}")),
+        quote: AssetIdentity::Contract(format!("C{quote}")),
         price: Decimal::from(10),
         volume_base: Decimal::from(1),
         volume_quote: Decimal::from(10),
@@ -66,7 +67,13 @@ async fn per_source_candles_coexist_and_rewrites_are_idempotent() {
         .expect("truncate price_ohlcv_1m");
 
     let sink = Sink::new(&ch_url());
-    let pair = "asset_id = 1 AND quote_asset_id = 2";
+    // Task 0139: the ids of the identities `candle` writes, as ClickHouse derives them.
+    let pair = format!(
+        "asset_id = {} AND quote_asset_id = {}",
+        id_of("", "", "C1"),
+        id_of("", "", "C2")
+    );
+    let pair = pair.as_str();
 
     // Same (asset, quote, minute) under two different sources → two rows: source
     // is part of the RMT key, so they must not collapse into one.

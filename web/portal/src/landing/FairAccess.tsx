@@ -30,7 +30,7 @@ import {
  */
 
 const REASONS: readonly string[] = [
-  'Discord OAuth — no throwaway signups',
+  'Discord sign-in, gated on the Stellar Developers server',
   '1 req/s per key — 2x CoinGecko free tier',
   '100,000 requests/month quota',
   'AWS API Gateway infrastructure',

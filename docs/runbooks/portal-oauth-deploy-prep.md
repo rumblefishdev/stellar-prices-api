@@ -75,7 +75,7 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
    `<portal-host>` is **the host the backend answers on**, not the host the
    page is served from — since task 0194 those are two hostnames:
    `prices-api.sorobanscan.rumblefish.dev` runs the callback and sets the
-   session cookie, `sorobanscan.rumblefish.dev/api/` is the page it sends the
+   session cookie, `sorobanscan.rumblefish.dev/prices-api/` is the page it sends the
    visitor back to (`PORTAL_WEB_ORIGIN`). Register the former. In production:
 
    ```

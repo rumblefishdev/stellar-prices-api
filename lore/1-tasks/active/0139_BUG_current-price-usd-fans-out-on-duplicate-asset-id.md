@@ -2,7 +2,7 @@
 id: "0139"
 title: "current_price_usd returns duplicate rows — assets is keyed on natural identity, not asset_id"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0061", "0067", "0144", "0150", "0129"]
 tags:
@@ -10,6 +10,45 @@ tags:
 milestone: 2
 links: []
 history:
+  - date: "2026-10-02"
+    status: active
+    who: akot
+    note: >
+      Window preparation. PR #382 holds all of 0139 (task 0208's PR #347
+      merged into it, ITs ported to derived ids). The operator runs the
+      window over mTLS as dev_shared, with no SSH. Phase 3 pauses after
+      202202. The second pass re-ingests every listed month, with no
+      --min-excluded-rows. GA3: one window. See "Window preparation,
+      2026-10-02".
+  - date: "2026-10-01"
+    status: active
+    who: akot
+    note: >
+      Activated for implementation via GSD (plan 261001-fwh), one PR on
+      fix/0139, worked in .claude/worktrees/0139.
+  - date: "2026-10-01"
+    status: backlog
+    who: akot
+    note: >
+      Fix chosen: ClickHouse derives asset_id = xxh3(code:issuer:contract) as
+      UInt64 (MATERIALIZED on assets, EPHEMERAL identity + DEFAULT on the fact
+      tables); migration by copy + EXCHANGE TABLES; one PR; variant A (0286
+      phase 3 paused after 2021-12, Oskar decides). GA1, GA2 and OP1 decided.
+      See "Decision, 2026-10-01".
+  - date: "2026-09-30"
+    status: backlog
+    who: akot
+    note: >
+      Research spike (no fix chosen, nothing promoted). Re-measured as
+      `dev_read`: 3,315 ids serve 6,636 identities. Classified ALL of them,
+      not a sample: 100% are unrelated assets, 0 superseded identities — AC 1
+      is answered. O2 is answered: XLM (id 4, not 9), USDC (3) and USDT (111)
+      are clean and `usd_reference` is not contaminated. New: the candles
+      under a colliding id are BLENDS of both assets (checked against
+      Horizon), 164.8M `price_ohlcv_1m` rows (23%) sit under colliding ids,
+      prod has no Keeper, and a 32-bit hash id would already collide 5-8
+      times. Options for allocation, repair and view joins are compared in
+      the spike summary; see "Re-measured on prod, 2026-09-30".
   - date: 2026-09-17
     status: backlog
     who: okarcz
@@ -158,6 +197,225 @@ prices.assets FINAL rows                        209,291
   compares per-minute totals (no identity needed) and excludes pairs that touch
   a colliding id.
 
+## Re-measured on prod, 2026-09-30 — research spike
+
+Taken as `dev_read` (`readonly=1`) at 11:54 UTC, `uniqExact` / `FINAL` throughout.
+This was research only: no fix is chosen, and the option comparison (allocation,
+repair of collided ids, view joins) lives in the spike summary
+`.planning/spikes/SUMMARY-0139-asset-id-collision.md`, which is not committed.
+
+```
+asset_ids serving >1 identity                     3,315   (3,312 on 09-17)
+identities living under those ids                 6,636   (6,630 on 09-17)
+ids with 2 identities / with 3                    3,309 / 6
+prices.assets FINAL rows = distinct identities  210,519
+distinct asset_ids                              207,198   (max 207,929; 731 unused below max)
+identities carrying more than one id                  0   (raw rows, not FINAL)
+```
+
+- ⚠️ **`count()` reads 3x again** (631,509 raw rows). Two full 210k-row re-emits
+  landed today (08:30 and 10:36 UTC), so the 09-17 note that `count()` is stable
+  no longer holds, and every colliding row now carries a 2026-09-30 `updated_at`.
+- **XLM is `asset_id 4`**, not 9 as written below. USDC is 3, USDT is 111.
+
+### Collision or superseded identity — the whole population, not a sample
+
+| class | ids | share |
+|---|---|---|
+| unrelated: different code and different issuer | 3,262 | 98.40% |
+| unrelated: same issuer, different code | 36 | 1.09% |
+| unrelated: classic asset vs soroban contract | 10 | 0.30% |
+| unrelated: 3 identities, partial issuer overlap | 5 | 0.15% |
+| unrelated: same code, different issuer | 2 | 0.06% |
+| superseded (same code+issuer gaining a contract, or a contract equal to a sibling's `sac_address`) | **0** | **0%** |
+
+**Option 2 does not occur.** Every colliding id is a genuine collision. The
+inverse defect ([[0242]]) exists separately: 13 soroban rows are the SAC of a
+classic asset held under a different id (11 when 0242 was filed).
+
+### O2 — answered: the reference ids are clean
+
+XLM (4), canonical USDC (3) and USDT (111) each serve exactly one identity.
+`usd_reference` admits 4,640 daily candles through its two `assets` joins and
+exactly 4,640 sit on the `(4, 3)` key, so no foreign candle is admitted.
+
+### Where the collisions sit
+
+Contiguous id runs: 4188–5044 (856 ids), 25292–25417 (126), 56827–56878 (52),
+71123–71144 (22), 122540–124754 (2,213, including all six triples), then 46 ids
+scattered from 200539 to 207539. The scattered ones are the live era: first
+candles from 2026-07-28 to 2026-09-26, about one new collision every 1.3 days,
+36 of the 46 pairing two assets of the same issuer.
+
+Inference, not measured: the live ledger processor loads its registry once per
+cold start and never reloads, and `reservedConcurrency: 1` does not limit the
+number of warm containers, so the live path can collide with itself. Overlapping
+components are not the only mechanism.
+
+### The candles under a colliding id are blends
+
+Checked against public Horizon for four live-era ids (202950 IDR/IRR, 203911
+AMERWATER/XRPBONDS, 204205 META/MICROSOFT, 202539 AMEX/MCKESSON): both identities
+trade, and on the days both traded our single daily candle has `trade_count 2`.
+A row carries nothing that says which identity it belongs to, so the stored
+candles cannot be split after the fact. Four ids is a small sample; Horizon
+keeps about a year, so the 2016–2022 runs cannot be checked this way.
+
+### Rows under colliding ids, per table keyed on `asset_id` (FINAL)
+
+| table | base id colliding | quote id colliding | rows touching | partitions |
+|---|---|---|---|---|
+| `price_ohlcv_1m` | 164,797,083 | 2,179,927 | 166,312,541 of 716,759,854 (23%) | 92 |
+| `price_ohlcv_15m` | 21,339,031 | 786,141 | 21,982,454 | 93 |
+| `price_ohlcv_1h` | 9,810,491 | 776,835 | 10,516,098 | 120 |
+| `price_ohlcv_4h` | 4,389,612 | 498,211 | 4,849,485 | 120 |
+| `price_ohlcv_1d` | 1,427,390 | 238,829 | 1,647,655 of 25,614,171 (6.4%) | 120 |
+| `price_ohlcv_1w` | 359,838 | 77,992 | 430,368 of 6,818,322 | 120 |
+| `price_ohlcv_1M` | 109,205 | 28,519 | 134,346 of 2,496,478 | 120 |
+| `asset_supply` | 3,315 | — | 3,315 of 207,159 | 1 |
+| `current_prices` | 326 (276 priced) | — | 326 of 4,096 | 1 |
+| `oracle_prices`, `asset_metadata` | 0 | — | 0 | — |
+
+Not long tail in row terms: 826 ids carry 99% of the 1m rows and the largest has
+869,102. Another 17 backup tables (about 785M raw rows) are keyed the same way.
+Already orphaned: 12 base ids in `price_ohlcv_1d` (274 rows) and 12
+`asset_supply` ids have no `assets` row.
+
+### Fan-out per view
+
+| view | returned | expected | excess |
+|---|---|---|---|
+| `current_price_usd` | 4,418 | 4,092 | +326 (8.0%); `volume_24h_usd` over-reported by $3,634.53 |
+| `price_usd_series`, 2026-09-01..29 | 103,731 | 97,496 | +6,235 (6.4%) |
+| `price_usd_series_coverage`, same window | 117,522 | 110,398 | +7,124 (6.5%) |
+| `price_usd_series_1h`, week 09-22..28 | 135,183 | 131,435 | +3,748 (2.9%) |
+| `price_usd_series_coverage_1h`, same week | 167,179 | 162,410 | +4,769 (2.9%) |
+| series base arm over all history, from `price_ohlcv_1d` | 12,606,655 | 11,749,183 | +857,472 (7.3%) |
+| same, from `price_ohlcv_1h` | 83,368,531 | 75,140,427 | +8,228,104 (10.95%) |
+| `usd_reference`, `_1h`, `identity_by_contract` | — | — | 0 |
+
+The series views cannot be read in full as `dev_read` (3.73 GiB cap), hence the
+windows; the all-history rows are derived from the candle tables (one published
+row per identity on the id, per id-bucket) and are an upper bound on rows.
+
+### Two constraints on any allocator fix
+
+- **Prod has no Keeper.** `system.zookeeper` does not exist and nothing is
+  replicated, so `generateSerialID` and `KeeperMap` are unusable as deployed.
+- **A 32-bit hash of the identity is not viable.** Hashing the 210,520 real
+  identities gives 5–8 shared ids with four 32-bit functions (expected 5.2) and
+  0 with four 64-bit ones. A hash-derived id means `UInt64` key columns.
+
+### How it was measured
+
+47 read-only queries over `prices.assets`, the seven `price_ohlcv_*` tiers, the
+small id-keyed tables, the eight views and `system.*`. An id is "colliding" when
+`assets FINAL` holds more than one row for it. View fan-out is returned rows
+against rows expected with one identity per id. Attribution used Horizon's
+public `/trades` endpoint per identity against XLM. Queries and outputs are kept
+with the spike, outside the repo.
+
+## Decision, 2026-10-01 — the database derives `asset_id` from the identity
+
+Decided by Adam after spikes 005–008 (`.planning/spikes/`, not committed). The
+plan is `.planning/quick/261001-fwh-*/261001-fwh-PLAN.md`.
+
+- **Formula:** `asset_id = xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))`,
+  `UInt64`, no counter. Case preserved, empty fields stay empty, native XLM is
+  `XLM::`, 0 forbidden (the REDSTONE no-asset sentinel). XLM becomes
+  `5209214538714742248`; 4194's STW and ARBRIDGE get two different ids.
+- **ClickHouse computes it, the backend never does.** `assets`: `MATERIALIZED`
+  (a writer sending `asset_id` is rejected). Candle tiers and `oracle_prices`:
+  identity in six `EPHEMERAL` columns, ids as `DEFAULT xxh3(…)` — not
+  `MATERIALIZED`, because the rollup MVs and enrichment `INSERT … SELECT` the
+  id. clickhouse crate 0.13.3 inserts through EPHEMERAL (spike 008); ≥ 0.14
+  would break every writer (schema validation + qualified table names).
+- **UInt64, not UInt32.** A 32-bit hash already collides 5–8 times today. Cost
+  measured on prod: id columns are 0.17% of `price_ohlcv_1m` compressed
+  (37 MiB of 20.9 GiB, ratio 156:1); the 1m primary index is 1.17 MiB.
+- **Rejected:** `generateSerialID`, `generateUUIDv4`, snowflake (a new value on
+  every re-emit; two writers give one token two ids; serial needs a Keeper prod
+  does not have), the explorer's CityHash128, a 32-bit hash, any claim store.
+- **Migration keeps table names:** `assets` in place (`MODIFY` then
+  `MATERIALIZE COLUMN`); the other 11 id-keyed tables copied to `UInt64`
+  `__new` tables through an old→new map (incl. `0 → 0`) and swapped with
+  `EXCHANGE TABLES`. Rows under colliding ids are not copied; their months are
+  re-ingested. Writers stop for the window; coarse tiers get a gap backfill
+  after catch-up (the 15m MV only looks back 2 h).
+- **One PR** for all of 0139, merged on window day.
+- **Variant A:** 0286 phase 3 pauses after 2021-12 until the window, so
+  2022–2023 (95% of the colliding 1m rows) is ingested once. Oskar decides the
+  pause. Estimate with a 2026-10-20 window: done 2026-10-31…11-05.
+- **GA1:** drop `rollout_0286_bak_*` and `price_ohlcv_*_bak` once their owners
+  confirm; rename `reingest_0286_bak_*` to `*_pre0139`, keep the map as decoder.
+- **GA2:** colliding and orphan rows are not copied; the swapped-out
+  `X__pre0139` tables are the quarantine until the second pass verifies, then
+  dropped (no extra retention).
+- **OP1:** the MVs are recreated from prod's captured DDL, not from develop's
+  generator (which would also ship 0143/0203).
+- [[0242]] stays separate; the migration map already supports many old ids → one.
+
+Colliding 1m rows per year (prod, 2026-10-01): 2016–2021 ~2.0M over 63 months,
+2022 33.3M, 2023 136.2M, 2024 6.5M (2 months), 2026 0.3M (4 months). Prod disk:
+871 GiB free against 48 GiB for the copy.
+
+## Window preparation, 2026-10-02
+
+Decided by Adam:
+
+- **GA3: one window.** Readers and writers deploy together in W11, from one PR
+  (#382) merged on window day.
+- **Operator identity:** Adam's write certificate (`dev_shared`) over mTLS,
+  from a workstation. The window does not use SSH or the `default` user.
+  `prices_admin` is not enough: it gets `497` on `system.view_refreshes` and
+  has no `SYSTEM` and no `CREATE/DROP VIEW`. Checked on prod: `dev_shared`
+  reads all five `system` tables the tool needs, with `readonly = 0`. The runbook
+  is rewritten for this (`rk` with `--mtls-*`, and `chq` sends one HTTP request
+  per statement).
+- **Phase 3 pause:** stopped with SIGINT at 202202's `sdex` step and resumed
+  with `--to-month 202202`. **`PAUSE_MONTH` = 202202.** 202201 had already
+  finished on the old ids, so variant A's 2021-12 boundary was no longer
+  available. The cost is two more months in the second pass.
+- **Second pass: no `--min-excluded-rows`.** Every listed month is
+  re-ingested. N = 1000 would skip 14 of 65 months (2016-08…2017-10, 2020-03;
+  1,611 rows) to save about one day of the 5–6 day pass. That was not worth a
+  permanent hole.
+- **Task 0208 merged first.** PR #347 is in #382 (43862a76). Its epoch guard
+  carries u64 ids, its ITs take ids from identities (`ch_enrich_it` 70/70
+  locally), and the repair-coarse runbook names no literal id.
+
+Measured on prod 2026-10-02 (`dev_read`, read-only):
+
+```
+asset_ids serving >1 identity                     3,316
+count() − uniqExact(asset_id) (the alarm metric)  3,322
+free disk                                         866 GiB of 1.72 TiB
+the 12 migrated tables                            48.1 GiB (1m: 20.8 GiB, 798M rows)
+GA1 backups (rollout_/reingest_0286_bak_*, *_bak)  50.8 GiB
+ledger catch-up r (SQS age, 2026-08-14 backlog)   ≈ 10.7 → 2 h window: C ≈ 12 min
+```
+
+Rows the window will leave out (colliding + orphan, `price_ohlcv_1m`), by
+year, months ≤ `PAUSE_MONTH`:
+
+| year | months listed | rows |
+|---|---|---|
+| 2016 | 3 of 12 | 29 |
+| 2017 | 12 of 12 | 9,990 |
+| 2018 | 12 of 12 | 452,072 |
+| 2019 | 12 of 12 | 539,952 |
+| 2020 | 12 of 12 | 513,853 |
+| 2021 | 12 of 12 | 405,496 |
+| 2022 (01–02) | 2 of 2 | 109,958 |
+| **≤ 202202** | **65** | **2,031,350** |
+
+After 202202: 176.2M rows. Phase 3's first pass re-ingests those months on the
+new ids anyway.
+
+AWS state before the window: the ledger-processor ESM
+`2ac67754-b92b-426c-b690-203d91b861a5` is `Enabled`. The five writer rules are
+`ENABLED` and `prices-production-cleanup` is `DISABLED`.
+
 ## The deeper question this exposes
 
 374 duplicate rows is the symptom. **3,275 asset_ids mapped to more than one
@@ -291,12 +549,15 @@ stopgap. Spawn accordingly.
 
 ## Acceptance Criteria
 
-- [ ] Determined whether the 3,275 duplicated `asset_id`s are ID collisions or
+- [x] Determined whether the 3,275 duplicated `asset_id`s are ID collisions or
       superseded natural-identity rows, with the measurement recorded.
+      **2026-09-30: all 3,315 are collisions, 0 superseded.**
 - [ ] `current_price_usd` returns exactly one row per `current_prices` row.
 - [ ] Every other view in `views.sql` audited for the same join defect.
-- [ ] **O2 — the XLM-native and USDC `asset_id`s checked against the 3,279
-      duplicates** (one query; see the open section above). If either collides,
+- [x] **O2 — the XLM-native and USDC `asset_id`s checked against the 3,279
+      duplicates** (one query; see the open section above). **2026-09-30: XLM
+      (4), USDC (3) and USDT (111) are clean; no foreign candle is admitted.**
+      If either collides,
       `usd_reference` / `_1h` admit foreign candles as XLM/USDC and contaminate
       the pivot tier's `xlm_usd` — invisibly, because uniform duplication leaves
       the weighted value unchanged. Low prior, but it must not be assumed.

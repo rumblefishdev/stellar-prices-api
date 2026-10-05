@@ -23,6 +23,14 @@ is how protocol 27 froze the live candles for six days (tasks 0091 / 0094).
 Nothing in our repository changes when that happens, so a check on push or pull
 request cannot see it. The watch runs on a clock instead.
 
+⚠️ **The protocol number is a proxy for the XDR, and protocol 29 broke it**
+(task 0325). stellar-core v29 pins the same XDR commit as v28.0.1, so
+`stellar-xdr` 28 decodes protocol 29 and no `stellar-xdr` 29 was published.
+What stopped ingestion on 2026-10-01 was BE's Galexie: its captive core must
+match the protocol whatever the XDR does, and this watch cannot see it. That
+stall was caught by the CloudWatch alarms (`production-galexie-ingestion-lag`
+after 9 min, `rollup-freshness-1m` after 22 min).
+
 ## What it checks
 
 Four readings, compared every run:
@@ -45,13 +53,13 @@ newest crate was 28.0.1 — there was nothing to bump to yet.
 can do something.** A protocol that is announced but has no crate to bump to is
 reported, but stays green.
 
-| Tier         | Condition                                                                       | Run       | Issue                                                          | Notification                          |
-| ------------ | ------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------- | ------------------------------------- |
-| **OK**       | pin ≥ core supports                                                             | green     | an open one is commented "Resolved" and **closed**             | the close comment                     |
-| **WAITING**  | pin < core supports, **no** stable `stellar-xdr` for that protocol on crates.io | **green** | **none opened**; an open one is closed as "not actionable yet" | none (only the close comment, if any) |
-| **LAGGING**  | pin < core supports, a stable crate for it **is** published                     | red       | **opened**, body says _bump now_                               | issue opened + GitHub's failure email |
-| **BEHIND**   | pin < mainnet current — mainnet already voted                                   | red       | opened, or the LAGGING one gets an "Escalated" comment         | yes, once                             |
-| **NO CHECK** | Horizon or crates.io could not be read                                          | red       | **untouched** — nothing is opened, edited or closed            | GitHub's failure email only           |
+| Tier         | Condition                                                                                          | Run       | Issue                                                          | Notification                          |
+| ------------ | -------------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------- | ------------------------------------- |
+| **OK**       | pin ≥ core supports                                                                                | green     | an open one is commented "Resolved" and **closed**             | the close comment                     |
+| **WAITING**  | pin < core supports or mainnet current, **no** stable `stellar-xdr` for that protocol on crates.io | **green** | **none opened**; an open one is closed as "not actionable yet" | none (only the close comment, if any) |
+| **LAGGING**  | pin < core supports, a stable crate for it **is** published                                        | red       | **opened**, body says _bump now_                               | issue opened + GitHub's failure email |
+| **BEHIND**   | pin < mainnet current — mainnet already voted — and a stable crate for it **is** published         | red       | opened, or the LAGGING one gets an "Escalated" comment         | yes, once                             |
+| **NO CHECK** | Horizon or crates.io could not be read                                                             | red       | **untouched** — nothing is opened, edited or closed            | GitHub's failure email only           |
 
 Rules that are easy to get wrong:
 
@@ -60,6 +68,12 @@ Rules that are easy to get wrong:
   nobody could make, because no crate existed. Now the report still says WAITING
   on the run summary, but nothing notifies until the crate is published. That
   day the run turns red and the issue opens: that is the notification.
+- **WAITING also covers a vote with no crate** (task 0325). Mainnet on a
+  protocol with no published `stellar-xdr` is green too: there is nothing to
+  bump to, and the protocol may not have changed XDR at all (29 did not). The
+  cost: a protocol that does change XDR, voted before its crate ships, stays
+  green here. That stall shows as frozen candles, which the
+  `rollup-freshness-*` and `ledger-processor-no-invocations` alarms catch.
 - **A check that could not complete is red, but opens no issue.** Horizon or
   crates.io being unreachable means nothing was measured. The failure email says
   so; there is no bump to ask for, so the issue is left alone. A watch that
@@ -100,9 +114,13 @@ it keeps failing, check whether `https://horizon.stellar.org/` or
    frozen until 0094 shipped it). Task 0277 is the protocol 28 bump, done this
    way.
 
-**BEHIND** — mainnet has voted and we can't decode new ledgers. Same steps as
-LAGGING, immediately, then verify the live candle frontier moves
+**BEHIND** — mainnet has voted and a crate for its protocol is published. Same
+steps as LAGGING, immediately, then verify the live candle frontier moves
 (`max(timestamp)` of `price_ohlcv_1m`).
+
+**After any vote, whatever the tier** — check the candle frontier anyway. A
+green watch only says the crate question is settled; Galexie can still be
+stalled (protocol 29).
 
 ## Running it by hand
 
@@ -117,6 +135,9 @@ npm run xdr:verify-protocol-gap
 # against a different Horizon or crates.io endpoint
 HORIZON_URL=https://horizon-testnet.stellar.org/ npm run xdr:watch-protocol-gap
 CRATES_URL=http://127.0.0.1:8765/fake-crate.json npm run xdr:watch-protocol-gap
+
+# every tier against a local mock, no network (CI runs it via `nx run-many -t test`)
+node --test tools/scripts/verify-xdr-protocol-gap.test.mjs
 ```
 
 Trigger the workflow itself (it runs from `master`, see below):

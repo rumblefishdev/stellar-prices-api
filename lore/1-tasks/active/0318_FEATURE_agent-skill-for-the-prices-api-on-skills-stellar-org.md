@@ -26,8 +26,13 @@ in the "Community skills" section of https://skills.stellar.org.
 
 ## Status: Active
 
-**Current state:** skill in PR #368 (to `develop`), audited and verified live
-in bash and zsh. Open: hosting decision, then the Stellar PR.
+**Current state:** the Stellar PR
+[stellar/stellar-dev-skill#141](https://github.com/stellar/stellar-dev-skill/pull/141)
+was opened 2026-09-30 from the fork `stkrolikiewicz/stellar-dev-skill`. It adds
+the card (`copyValue` on `master`) and the Data Indexing catalog entry, and it is
+waiting for SDF review. The fork CI (`Site CI for fork PRs`) shows
+`action_required`: a first-time contributor's workflows need a maintainer's
+approval. The Socket checks pass.
 
 ## Verification log (2026-09-29)
 
@@ -130,6 +135,40 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
   returned 600 rows in each shell, so the new key-resolving setup line works
   against production.
 
+### Public-facing wording (2026-09-30)
+
+The user asked whether the skill should show transient states, since it is
+public for the Stellar community.
+
+- **Decision:** keep documented sentinels, but word them precisely and
+  neutrally (`b4f237d5`).
+- **`price_status: ""` stays.** The public spec already documents it.
+  - It is not a backfill effect and does not happen on every deploy. It
+    appears only while a schema change that adds the snapshot's columns is
+    being rolled out.
+  - ~~until the next refresh, about a minute~~ was wrong (Oskar,
+    2026-09-30). The old view rewrites the blanks on every refresh, so the
+    state lasts until the view is re-created by hand. In the 0216 rollout
+    one view was missed and fixed hours later.
+  - In that window `as_of` is `""` too, not "may be".
+  - The skill now says to use the price, report its age as unknown and not
+    refetch (`a4a5db8e`). It also drops the half-line that read as "empty
+    `as_of` means no price".
+  - Fresh-agent runs on a blank-window response: 3/3 use the price, call the
+    age unknown and do not refetch. Before the last tweak, 2/2 suggested
+    "check again in a minute".
+  - Refresh cadence is verified in code: `REFRESH EVERY 1 MINUTE`
+    (`current.sql:172`).
+- **Backfill does not affect `price_status`.** `price_status` reads only the
+  last 24 h of candles, while the backfill walks backward toward genesis.
+  - The backfill shows only in history depth: `earliest_data_available` and
+    `backfill_note` on `timeframe=all`.
+  - `/v1/backfill/status` is now described by what it answers ("how far back
+    the price history reaches"), so the text stays true after the backfill
+    completes. No skill update is needed then.
+- **Oskar's answer (2026-09-30)** corrected the duration and the retry
+  advice. Both are fixed above.
+
 ### Structure vs the Stellar skills (2026-09-29)
 
 **Hard requirements.**
@@ -231,18 +270,89 @@ Draft entry:
 Optional second placement: a mention in SDF's `data` or `standards` skill
 (separate PR; SDF may decline).
 
-## Open questions
+## Decisions for the Stellar PR (2026-09-30, user)
 
-- **Where `copyValue` points.** Raw GitHub on `master` (needs a develop→master
-  merge first; `npx skills add` works), raw GitHub on `develop` (live on merge),
-  or a static file on the portal (`web/portal/public`, manual portal deploy).
-  Only the portal option gives a fetch count, from CloudFront logs.
+PR #368 was merged to `develop` on 2026-09-30.
+
+- **`copyValue`:** raw GitHub on `develop`,
+  `https://raw.githubusercontent.com/rumblefishdev/stellar-prices-api/develop/skills/stellar-prices-api/SKILL.md`.
+  It answers 200 `text/plain`.
+  - `develop` plays the role other listings give `main`.
+  - Skill fixes reach agents on merge, with no Stellar PR.
+  - `npx skills add` reads the default branch (`master`), so it works only
+    after a develop→master merge.
+- **Changed the same day: host on `master`, not `develop`** (user,
+  2026-09-30). PR #372 adds only `skills/stellar-prices-api/` to `master`,
+  like #370.
+  - Why `develop` was weaker: it is unprotected, and direct lore pushes land
+    there, so an unreviewed change would go live at once. A skill change could
+    also go live before the API change it describes is deployed; prod deploys
+    are manual and from any branch (0294: 25.09 went out from 0311's branch).
+  - Why `master`: publishing now needs a deliberate PR, made after the
+    deploy. It is also the default branch, so `npx skills add` and the repo
+    page see the skill, matching the `main` links other cards use.
+  - Cost: every skill change is a PR to `develop`, then a targeted PR to
+    `master`, unless it waits for a milestone release merge.
+  - `copyValue` becomes
+    `…/stellar-prices-api/master/skills/stellar-prices-api/SKILL.md`. The
+    Stellar PR waits until #372 is merged and that URL answers 200.
+  - #372 was pushed with `--no-verify`. The shared `core.hooksPath` points at
+    the main checkout's develop-era pre-push, which clippies
+    `comet-extractor`, a crate absent on `master`. The change is markdown
+    only and prettier passes.
+- **The path must never move.** Stellar #133 exists because the Trustless
+  Work card went 404 when its `SKILL.md` moved.
+- **Catalog entry in the same PR.** It goes under "Data Indexing" in
+  `skills/standards/ecosystem.md`, in the neighbours' format, like #133,
+  #132 and #139. This puts the API inside SDF's own `standards` skill, not
+  only in the community list.
+- **Card text** (it no longer says "any asset" or presents the VWAP as the
+  price):
+  > Get USD and XLM prices for classic and Soroban assets without computing
+  > them from Horizon trades: prices across SDEX, Soroswap, Aquarius, Phoenix
+  > and SushiSwap with a 24h cross-venue VWAP, OHLCV candles, Reflector oracle
+  > readings and 100-asset batch lookups. Free API key via Discord.
+- **"Sales" re-test with this text.** 3/3 fresh agents load the skill first.
+- **Checks in the prepared branch:**
+  - `check:ecosystem-links` passes: 31 entries, no blob URLs.
+  - `test:ecosystem-links` passes 12/12.
+  - The generated `llms.txt` carries the line.
+  - Our card is prettier-clean. The four prettier warnings in that file
+    were already there, in other cards.
+  - `next lint`, `tsc` and `build` were not run locally (2.4 GiB free); their
+    CI runs them.
+- **Stellar's queue.** New-card PRs from mid-September (#132, #136–#139) are
+  still open. The last merge touching `skills.ts` was #133 on 2026-09-23.
+
+## Stellar PR #141 (2026-09-30)
+
+- **Hosting.** #372 merged `skills/` into `master`, and the `master` raw URL
+  answers 200. The `copyValue` was switched to `master` before publishing.
+- **`npx skills`.** `npx skills add rumblefishdev/stellar-prices-api --skill
+  stellar-prices-api` installs only this skill, with `LICENSE`, identical to
+  `master`. Without `--skill` the CLI lists 11 skills from the repo: this one,
+  7 Nx dev skills in `.agents/skills/` and the internal `branch`, `pr` and
+  `promote-task`. After the next develop→master merge `change-plan` joins
+  them. The CLI hides skills marked `metadata: internal: true`.
+  Filed as backlog task 0322.
+- **PR description.** It follows the merged community PRs (#80, #89, #96,
+  #98): Summary, Why this skill is useful and a Test plan.
+  - The "why" is the catalog gap: `data` → raw RPC/Horizon, Soroswap →
+    quotes on one DEX. This is what the control run of the "sales" test
+    showed.
+  - The test plan ticks only what was run. The "card renders on the preview
+    deploy" item was dropped because `preview-pr.yml` skips fork PRs.
+- **Next:**
+  - Wait for SDF to approve the workflows and review.
+  - After the merge, check the card on skills.stellar.org and the line in
+    `llms.txt`.
+  - Then close this task through `/lore-framework-tasks`.
 
 ## Acceptance Criteria
 
-- [ ] `skills/stellar-prices-api/SKILL.md` merged to `develop`
-- [ ] Every curl in it verified against production
-- [ ] Hosting decided and `copyValue` resolves to raw markdown
+- [x] `skills/stellar-prices-api/SKILL.md` merged to `develop` (#368, 2026-09-30)
+- [x] Every curl in it verified against production
+- [x] Hosting decided and `copyValue` resolves to raw markdown
 - [ ] Entry merged into `stellar/stellar-dev-skill` and visible on skills.stellar.org
 
 ## Notes

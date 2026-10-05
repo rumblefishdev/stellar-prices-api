@@ -462,7 +462,7 @@ async fn login_lands_an_unwired_issue_round_trip_on_failed() {
     let open = signed_in_app(true);
     let refused = fetch(&open, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
     assert_eq!(refused.status, StatusCode::SEE_OTHER);
-    assert_eq!(refused.location(), "/api/?issue=failed");
+    assert_eq!(refused.location(), "/prices-api/?issue=failed");
     assert!(refused.set_cookies().is_empty());
     // And not a body the browser would render as text.
     assert!(refused.body.is_empty(), "{:?}", refused.body);
@@ -493,11 +493,11 @@ async fn neither_arm_503s_on_a_deployment_with_no_credentials() {
 
     let signin = fetch(&router, LOGIN_PATH, &[]).await;
     assert_eq!(signin.status, StatusCode::SEE_OTHER);
-    assert_eq!(signin.location(), "/api/?signin=not_open");
+    assert_eq!(signin.location(), "/prices-api/?signin=not_open");
 
     let issue = fetch(&router, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
     assert_eq!(issue.status, StatusCode::SEE_OTHER);
-    assert_eq!(issue.location(), "/api/?issue=failed");
+    assert_eq!(issue.location(), "/prices-api/?issue=failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +524,7 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
     // real deployment has — is covered by the `app_with_keys` tests below.
     assert_eq!(
         reply.location(),
-        "/api/",
+        "/prices-api/",
         "the callback must land on the portal, and on a literal"
     );
 
@@ -655,7 +655,7 @@ async fn a_first_sign_in_issues_a_key_and_lands_on_the_welcome() {
     let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
     assert_eq!(gateway.with(|s| s.create_calls), 1);
     assert_eq!(gateway.with(|s| s.named(&key_name()).len()), 1);
@@ -673,7 +673,7 @@ async fn a_returning_sign_in_adopts_the_key_and_lands_plain() {
 
     let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
 
-    assert_eq!(reply.location(), "/api/");
+    assert_eq!(reply.location(), "/prices-api/");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
     assert_eq!(
         gateway.with(|s| s.create_calls),
@@ -704,7 +704,7 @@ async fn a_refused_sign_in_leaves_an_existing_session_alone() {
 
     let reply = sign_in_against(&app_against(&mock)).await;
 
-    assert_eq!(reply.location(), "/api/?signin=not_member");
+    assert_eq!(reply.location(), "/prices-api/?signin=not_member");
     // No session is issued …
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     // … and none is cleared either: the only `Set-Cookie` is the pending
@@ -736,7 +736,7 @@ async fn an_unreadable_age_parameter_signs_the_visitor_in_without_a_key() {
 
     let reply = sign_in_against(&app_with_keys_and(&discord, &gateway, settings)).await;
 
-    assert_eq!(reply.location(), "/api/");
+    assert_eq!(reply.location(), "/prices-api/");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
     assert_eq!(discord.member_calls(), 1, "membership is still proved");
     assert_eq!(
@@ -761,7 +761,7 @@ async fn an_unreadable_guild_parameter_still_refuses_sign_in() {
 
     let reply = sign_in_against(&app_with_keys_and(&discord, &gateway, settings)).await;
 
-    assert_eq!(reply.location(), "/api/?signin=unknown");
+    assert_eq!(reply.location(), "/prices-api/?signin=unknown");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(discord.member_calls(), 0);
 }
@@ -780,7 +780,7 @@ async fn a_control_plane_failure_at_sign_in_lands_plain_with_a_session() {
 
     let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
 
-    assert_eq!(reply.location(), "/api/");
+    assert_eq!(reply.location(), "/prices-api/");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
@@ -807,7 +807,7 @@ async fn a_too_young_account_signs_in_but_gets_no_key() {
     assert!(
         reply
             .location()
-            .starts_with("/api/?issue=too_young&wait_secs="),
+            .starts_with("/prices-api/?issue=too_young&wait_secs="),
         "{}",
         reply.location()
     );
@@ -839,7 +839,7 @@ async fn a_revoked_account_signs_in_and_lands_plain() {
 
     let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
 
-    assert_eq!(reply.location(), "/api/");
+    assert_eq!(reply.location(), "/prices-api/");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
@@ -859,7 +859,7 @@ async fn a_non_member_gets_no_key_either() {
 
     let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
 
-    assert_eq!(reply.location(), "/api/?signin=not_member");
+    assert_eq!(reply.location(), "/prices-api/?signin=not_member");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(gateway.with(|s| s.list_calls), 0);
     assert_eq!(gateway.with(|s| s.create_calls), 0);
@@ -896,7 +896,7 @@ async fn a_non_member_cannot_sign_in() {
     let reply = sign_in_against(&open).await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=not_member");
+    assert_eq!(reply.location(), "/prices-api/?signin=not_member");
     assert!(
         reply.cookie(cookies::SESSION_COOKIE).is_none(),
         "a refused sign-in must not leave a session behind"
@@ -927,7 +927,7 @@ async fn a_member_still_in_screening_is_refused_as_pending_rules() {
 
     let reply = sign_in_against(&app_against(&mock)).await;
 
-    assert_eq!(reply.location(), "/api/?signin=pending_rules");
+    assert_eq!(reply.location(), "/prices-api/?signin=pending_rules");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert!(reply.clears(cookies::PENDING_COOKIE));
 }
@@ -955,7 +955,7 @@ async fn an_unanswerable_membership_question_refuses_without_accusing() {
 
         let reply = sign_in_against(&app_against(&mock)).await;
 
-        assert_eq!(reply.location(), "/api/?signin=unknown");
+        assert_eq!(reply.location(), "/prices-api/?signin=unknown");
         assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     }
 }
@@ -996,7 +996,7 @@ async fn a_deployment_with_no_eligibility_settings_refuses_sign_in() {
 
     let reply = sign_in_against(&unwired).await;
 
-    assert_eq!(reply.location(), "/api/?signin=not_open");
+    assert_eq!(reply.location(), "/prices-api/?signin=not_open");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(
         mock.member_calls(),
@@ -1114,7 +1114,7 @@ async fn a_mismatched_state_is_rejected_and_issues_no_session() {
     // tab. What the refusal is made of has not changed — no session, no
     // exchange, the pending cookie untouched — only what the visitor is shown.
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     // And it leaves the browser's pending login alone — see
     // `an_unverifiable_callback_cannot_cancel_someone_elses_sign_in`.
@@ -1135,7 +1135,7 @@ async fn a_callback_with_no_pending_cookie_is_rejected() {
     let reply = fetch(&open, &format!("{CALLBACK_PATH}?code=c&state={state}"), &[]).await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(mock.exchanges(), 0);
 }
@@ -1159,7 +1159,7 @@ async fn replaying_a_callback_url_after_the_cookie_is_cleared_is_rejected() {
     // The replay: same URL, and the browser no longer holds the cookie.
     let second = fetch(&open, &uri, &[]).await;
     assert_eq!(second.status, StatusCode::SEE_OTHER);
-    assert_eq!(second.location(), "/api/?signin=failed");
+    assert_eq!(second.location(), "/prices-api/?signin=failed");
     assert!(second.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(
         mock.exchanges(),
@@ -1187,7 +1187,7 @@ async fn a_forged_state_signed_with_another_key_is_rejected() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert_eq!(mock.exchanges(), 0);
 }
 
@@ -1211,7 +1211,7 @@ async fn a_self_signed_pair_is_rejected() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert_eq!(mock.exchanges(), 0);
 }
 
@@ -1239,7 +1239,7 @@ async fn a_cancelled_sign_in_returns_to_the_portal_saying_so() {
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=cancelled");
+    assert_eq!(reply.location(), "/prices-api/?signin=cancelled");
     assert!(reply.clears(cookies::PENDING_COOKIE));
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
 }
@@ -1345,7 +1345,7 @@ async fn a_verified_callback_always_drops_the_pending_cookie() {
     )
     .await;
     assert_eq!(upstream.status, StatusCode::SEE_OTHER);
-    assert_eq!(upstream.location(), "/api/?signin=failed");
+    assert_eq!(upstream.location(), "/prices-api/?signin=failed");
     assert!(upstream.clears(cookies::PENDING_COOKIE));
 }
 
@@ -1398,16 +1398,19 @@ async fn only_access_denied_is_reported_as_a_cancellation() {
     let open = signed_in_app(true);
 
     for (error, expected) in [
-        ("access_denied", "/api/?signin=cancelled"),
-        ("invalid_scope", "/api/?signin=failed"),
-        ("server_error", "/api/?signin=failed"),
-        ("temporarily_unavailable", "/api/?signin=failed"),
-        ("invalid_request", "/api/?signin=failed"),
-        ("unauthorized_client", "/api/?signin=failed"),
+        ("access_denied", "/prices-api/?signin=cancelled"),
+        ("invalid_scope", "/prices-api/?signin=failed"),
+        ("server_error", "/prices-api/?signin=failed"),
+        ("temporarily_unavailable", "/prices-api/?signin=failed"),
+        ("invalid_request", "/prices-api/?signin=failed"),
+        ("unauthorized_client", "/prices-api/?signin=failed"),
         // Not in RFC 6749 §4.1.2.1 at all. Anything unrecognised is a failure,
         // not a cancellation — defaulting the other way is how a new Discord
         // error code would silently become "cancelled".
-        ("something_discord_invented_later", "/api/?signin=failed"),
+        (
+            "something_discord_invented_later",
+            "/prices-api/?signin=failed",
+        ),
     ] {
         let started = start_login(&open).await;
         let reply = fetch(
@@ -1449,7 +1452,7 @@ async fn the_error_value_never_reaches_the_redirect_target() {
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert!(!reply.location().contains("evil"));
     assert!(reply.headers.get("x-injected").is_none());
 }
@@ -1524,7 +1527,7 @@ async fn a_grant_that_is_not_exactly_the_two_scopes_is_refused() {
         .await;
 
         assert_eq!(reply.status, StatusCode::SEE_OTHER, "scope={drifted}");
-        assert_eq!(reply.location(), "/api/?signin=failed", "{drifted}");
+        assert_eq!(reply.location(), "/prices-api/?signin=failed", "{drifted}");
         assert!(reply.cookie(cookies::SESSION_COOKIE).is_none(), "{drifted}");
     }
 
@@ -1539,7 +1542,7 @@ async fn a_grant_that_is_not_exactly_the_two_scopes_is_refused() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_ne!(reply.location(), "/api/?signin=failed");
+    assert_ne!(reply.location(), "/prices-api/?signin=failed");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
 }
 
@@ -1567,7 +1570,7 @@ async fn a_failed_token_exchange_lands_with_no_upstream_detail() {
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     let body = String::from_utf8(reply.body.clone()).unwrap();
     assert!(!body.contains("upstream said no"), "{body}");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
@@ -1730,7 +1733,7 @@ async fn an_open_portal_whose_load_fails_lands_on_a_retryable_failure() {
 
     let login = fetch(&router, LOGIN_PATH, &[]).await;
     assert_eq!(login.status, StatusCode::SEE_OTHER);
-    assert_eq!(login.location(), "/api/?signin=failed");
+    assert_eq!(login.location(), "/prices-api/?signin=failed");
 
     // `/auth/me` cannot check a cookie without the signing key, and "nobody
     // is signed in" would be false for a visitor who is: a `503` the page
@@ -1759,7 +1762,7 @@ async fn an_open_portal_loaded_without_credentials_lands_on_the_closed_card() {
 
     let login = fetch(&router, LOGIN_PATH, &[]).await;
     assert_eq!(login.status, StatusCode::SEE_OTHER);
-    assert_eq!(login.location(), "/api/?signin=not_open");
+    assert_eq!(login.location(), "/prices-api/?signin=not_open");
 
     // No credentials means no sessions: a truthful "signed out".
     let me = fetch(&router, ME_PATH, &[]).await;
@@ -1847,7 +1850,7 @@ async fn an_issue_callback_on_a_failed_load_lands_on_issue_failed() {
     for sent in [with_cookie, without] {
         let reply = fetch(&failing, &callback, sent).await;
         assert_eq!(reply.status, StatusCode::SEE_OTHER);
-        assert_eq!(reply.location(), "/api/?issue=failed");
+        assert_eq!(reply.location(), "/prices-api/?issue=failed");
         assert!(
             reply.headers.get(header::SET_COOKIE).is_none(),
             "an unverified callback must leave the pending cookie alone"
@@ -1875,7 +1878,7 @@ async fn a_sign_in_callback_on_a_failed_load_lands_on_signin_failed() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert!(reply.headers.get(header::SET_COOKIE).is_none());
     assert_eq!(mock.exchanges(), 0);
 }
@@ -1901,7 +1904,7 @@ async fn a_callback_whose_load_fits_the_allowance_still_exchanges_the_code() {
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_ne!(reply.location(), "/api/?signin=failed");
+    assert_ne!(reply.location(), "/prices-api/?signin=failed");
     assert_eq!(mock.exchanges(), 1, "the token exchange must run");
 }
 
@@ -1928,7 +1931,7 @@ async fn a_callback_that_spent_its_allowance_loading_lands_on_signin_failed() {
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert_eq!(reply.location(), "/prices-api/?signin=failed");
     assert!(reply.clears(cookies::PENDING_COOKIE));
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(mock.exchanges(), 0, "the token exchange must not start");
@@ -1954,7 +1957,7 @@ async fn an_issue_callback_that_spent_its_allowance_loading_lands_on_issue_faile
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?issue=failed");
+    assert_eq!(reply.location(), "/prices-api/?issue=failed");
     assert!(reply.clears(cookies::PENDING_COOKIE));
     assert_eq!(mock.exchanges(), 0, "the token exchange must not start");
 }
@@ -2018,7 +2021,7 @@ async fn a_round_trip_lands_on_the_configured_web_origin() {
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(
         reply.location(),
-        "https://sorobanscan.example/api/?signin=cancelled"
+        "https://sorobanscan.example/prices-api/?signin=cancelled"
     );
     // The cookie work is unchanged by the host: still dropped on this host.
     assert!(reply.set_cookies().iter().any(|c| c.contains("Max-Age=0")));

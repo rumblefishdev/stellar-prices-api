@@ -8,6 +8,7 @@
 //! fine for the ephemeral Docker instance, never against a shared cluster.
 
 use asset_discovery::symbols::{MAX_SYMBOL_ATTEMPTS, load_unresolved_contracts};
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use prices_ingest_core::OhlcvWriter;
 
 fn ch_url() -> String {
@@ -38,11 +39,10 @@ async fn setup(client: &clickhouse::Client) {
         .await
         .expect("truncate assets");
     client
-        .query(
-            "INSERT INTO prices.assets (asset_id, asset_code, issuer_address, contract_address, \
-             asset_type) VALUES (1, '', '', ?, 'soroban')",
-        )
-        .bind(CONTRACT)
+        .query(&assets_insert(
+            "prices",
+            &[AssetFixture::new("", "soroban", "", CONTRACT)],
+        ))
         .execute()
         .await
         .expect("seed a soroban asset");

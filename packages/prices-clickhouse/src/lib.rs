@@ -12,6 +12,10 @@ use clickhouse::{Client, Compression};
 /// Lambdas. Companion to `mtls::require_env` (the must-be-set case).
 pub mod env;
 
+/// The one asset-id expression (task 0139): ClickHouse derives `asset_id`
+/// from the asset identity. Schema, migration and fixtures render it from here.
+pub mod asset_id;
+
 /// Shared observability setup for the worker Lambdas (`init_tracing`).
 pub mod observability;
 
@@ -28,6 +32,10 @@ pub mod drift;
 /// shipped file equals its rendering, whitespace-normalised.
 pub mod rollup_sql;
 
+/// The task-0139 migration tool: re-keys the asset-id tables onto derived
+/// ids by copy (`prices-clickhouse-rekey`).
+pub mod rekey;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).
@@ -37,22 +45,55 @@ pub mod mtls;
 /// Table schema embedded at compile time (DATABASE + all `prices.*` tables).
 pub const INIT_SQL: &str = include_str!("../schema/init.sql");
 
-/// The canonical candle column list, in DDL order, for every `price_ohlcv_*`
-/// table (task 0286 / ADR 0287). The first fifteen are the pre-0286 shape; the
-/// last three are the price-forming aggregates ADR 0287 §1 introduces.
+/// The stored candle columns, in DDL order, for every `price_ohlcv_*` table
+/// (task 0286 / ADR 0287). The first fifteen are the pre-0286 shape; the last
+/// three are the price-forming aggregates ADR 0287 §1 introduces.
 ///
-/// This exists because the ingest writer is **name-routed**, not positional:
-/// `clickhouse` 0.13 emits `INSERT INTO t(<struct field names>) FORMAT
-/// RowBinary`, so a candle column the row struct omits silently takes its
-/// column DEFAULT instead of erroring. On the pf columns that failure mode is
-/// invisible and wrong — `pf_trade_count DEFAULT trade_count` would report a
-/// dust-only minute as fully price-forming. So the DDL here and the field names
-/// of `OhlcvRow` in `packages/prices-ingest-core/src/writer.rs` are both pinned
-/// to this list by unit tests; change one and the other fails.
+/// The `_1m` CREATE and every `INSERT … SELECT` between tiers (the rollup
+/// generator, enrichment) name exactly this list; unit tests pin both. What the
+/// ingest writer sends is [`CANDLE_WRITER_COLUMNS`].
 pub const CANDLE_COLUMNS: [&str; 18] = [
     "timestamp",
     "asset_id",
     "quote_asset_id",
+    "source",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume_base",
+    "volume_quote",
+    "volume_quote_usd",
+    "close_usd",
+    "vwap",
+    "trade_count",
+    "version",
+    "pf_trade_count",
+    "pf_volume",
+    "pf_price_volume",
+];
+
+/// The columns the ingest writer names, i.e. the field names of `OhlcvRow` in
+/// `packages/prices-ingest-core/src/writer.rs`, pinned there by a unit test.
+///
+/// The writer is **name-routed**, not positional: `clickhouse` 0.13 emits
+/// `INSERT INTO t(<struct field names>) FORMAT RowBinary`, so a candle column
+/// the row struct omits silently takes its column DEFAULT instead of erroring.
+/// On the pf columns that failure mode is invisible and wrong —
+/// `pf_trade_count DEFAULT trade_count` would report a dust-only minute as
+/// fully price-forming.
+///
+/// It is [`CANDLE_COLUMNS`] with the two ids replaced by the six identity
+/// columns they are derived from (task 0139): the `_1m` CREATE declares those
+/// `EPHEMERAL`, so they are sent but never stored.
+pub const CANDLE_WRITER_COLUMNS: [&str; 22] = [
+    "timestamp",
+    "base_code",
+    "base_issuer",
+    "base_contract",
+    "quote_code",
+    "quote_issuer",
+    "quote_contract",
     "source",
     "open",
     "high",
@@ -485,15 +526,23 @@ mod tests {
     }
 
     /// Column names of a `CREATE TABLE` body, in DDL order: everything between
-    /// the opening `(` line and the closing `)` line, first identifier per line.
-    fn create_column_names(stmt: &str) -> Vec<String> {
-        stmt.lines()
+    /// the opening `(` line and the closing `)` line, first identifier per line,
+    /// split into stored and `EPHEMERAL` columns. `CONSTRAINT` lines are skipped.
+    fn create_column_names(stmt: &str) -> (Vec<String>, Vec<String>) {
+        let lines: Vec<&str> = stmt
+            .lines()
             .skip_while(|l| !l.trim_end().ends_with('('))
             .skip(1)
             .take_while(|l| !l.trim_start().starts_with(')'))
-            .filter_map(|l| l.split_whitespace().next())
-            .map(|t| t.trim_end_matches(',').to_string())
-            .collect()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("CONSTRAINT "))
+            .collect();
+        let name = |l: &&str| l.split_whitespace().next().map(|t| t.to_string());
+        let (ephemeral, stored): (Vec<&str>, Vec<&str>) =
+            lines.into_iter().partition(|l| l.contains(" EPHEMERAL"));
+        (
+            stored.iter().filter_map(name).collect(),
+            ephemeral.iter().filter_map(name).collect(),
+        )
     }
 
     /// Task 0286: the fresh `_1m` CREATE and [`CANDLE_COLUMNS`] are one contract.
@@ -502,12 +551,41 @@ mod tests {
     #[test]
     fn init_sql_1m_create_lists_every_candle_column_in_order() {
         let stmt = create_statement(INIT_SQL, "prices.price_ohlcv_1m");
-        let cols = create_column_names(&stmt);
+        let (stored, _) = create_column_names(&stmt);
         assert_eq!(
-            cols,
+            stored,
             CANDLE_COLUMNS.to_vec(),
-            "the _1m CREATE must list exactly CANDLE_COLUMNS, in order"
+            "the _1m CREATE must store exactly CANDLE_COLUMNS, in order"
         );
+    }
+
+    /// Task 0139: the writer sends the stored columns except the two ids, plus
+    /// the `_1m` CREATE's EPHEMERAL identity columns the ids are derived from.
+    #[test]
+    fn writer_columns_are_stored_columns_with_ids_replaced_by_identities() {
+        let stmt = create_statement(INIT_SQL, "prices.price_ohlcv_1m");
+        let (_, ephemeral) = create_column_names(&stmt);
+        assert_eq!(
+            ephemeral,
+            [
+                "base_code",
+                "base_issuer",
+                "base_contract",
+                "quote_code",
+                "quote_issuer",
+                "quote_contract"
+            ]
+        );
+        let mut want: Vec<&str> = CANDLE_COLUMNS
+            .iter()
+            .copied()
+            .filter(|c| !matches!(*c, "asset_id" | "quote_asset_id"))
+            .collect();
+        want.extend(ephemeral.iter().map(String::as_str));
+        let mut got = CANDLE_WRITER_COLUMNS.to_vec();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, want);
     }
 
     /// Task 0286: a `CREATE … AS` copy does not inherit a post-hoc base-table

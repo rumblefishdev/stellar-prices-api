@@ -25,9 +25,19 @@
 -- (task 0286): the clickhouse crate emits `INSERT INTO t(<struct field names>)
 -- FORMAT RowBinary`, so a column MISSING from the Row struct does not error —
 -- it silently takes this file's column DEFAULT. That is why
--- prices_clickhouse::CANDLE_COLUMNS pins the DDL below and the writer's field
--- names to one another, with a unit test on each side. Do not add, reorder or
--- retype a candle column without updating CANDLE_COLUMNS and the Row structs.
+-- prices_clickhouse::CANDLE_COLUMNS pins the DDL below and
+-- CANDLE_WRITER_COLUMNS the writer's field names, with a unit test on each
+-- side. Do not add, reorder or retype a candle column without updating both
+-- lists and the Row structs.
+--
+-- ## asset_id is derived by ClickHouse (task 0139)
+-- Every asset id is xxh3 of the identity, rendered by prices_clickhouse::asset_id
+-- (a unit test pins each expression below to its rendering). No writer sends an
+-- id: `assets` computes it (MATERIALIZED, so naming it is refused), and candle
+-- and oracle writers send the identity in EPHEMERAL columns that the id's
+-- DEFAULT reads. DEFAULT rather than MATERIALIZED on those, because the rollup
+-- MVs and enrichment copy ids between tiers with INSERT … SELECT. A CHECK
+-- refuses 0 and the id of a blank identity wherever an id must be an asset's.
 --
 -- ## Engine assignment
 --   - OHLCV fact tables       → ReplacingMergeTree(version), monthly partitions
@@ -47,11 +57,12 @@ CREATE DATABASE IF NOT EXISTS prices;
 ----------------------------------------------------------------------
 -- Asset registry (ReplacingMergeTree, last-write-wins on updated_at)
 -- §3.1. Populated by the backfill's AssetRegistry and, in production, the
--- Asset Discovery Lambda. asset_id is an app-assigned UInt32 surrogate.
+-- Asset Discovery Lambda. asset_id is derived from the identity (task 0139):
+-- two identities can never share one, so `FINAL` keeps one row per id.
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.assets (
-    asset_id         UInt32,
+    asset_id         UInt64        MATERIALIZED xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)),
     asset_code       String,
     asset_type       String,
     issuer_address   String        DEFAULT '',
@@ -64,7 +75,8 @@ CREATE TABLE IF NOT EXISTS prices.assets (
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),
-    updated_at       DateTime      DEFAULT now()
+    updated_at       DateTime      DEFAULT now(),
+    CONSTRAINT asset_id_derived CHECK asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', ''))
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_code, issuer_address, contract_address)
@@ -89,7 +101,7 @@ ALTER TABLE prices.assets ADD COLUMN IF NOT EXISTS sac_address String DEFAULT ''
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.asset_metadata (
-    asset_id     UInt32,
+    asset_id     UInt64,
     home_domain  String        DEFAULT '',
     updated_at   DateTime      DEFAULT now()
 )
@@ -128,8 +140,8 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     timestamp        DateTime      CODEC(DoubleDelta),
-    asset_id         UInt32,
-    quote_asset_id   UInt32,
+    asset_id         UInt64        DEFAULT xxh3(concat(base_code, ':', base_issuer, ':', base_contract)),
+    quote_asset_id   UInt64        DEFAULT xxh3(concat(quote_code, ':', quote_issuer, ':', quote_contract)),
     source           LowCardinality(String),
     open             Decimal(38, 14),
     high             Decimal(38, 14),
@@ -144,7 +156,16 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     version          UInt64,
     pf_trade_count   UInt32          DEFAULT trade_count,
     pf_volume        Decimal(38, 14) DEFAULT volume_base,
-    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote,
+    -- The identities the writer sends (task 0139). Not stored: the ids above
+    -- are their xxh3. Native XLM is code 'XLM' with empty issuer and contract.
+    base_code        String EPHEMERAL,
+    base_issuer      String EPHEMERAL,
+    base_contract    String EPHEMERAL,
+    quote_code       String EPHEMERAL,
+    quote_issuer     String EPHEMERAL,
+    quote_contract   String EPHEMERAL,
+    CONSTRAINT asset_ids_derived CHECK asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', '')) AND quote_asset_id != 0 AND quote_asset_id != xxh3(concat('', ':', '', ':', ''))
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -231,7 +252,7 @@ ALTER TABLE prices.price_ohlcv_1M
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.current_prices (
-    asset_id         UInt32,
+    asset_id         UInt64,
     price_usd        Decimal(38, 14),
     price_xlm        Decimal(38, 14),
     change_24h_pct   Decimal(10, 4),
@@ -337,7 +358,7 @@ ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_basis LowCardin
 -- cap (best-effort, general-overview §3.3). Sole writer = the supply worker.
 ----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS prices.asset_supply (
-    asset_id      UInt32,
+    asset_id      UInt64,
     token_supply  Decimal(38, 14),
     fetched_at    DateTime      DEFAULT now()
 )
@@ -407,10 +428,15 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS prices.oracle_prices (
     timestamp     DateTime      CODEC(DoubleDelta),
-    asset_id      UInt32,
+    asset_id      UInt64        DEFAULT if(concat(asset_code, ':', issuer_address, ':', contract_address) = '::', 0, xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))),
     oracle_name   LowCardinality(String),
     price_usd     Decimal(38, 14),
-    raw_data      String        CODEC(ZSTD(3))
+    raw_data      String        CODEC(ZSTD(3)),
+    -- The sampled asset's identity (task 0139). A feed with no asset (REDSTONE)
+    -- sends a blank one and is stored under the sentinel id 0.
+    asset_code       String EPHEMERAL,
+    issuer_address   String EPHEMERAL,
+    contract_address String EPHEMERAL
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)

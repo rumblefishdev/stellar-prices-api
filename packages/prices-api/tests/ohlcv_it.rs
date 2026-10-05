@@ -8,6 +8,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -24,6 +26,17 @@ fn rewrite(sql: &str, db: &str) -> String {
 fn iss() -> &'static str {
     prices_clickhouse::USDC_ISSUER
 }
+
+// The fixture assets. Each displays as its id, derived from its identity
+// (`asset_id::fixture`), so a candle written `({FOO}, {USDC}, …)` always agrees
+// with the `assets` row a test seeds for it.
+const XLM: AssetFixture = AssetFixture::new("XLM", "native", "", "");
+const USDC: AssetFixture = AssetFixture::new("USDC", "credit", USDC_ISSUER, "");
+const FOO: AssetFixture = AssetFixture::new("FOO", "credit", USDC_ISSUER, "");
+const BAR: AssetFixture = AssetFixture::new("BAR", "credit", USDC_ISSUER, "");
+const BAZ: AssetFixture = AssetFixture::new("BAZ", "credit", USDC_ISSUER, "");
+const USDT: AssetFixture = AssetFixture::new("USDT", "credit", USDT_ISSUER, "");
+const GHOST: AssetFixture = AssetFixture::new("GHOST", "credit", USDC_ISSUER, "");
 
 /// Seed FOO/USDC candles in `price_ohlcv_1h`: bucket T1 has two sources (to
 /// exercise the merge), T2 a single source. SDEX backfill = running.
@@ -43,18 +56,11 @@ async fn setup(db: &str) -> Client {
         .await
         .unwrap();
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'XLM', 'native', '', ''), \
-             (2, 'USDC', 'credit', '{i}', ''), \
-             (3, 'FOO', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, FOO]))
         .execute()
         .await
         .unwrap();
-    // asset_id=3 (FOO) quoted in asset_id=2 (USDC).
+    // FOO quoted in USDC.
     //
     // `close_usd` is seeded EQUAL TO `close` (task 0170). Two reasons, and the
     // second is why the expected numbers below did not have to change:
@@ -76,9 +82,9 @@ async fn setup(db: &str) -> Client {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 3, 2, 'sdex',     1.0, 1.2, 0.9, 1.1, 100, 110, 1.1, 1.05, 10, 1), \
-             ('2026-02-10 10:00:00', 3, 2, 'soroswap', 1.05, 1.3, 0.95, 1.15, 300, 345, 1.15, 1.10, 20, 1), \
-             ('2026-02-10 11:00:00', 3, 2, 'sdex',     1.1, 1.15, 1.05, 1.12, 50, 56, 1.12, 1.1, 5, 1)"
+             ('2026-02-10 10:00:00', {FOO}, {USDC}, 'sdex',     1.0, 1.2, 0.9, 1.1, 100, 110, 1.1, 1.05, 10, 1), \
+             ('2026-02-10 10:00:00', {FOO}, {USDC}, 'soroswap', 1.05, 1.3, 0.95, 1.15, 300, 345, 1.15, 1.10, 20, 1), \
+             ('2026-02-10 11:00:00', {FOO}, {USDC}, 'sdex',     1.1, 1.15, 1.05, 1.12, 50, 56, 1.12, 1.1, 5, 1)"
         ))
         .execute()
         .await
@@ -248,15 +254,10 @@ async fn ohlcv_unknown_asset_is_404() {
 /// and ordering tests need. Separate from `setup` so the merge test's fixture
 /// stays exactly what it was.
 ///
-/// asset_id 4 = `BAR`, quoted in XLM (asset_id 1) throughout.
+/// `BAR`, quoted in XLM throughout.
 async fn seed_xlm_only(db: &str, admin: &Client) {
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'BAR', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[BAR]))
         .execute()
         .await
         .unwrap();
@@ -271,9 +272,9 @@ async fn seed_xlm_only(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1), \
-             ('2026-02-10 11:00:00', 4, 1, 'sdex', 11.0, 11.0, 11.0, 11.0, 20, 0, 0, 11.0, 3, 1), \
-             ('2026-02-10 12:00:00', 4, 1, 'sdex', 13.0, 13.0, 13.0, 13.0, 5, 5, 13.0, 13.0, 2, 1)"
+             ('2026-02-10 10:00:00', {BAR}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1), \
+             ('2026-02-10 11:00:00', {BAR}, {XLM}, 'sdex', 11.0, 11.0, 11.0, 11.0, 20, 0, 0, 11.0, 3, 1), \
+             ('2026-02-10 12:00:00', {BAR}, {XLM}, 'sdex', 13.0, 13.0, 13.0, 13.0, 5, 5, 13.0, 13.0, 2, 1)"
         ))
         .execute()
         .await
@@ -419,7 +420,7 @@ async fn ohlcv_converts_each_leg_before_merging_across_them() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 4, 2, 'sdex', 1.0, 1.3, 0.8, 1.2, 10, 12, 1.2, 1.2, 4, 1)"
+             ('2026-02-10 10:00:00', {BAR}, {USDC}, 'sdex', 1.0, 1.3, 0.8, 1.2, 10, 12, 1.2, 1.2, 4, 1)"
         ))
         .execute()
         .await
@@ -507,7 +508,7 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
         .await
         .unwrap();
     // The peg series takes its buckets from the XLM/USDC reference market
-    // (asset_id 1 quoted in asset_id 2), NOT from "any USDC-quoted candle":
+    // (XLM quoted in USDC), NOT from "any USDC-quoted candle":
     // price_ohlcv_* is ORDER BY (asset_id, quote_asset_id, …), so filtering on
     // the quote alone is not a key prefix and degenerates into a full FINAL
     // scan. `close_usd = 0.25` is XLM's USD price, which the XLM denomination
@@ -521,9 +522,9 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2024-01-05 09:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 11:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2024-01-05 09:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 10:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 11:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -574,9 +575,9 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-11 13:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-03-11 14:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-03-11 15:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2026-03-11 13:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-03-11 14:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-03-11 15:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -636,7 +637,7 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2026-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -705,7 +706,7 @@ async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2023-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2023-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -806,10 +807,10 @@ async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) \
-             SELECT toStartOfDay(toDateTime({EPOCH} - 86400)), 1, 2, 'sdex', \
+             SELECT toStartOfDay(toDateTime({EPOCH} - 86400)), {XLM}, {USDC}, 'sdex', \
                     0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
              UNION ALL \
-             SELECT toStartOfDay(toDateTime({EPOCH})), 1, 2, 'sdex', \
+             SELECT toStartOfDay(toDateTime({EPOCH})), {XLM}, {USDC}, 'sdex', \
                     0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1"
         ))
         .execute()
@@ -921,7 +922,7 @@ async fn ohlcv_usdc_oracle_outranks_a_later_import_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-08-10 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2026-08-10 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -1008,10 +1009,10 @@ async fn ohlcv_usdc_serves_an_imported_day_at_every_hour_of_it() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2023-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2023-03-11 13:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2023-03-11 23:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2023-03-12 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2023-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 13:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 23:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-12 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -1198,7 +1199,7 @@ async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-01 10:00:00', 3, 2, 'sdex', 0.00000000000005, 0.00000000000005, \
+             ('2026-03-01 10:00:00', {FOO}, {USDC}, 'sdex', 0.00000000000005, 0.00000000000005, \
               0.00000000000005, 0.00000000000005, 9, 9, 0.00000000000004, \
               0.00000000000005, 1, 1)"
         ))
@@ -1240,7 +1241,7 @@ async fn ohlcv_guards_a_zero_close() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-02 10:00:00', 3, 2, 'sdex', 0, 0, 0, 0, 4, 0, 2.0, 0, 1, 1)"
+             ('2026-03-02 10:00:00', {FOO}, {USDC}, 'sdex', 0, 0, 0, 0, 4, 0, 2.0, 0, 1, 1)"
         ))
         .execute()
         .await
@@ -1270,12 +1271,7 @@ async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (5, 'USDT', 'credit', '{u}', '')",
-            u = prices_clickhouse::USDT_ISSUER
-        ))
+        .query(&assets_insert(db, &[USDT]))
         .execute()
         .await
         .unwrap();
@@ -1285,7 +1281,7 @@ async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 10:00:00', 5, 2, 'sdex', 0.13, 0.14, 0.12, 0.13, 100, 13, 0.13, 0.13, 6, 1)"
+             ('2026-03-03 10:00:00', {USDT}, {USDC}, 'sdex', 0.13, 0.14, 0.12, 0.13, 100, 13, 0.13, 0.13, 6, 1)"
         ))
         .execute()
         .await
@@ -1321,12 +1317,7 @@ async fn ohlcv_never_traded_is_distinguishable_from_unrepresentable() {
     let admin = Client::default().with_url(ch_url()).with_database(db);
     seed_xlm_only(db, &admin).await;
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (6, 'GHOST', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[GHOST]))
         .execute()
         .await
         .unwrap();
@@ -1421,7 +1412,7 @@ async fn ohlcv_usdc_in_xlm_nulls_provenance_when_the_denominator_is_unpriced() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 12:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 0, 0, 0.25, 9, 1)"
+             ('2026-02-10 12:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 0, 0, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -1498,7 +1489,7 @@ async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 10:00:00', 3, 2, 'sdex', 1.1, 1.2, 1.0, 1.0, \
+             ('2026-03-03 10:00:00', {FOO}, {USDC}, 'sdex', 1.1, 1.2, 1.0, 1.0, \
               10, 10, 68421.98765432109876, 1.05, 3, 1)"
         ))
         .execute()
@@ -1544,7 +1535,7 @@ async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 11:00:00', 3, 2, 'sdex', 0.9, 1.0, 0.8, 1.0, \
+             ('2026-03-03 11:00:00', {FOO}, {USDC}, 'sdex', 0.9, 1.0, 0.8, 1.0, \
               10, 10, 76943.51350417596657, 0.95, 3, 1)"
         ))
         .execute()
@@ -1582,13 +1573,13 @@ async fn ohlcv_xlm_denomination_keeps_ohlc_ordered() {
     let db = "it_ohlcv_xlm_ordered_0229";
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
-    // FOO/XLM (quote_asset_id = 1), same awkward magnitude in the stored columns.
+    // FOO/XLM, same awkward magnitude in the stored columns.
     admin
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 12:00:00', 3, 1, 'sdex', \
+             ('2026-03-03 12:00:00', {FOO}, {XLM}, 'sdex', \
               68421.98765432109876, 68421.98765432109876, 68421.98765432109876, \
               68421.98765432109876, 10, 10, 68421.98765432109876, \
               68421.98765432109876, 3, 1)"
@@ -1634,7 +1625,7 @@ async fn ohlcv_peg_series_keeps_ohlc_ordered() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 13:00:00', 1, 2, 'sdex', 0.2, 0.21, 0.19, 0.2, \
+             ('2026-03-03 13:00:00', {XLM}, {USDC}, 'sdex', 0.2, 0.21, 0.19, 0.2, \
               100, 20, 0.2, 0.2, 5, 1)"
         ))
         .execute()
@@ -1695,7 +1686,7 @@ async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_cl
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 14:00:00', 3, 2, 'sdex', 1000, 1000, 1000, 0.000000000001, \
+             ('2026-03-03 14:00:00', {FOO}, {USDC}, 'sdex', 1000, 1000, 1000, 0.000000000001, \
               10, 10, 10000000000, 1000, 3, 1)"
         ))
         .execute()
@@ -1747,7 +1738,7 @@ async fn ohlcv_vwap_cannot_round_above_the_high() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-04 10:00:00', 3, 2, 'sdex', 1.0, 1.0, 1.0, 1.0, \
+             ('2026-03-04 10:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.0, 1.0, 1.0, \
               3, 3, 70000.00000299999232, 1.0, 1, 1)"
         ))
         .execute()
@@ -1778,7 +1769,7 @@ async fn ohlcv_vwap_cannot_round_below_the_low() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-04 11:00:00', 3, 2, 'sdex', 1.0, 1.0, 1.0, 1.0, \
+             ('2026-03-04 11:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.0, 1.0, 1.0, \
               7, 7, 70000.00001000000512, 1.0, 1, 1)"
         ))
         .execute()
@@ -1825,11 +1816,11 @@ async fn ohlcv_xlm_merged_vwap_stays_inside_the_band() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-04 12:00:00', 3, 1, 'sdex', \
+             ('2026-03-04 12:00:00', {FOO}, {XLM}, 'sdex', \
               70000.00000099999744, 70000.00000099999744, 70000.00000099999744, \
               70000.00000099999744, 3, 3, 70000.00000099999744, \
               70000.00000099999744, 1, 1), \
-             ('2026-03-04 12:00:00', 3, 1, 'soroswap', \
+             ('2026-03-04 12:00:00', {FOO}, {XLM}, 'soroswap', \
               70000.00000099999744, 70000.00000099999744, 70000.00000099999744, \
               70000.00000099999744, 2, 2, 70000.00000099999744, \
               70000.00000099999744, 1, 1)"
@@ -1869,9 +1860,9 @@ async fn seed_0246(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 11:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 12:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2026-02-10 10:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 11:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 12:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -1913,10 +1904,10 @@ async fn seed_0246(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-11 07:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-11 23:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-12 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2026-02-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-11 07:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-11 23:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-12 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -1942,12 +1933,7 @@ async fn seed_0246(db: &str, admin: &Client) {
     // The XLM leg carries `close_usd != close`, which is what makes it
     // convertible under the shared predicate.
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'BAZ', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[BAZ]))
         .execute()
         .await
         .unwrap();
@@ -1956,7 +1942,7 @@ async fn seed_0246(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-13 05:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1)"
+             ('2026-02-13 05:00:00', {BAZ}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1)"
         ))
         .execute()
         .await
@@ -2160,9 +2146,9 @@ async fn ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2023-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2023-03-11 07:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2023-03-11 23:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2023-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 07:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 23:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -2299,7 +2285,7 @@ async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) \
              SELECT toDateTime('2026-02-10 10:00:00') + INTERVAL number MINUTE, \
-                    1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
+                    {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
              FROM numbers(6)"
         ))
         .execute()
@@ -2378,7 +2364,7 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
     let _ = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
 
-    // asset_id=3 (FOO) quoted in asset_id=2 (USDC). `close = 10` throughout, so
+    // FOO quoted in USDC. `close = 10` throughout, so
     // the only difference between rows is close_usd and the timestamp.
     //
     // The epoch is 2026-03-11T14:00:00Z (prices_clickhouse::USDC_ORACLE_EPOCH_S).
@@ -2390,12 +2376,12 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2023-03-11 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
-             ('2026-03-11 13:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
-             ('2026-03-11 15:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
-             ('2024-06-01 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.900, 10, 1, 1), \
-             ('2026-03-11 11:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
-             ('2026-03-11 16:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1)"
+             ('2023-03-11 12:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
+             ('2026-03-11 13:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
+             ('2026-03-11 15:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
+             ('2024-06-01 12:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 48, 9.900, 10, 1, 1), \
+             ('2026-03-11 11:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
+             ('2026-03-11 16:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1)"
         ))
         .execute()
         .await
@@ -2561,14 +2547,14 @@ async fn seed_price_forming(db: &str, admin: &Client) {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ('2026-03-01 09:00:00', 3, 2, 'sdex', 0.05882352941176, 0.05882352941176, \
+             ('2026-03-01 09:00:00', {FOO}, {USDC}, 'sdex', 0.05882352941176, 0.05882352941176, \
               0.05882352941176, 0.05882352941176, 0.0000034, 0.0000002, 0.0000002, \
               0.05882352941176, 0.05882352941176, 2, 1, 0, 0, 0), \
-             ('2026-03-01 10:00:00', 3, 2, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, \
+             ('2026-03-01 10:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, \
               4, 1, 4, 10, 11), \
-             ('2026-03-01 10:00:00', 3, 2, 'soroswap', 99.0, 99.0, 99.0, 99.0, 990, 990, 990, \
+             ('2026-03-01 10:00:00', {FOO}, {USDC}, 'soroswap', 99.0, 99.0, 99.0, 99.0, 990, 990, 990, \
               99.0, 1.0, 2, 1, 0, 0, 0), \
-             ('2026-03-01 11:00:00', 3, 2, 'sdex', 1.0, 1.3, 0.9, 1.15, 100, 100, 100, 1.15, \
+             ('2026-03-01 11:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.3, 0.9, 1.15, 100, 100, 100, 1.15, \
               1.0, 8, 1, 8, 100, 100)"
         ))
         .execute()
@@ -2702,12 +2688,7 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'BAR', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[BAR]))
         .execute()
         .await
         .unwrap();
@@ -2717,11 +2698,11 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ('2026-03-02 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
+             ('2026-03-02 10:00:00', {BAR}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
               10.0, 7, 1, 7, 100, 1000), \
-             ('2026-03-02 10:00:00', 4, 1, 'soroswap', 900.0, 900.0, 900.0, 900.0, 5000, \
+             ('2026-03-02 10:00:00', {BAR}, {XLM}, 'soroswap', 900.0, 900.0, 900.0, 900.0, 5000, \
               55100, 1, 225.0, 11.02, 1, 1, 0, 0, 0), \
-             ('2026-03-02 11:00:00', 4, 1, 'sdex', 7.0, 7.0, 7.0, 7.0, 3000, 2, 1, 1.75, 7.0, \
+             ('2026-03-02 11:00:00', {BAR}, {XLM}, 'sdex', 7.0, 7.0, 7.0, 7.0, 3000, 2, 1, 1.75, 7.0, \
               1, 1, 0, 0, 0)"
         ))
         .execute()
@@ -2790,12 +2771,7 @@ async fn ohlcv_vwap_counts_the_dust_and_pf_vwap_does_not() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'BAR', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[BAR]))
         .execute()
         .await
         .unwrap();
@@ -2805,9 +2781,9 @@ async fn ohlcv_vwap_counts_the_dust_and_pf_vwap_does_not() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ('2026-03-05 10:00:00', 4, 1, 'sdex', 1.0, 2.0, 0.9, 1.0, 100, 100, 25, 0.25, \
+             ('2026-03-05 10:00:00', {BAR}, {XLM}, 'sdex', 1.0, 2.0, 0.9, 1.0, 100, 100, 25, 0.25, \
               1.0, 4, 1, 4, 100, 100), \
-             ('2026-03-05 10:00:00', 4, 1, 'soroswap', 0, 0, 0, 0, 100, 200, 50, 0, \
+             ('2026-03-05 10:00:00', {BAR}, {XLM}, 'soroswap', 0, 0, 0, 0, 100, 200, 50, 0, \
               2.0, 2, 1, 0, 0, 0)"
         ))
         .execute()
@@ -2856,12 +2832,7 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_legacy_row_that_cannot_print_one() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'BAR', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[BAR]))
         .execute()
         .await
         .unwrap();
@@ -2871,9 +2842,9 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_legacy_row_that_cannot_print_one() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ('2026-03-04 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
+             ('2026-03-04 10:00:00', {BAR}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
               10.0, 7, 1, 7, 100, 1000), \
-             ('2026-03-04 10:00:00', 4, 1, 'soroswap', 0, 0, 0, 0, 39791362431.76, 0.0001622, \
+             ('2026-03-04 10:00:00', {BAR}, {XLM}, 'soroswap', 0, 0, 0, 0, 39791362431.76, 0.0001622, \
               0, 0, 0.0000000000000041, 2, 1, 2, 39791362431.76, 0.0001622)"
         ))
         .execute()

@@ -87,7 +87,7 @@ const DOCS: readonly Doc[] = [
   },
   {
     icon: sdkExamplesIcon,
-    title: 'SDK Examples',
+    title: 'Code Examples',
     body: 'Working code snippets in four languages to copy into your project.',
     // The four languages are the quick start's; the reference carries none.
     href: `${QUICKSTART}#sdk`,

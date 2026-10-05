@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -106,6 +107,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly enrichmentRule: events.Rule;
   public readonly coarseSweepRule: events.Rule;
   public readonly backfillFreshnessProbeRule: events.Rule;
+  public readonly backfillReconcileProbeRule: events.Rule;
   public readonly rollupFreshnessProbeRule: events.Rule;
   public readonly mtlsNotafterProbeRule: events.Rule;
   public readonly coverageSweepProbeRule: events.Rule;
@@ -220,6 +222,17 @@ export class EventBridgeStack extends cdk.Stack {
         ruleName: `prices-${env}-backfill-freshness-probe`,
         description: `Publishes backfill_progress push age → Prices/Backfill PushAgeSeconds (${env})`,
         schedule: events.Schedule.expression(schedules.backfillFreshnessProbe),
+      },
+    );
+
+    // Weekly claim reconcile (task 0272); target wired below to the freshness probe.
+    this.backfillReconcileProbeRule = new events.Rule(
+      this,
+      'BackfillReconcileProbeRule',
+      {
+        ruleName: `prices-${env}-backfill-reconcile`,
+        description: `Reconciles backfill_progress earliest_data_available claims against price_ohlcv_1h → Prices/Backfill EarliestOverclaimSeconds (${env})`,
+        schedule: events.Schedule.expression(schedules.backfillReconcileProbe),
       },
     );
 
@@ -698,11 +711,18 @@ export class EventBridgeStack extends cdk.Stack {
       chDomain,
       rule: this.backfillFreshnessProbeRule,
       alarmDescription:
-        'Backfill freshness probe invocation errors — the SDEX push-age metric may be stale, blinding the freshness alarm.',
+        'Backfill freshness probe invocation errors — the SDEX push-age metric may be stale, blinding the freshness alarm. Also covers the weekly claim reconcile run (task 0272).',
       alarmPeriod: cdk.Duration.minutes(15),
       errorAlarmActions: [opsAlarmAction],
     });
     this.backfillFreshnessProbeFunction = freshness.function;
+
+    // `createWorkerLambda` wires only one rule; the reconcile is a second one.
+    this.backfillReconcileProbeRule.addTarget(
+      new targets.LambdaFunction(freshness.function, {
+        event: events.RuleTargetInput.fromObject({ check: 'reconcile' }),
+      }),
+    );
 
     freshness.role.addToPolicy(
       new iam.PolicyStatement({

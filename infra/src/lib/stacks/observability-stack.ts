@@ -296,6 +296,9 @@ export class ObservabilityStack extends cdk.Stack {
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   public readonly ammPushFreshnessAlarm: cloudwatch.Alarm;
+  /** Weekly earliest-claim overclaim alarms, one per stream (task 0272). */
+  public readonly sdexEarliestOverclaimAlarm: cloudwatch.Alarm;
+  public readonly ammEarliestOverclaimAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
   /**
@@ -373,6 +376,16 @@ export class ObservabilityStack extends cdk.Stack {
    * the insert and stall a rollup tier.
    */
   public readonly zeroInvariantAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * More identities than ids on `assets FINAL` (task 0139): two assets share
+   * an `asset_id`, which ClickHouse now derives from the identity. Keyed by count.
+   */
+  public readonly assetIdCollisionAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * `price_ohlcv_1m` candles of the last 2 h on an id `assets` lacks (task
+   * 0139): a writer sent ids, not identities. Keyed by count.
+   */
+  public readonly assetIdOrphanCandleAlarms: Record<string, cloudwatch.Alarm>;
   /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
@@ -935,6 +948,49 @@ export class ObservabilityStack extends cdk.Stack {
     this.ammPushFreshnessAlarm.addAlarmAction(snsAction);
     this.ammPushFreshnessAlarm.addOkAction(snsAction);
 
+    // Earliest-claim overclaim, one alarm per stream (task 0272). IGNORE, not
+    // NOT_BREACHING: the probe publishes weekly, so the empty days between runs
+    // must not clear a latched ALARM. Recovery needs a <= 0 datum in a later hour.
+    const earliestOverclaimAlarm = (
+      id: string,
+      suffix: string,
+      stream: string,
+    ): cloudwatch.Alarm => {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmName: `prices-${config.envName}-backfill-earliest-overclaim-${suffix}`,
+        alarmDescription: `${stream}: backfill_progress.earliest_data_available is earlier than the first price_ohlcv_1h row, so /v1/backfill/status overstates coverage. Value = seconds of overclaim (lower bound). Fix with a deliberate write to backfill_progress (merge_min never moves it later; see task 0264). Clears on the next <= 0 datum: Monday 05:47 UTC run or a manual {"check":"reconcile"} invoke. Task 0272.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Backfill',
+          metricName: 'EarliestOverclaimSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Stream: stream,
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 0,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.IGNORE,
+      });
+      alarm.addAlarmAction(snsAction);
+      alarm.addOkAction(snsAction);
+      return alarm;
+    };
+    this.sdexEarliestOverclaimAlarm = earliestOverclaimAlarm(
+      'SdexEarliestOverclaimAlarm',
+      'sdex',
+      'sdex_archive',
+    );
+    this.ammEarliestOverclaimAlarm = earliestOverclaimAlarm(
+      'AmmEarliestOverclaimAlarm',
+      'amm',
+      'soroban_amm',
+    );
+
     // Rollup freshness, one alarm per OHLCV granularity (task 0137).
     //
     // Task 0136 froze `price_ohlcv_15m` through `_1M` for NINE DAYS and nothing
@@ -1415,40 +1471,42 @@ export class ObservabilityStack extends cdk.Stack {
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage
     // sweep looks at EVERY contract emitting swap/trade-shaped events over a
-    // trailing 14-day window and publishes `UnclassifiedSwapEvents` only when
-    // something is in neither `prices.pool_registry` nor the allow-list — the
-    // SushiSwap V3 case (task 0290), which traded unseen for months.
+    // trailing 14-day window and publishes `UnclassifiedSwapEvents` on every
+    // run: the event count of contracts in neither `prices.pool_registry` nor
+    // the allow-list — the SushiSwap V3 case (task 0290), which traded unseen
+    // for months — and `0` when there are none.
     //
-    // One datapoint a week. A 1-day period with 1 of 7 holds it in ALARM for
-    // the week: 7 × 86,400 s = 604,800 s is CloudWatch's Period ×
-    // EvaluationPeriods maximum, and a single 7-day period is not an option
-    // (86,400 s is the period ceiling recorded at the top of this file). Edge:
-    // the old datapoint can leave the window just as the next run publishes, so
-    // a brief OK→ALARM pair is possible while a residual persists — expected,
-    // not a flap to engineer away (review WR-06; the runbook tells operators
-    // not to read that OK as resolved). Conversely a probe that stops running
-    // also reads OK after 7 days — the -errors alarm is the backstop (WR-01). While latched, the daily stuck-alarm digest
-    // (task 0214) re-lists it.
+    // The alarm follows the latest run (task 0323). Each run's datapoint sets
+    // the state, and IGNORE holds it between runs, so a residual stays in ALARM
+    // until a run finds none. After triage, one manual invoke clears it; the
+    // earlier 1-day × 1-of-7 hold kept it in ALARM for a week whatever was
+    // done. The invoke has to land in a later clock hour than the breaching
+    // run, since Maximum over one period holding both stays >= 1. Same shape
+    // as the earliest-overclaim alarms above (task 0272).
+    // A run that fails publishes nothing and changes nothing — the -errors
+    // alarm is the backstop (review WR-01). While latched, the daily
+    // stuck-alarm digest (task 0214) re-lists it.
     this.coverageSweepUnclassifiedAlarm = new cloudwatch.Alarm(
       this,
       'CoverageSweepUnclassifiedAlarm',
       {
         alarmName: `prices-${config.envName}-coverage-sweep-unclassified`,
-        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. It returns to OK 7 days after the last datapoint whatever the cause, so an OK here is NOT proof the residual is gone: check the last run's log and the -errors alarm. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
+        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. The alarm holds the latest run: it returns to OK only when a run reads 0, so after triage deploy EventBridge and invoke the probe once, in a later clock hour than the run that alarmed. A failed run leaves the state as it was: check the -errors alarm. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
         metric: new cloudwatch.Metric({
           namespace: 'Prices/Coverage',
           metricName: 'UnclassifiedSwapEvents',
           dimensionsMap: { Environment: config.envName },
-          statistic: 'Sum',
-          period: cdk.Duration.days(1),
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
         }),
         threshold: 1,
-        evaluationPeriods: 7,
+        evaluationPeriods: 1,
         datapointsToAlarm: 1,
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        // Emitted only when something is unclassified: "missing" is healthy.
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        // One datapoint a week, published on every run: "missing" means
+        // "between runs", so the last run's state holds.
+        treatMissingData: cloudwatch.TreatMissingData.IGNORE,
       },
     );
     this.coverageSweepUnclassifiedAlarm.addAlarmAction(snsAction);
@@ -1661,6 +1719,35 @@ export class ObservabilityStack extends cdk.Stack {
           (count) => count > 1,
         ),
       ],
+    );
+
+    // Asset-id uniqueness (task 0139). The id is xxh3 of the identity, so the
+    // healthy reading of both is exactly 0, and a regressed writer keeps adding
+    // to them: the zero-invariant ladder, first rung fixed at 1. Before the
+    // migration window prod read 3,321 collisions (count - uniqExact on
+    // assets FINAL, 2026-10-01); these ship in that window, after the swap.
+    // See packages/rollup-freshness-probe/src/asset_id_uniqueness.rs.
+    const zeroLadder = [
+      1,
+      ...config.opsAlarms.usdSanityEscalationCounts.filter(
+        (count) => count > 1,
+      ),
+    ];
+    this.assetIdCollisionAlarms = usdSanityRungs(
+      'AssetIdCollisions',
+      'AssetIdCollisionsAlarmCount',
+      'asset-id-collisions',
+      (count) =>
+        `${count} or more identities in prices.assets FINAL share an asset_id with another (count() - uniqExact(asset_id)). Since task 0139 ClickHouse derives asset_id = xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)), so this is 0 by construction: a non-zero value means assets.asset_id is no longer MATERIALIZED from the identity (a schema change or a restored old table) or a 64-bit hash collision. Every table keyed on asset_id then blends two assets. Find the shared ids: SELECT asset_id, groupArray((asset_code, issuer_address, contract_address)) FROM prices.assets FINAL GROUP BY asset_id HAVING count() > 1. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
+    );
+    this.assetIdOrphanCandleAlarms = usdSanityRungs(
+      'AssetIdOrphanCandles',
+      'AssetIdOrphanCandlesAlarmCount',
+      'asset-id-orphan-candles',
+      (count) =>
+        `${count} or more price_ohlcv_1m candles of the last 2 h carry an asset_id or quote_asset_id that prices.assets does not hold. Since task 0139 a writer sends the identity and ClickHouse derives both ids; an orphan means a writer sent ids itself (a stale pre-0139 binary or Lambda version: RowBinary is width-exact, so an old u32 writer misaligns rather than failing) or wrote candles before their assets rows. Stop that writer first, then find it from the rows' source column. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
     );
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built

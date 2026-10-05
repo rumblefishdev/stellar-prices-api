@@ -10,7 +10,7 @@ use prices_ingest_core::{AssetRegistry, Registries, UnresolvedPool, UnresolvedPo
 use crate::error::BackfillError;
 use crate::ingest::{
     ExtractMode, PartitionEnd, PartitionStats, RunAccumulators, flush_open_minutes,
-    index_partition, peek_ledger_minute,
+    index_partition, peek_ledger_minute, persist_new_assets,
 };
 use crate::partition::{Partition, partitions_for_range};
 use crate::progress::{Observed, Phase, progress_updates};
@@ -316,9 +316,13 @@ pub async fn execute(
     // The last partition drains itself; this covers the run whose last
     // partition was skipped (S3-incomplete) and therefore never reached
     // `PartitionEnd::Drain`. A no-op when nothing is open.
-    flush_open_minutes(&mut accs, sink, &mut totals).await?;
+    flush_open_minutes(&mut accs, sink, &mut registry, &mut totals).await?;
 
-    sink.write_assets(&registry).await?;
+    // Every candle and oracle row was preceded by its new identities; this
+    // catches only what was interned and never written. Not the whole registry:
+    // a ~210k-row re-emit per run lands a full duplicate part in `prices.assets`
+    // (the task 0256 shape).
+    persist_new_assets(sink, &mut registry).await?;
     // Persist the discovered pool registry as a durable artifact (decision #4)
     // so a partial re-backfill / the live processor can load it.
     sink.write_pool_registry(&reg).await?;

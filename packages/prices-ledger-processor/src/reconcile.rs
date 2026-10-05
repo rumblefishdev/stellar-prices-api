@@ -123,25 +123,15 @@ pub struct RunStats {
     pub ch_write: Option<WriteLatency>,
 }
 
-/// Warm per-container processing state: the surrogate-id registry (loaded from
-/// `prices.assets` at cold start) and the incrementally-grown AMM venue/pool
+/// Warm per-container processing state: the asset registry (identities loaded
+/// from `prices.assets` at cold start) and the incrementally-grown AMM venue/pool
 /// registries. Persisting these across invocations lets a warm Lambda resolve
 /// pools discovered earlier in its lifetime.
 pub struct ProcessingState {
     pub assets: AssetRegistry,
     pub registries: Registries,
-    /// Highest surrogate-id watermark whose assets are known **durably written**
-    /// to `prices.assets`. Each run writes `assets_since(this)` and advances it
-    /// only *after* that write succeeds (task 0132). Because the registry is warm
-    /// across invocations, a run that interns new assets and then fails a later
-    /// write leaves `next_id` advanced but this watermark unmoved — so the *next*
-    /// run re-writes those assets instead of orphaning them (they would otherwise
-    /// sit below a freshly-captured `next_id` and never be written, stranding the
-    /// candles that reference their ids). Init: every asset loaded at cold start
-    /// is already in `prices.assets`, so it starts at the loaded `watermark()`.
-    pub persisted_asset_watermark: u32,
     /// The `prices.pool_registry` rows known **durably written**, keyed by
-    /// `contract_id` — the pool counterpart of `persisted_asset_watermark`
+    /// `contract_id` — the pool counterpart of the asset registry's pending set
     /// (task 0291). `registries` grows from factory events while the container
     /// is warm; each run writes the rows that differ from this and records them
     /// here only *after* the write succeeds, so a failed write is retried next
@@ -157,10 +147,9 @@ pub struct ProcessingState {
 /// `events-backfill --discover-pools` is their writer (task 0300 D3b).
 fn initial_state(assets: AssetRegistry, mut registries: Registries) -> ProcessingState {
     registries.merge_static_pools();
-    // Everything loaded from `prices.assets` at cold start is already durable,
-    // so the persisted watermark starts at the loaded registry's next id.
-    let persisted_asset_watermark = assets.watermark();
-    // Same for pools. Built from the registry's own rows, not the table's —
+    // Everything loaded at cold start is already durable: the asset registry
+    // starts with nothing pending, and the pool snapshot is the loaded rows.
+    // Built from the registry's own rows, not the table's —
     // see `Registries::pool_rows_unpersisted`.
     let persisted_pools = registries
         .to_pool_rows()
@@ -170,7 +159,6 @@ fn initial_state(assets: AssetRegistry, mut registries: Registries) -> Processin
     ProcessingState {
         assets,
         registries,
-        persisted_asset_watermark,
         persisted_pools,
     }
 }
@@ -288,11 +276,11 @@ where
                 // Classic SDEX trades from operation results.
                 let (trades, offer_lookups) = extract_trades_with_counts(lcm);
                 for trade in trades {
-                    sdex.merge(&raw_trade_to_tick(&trade, &mut state.assets));
+                    sdex.merge(raw_trade_to_tick(&trade, &mut state.assets));
                 }
                 // Soroban AMM trades + oracle samples.
                 let sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
-                for (source, tick) in &sob.amm_ticks {
+                for (source, tick) in sob.amm_ticks {
                     amm.entry(source).or_default().merge(tick);
                 }
                 oracle.extend(sob.oracle);
@@ -416,18 +404,16 @@ where
             _ => {}
         }
 
-        // Write newly-interned assets FIRST — the candles below reference their
-        // surrogate ids, so persisting the dimension row before the fact rows
+        // Write newly-interned assets FIRST — the candles below carry their
+        // derived ids, so persisting the dimension row before the fact rows
         // keeps `prices.assets` referentially ahead of `price_ohlcv_*`. Only the
-        // assets not yet durably written (id >= the persisted watermark), not the
-        // whole registry (task 0132); a run that discovered nothing new writes
-        // nothing. Advance the durable watermark ONLY after the write succeeds —
-        // if it fails here the run returns early (cursor unmoved, doorbell
-        // redelivered) and the next run retries these same assets.
-        self.sink
-            .write_new_assets(&state.assets, state.persisted_asset_watermark)
-            .await?;
-        state.persisted_asset_watermark = state.assets.watermark();
+        // registry's pending identities, not the whole registry (task 0132); a
+        // run that discovered nothing new writes nothing. The registry is warm
+        // across invocations, so drain the pending set ONLY after the write
+        // succeeds — if it fails here the run returns early (cursor unmoved,
+        // doorbell redelivered) and the next run retries these same assets.
+        self.sink.write_new_assets(&state.assets).await?;
+        state.assets.clear_pending();
 
         // Then the pools this run learned from factory events (task 0291). Until
         // this write existed the live registry was memory-only: a pool created

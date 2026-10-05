@@ -78,7 +78,7 @@ const FAQS: readonly Faq[] = [
   {
     question: 'How often are prices updated?',
     answer:
-      'Prices come straight from Soroswap liquidity pools and are updated on every block. Usage figures on your dashboard are reported by AWS with a short delay, so requests from the last few minutes may not be counted yet.',
+      'Prices come from five venues: SDEX, Soroswap, Aquarius, Phoenix and SushiSwap. The price snapshot refreshes every minute and USD values are recomputed hourly, so a price can be up to about an hour old; its as_of field says how old. Usage figures on your dashboard are reported by AWS with a short delay, so requests from the last few minutes may not be counted yet.',
   },
   {
     question: 'Where is the documentation?',

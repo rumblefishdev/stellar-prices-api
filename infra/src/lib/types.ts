@@ -170,12 +170,13 @@ export interface EnvironmentConfig {
    * not a resource under it.
    *
    * Why the portal needs it at all: the bundle is served from another
-   * application's distribution (`portalWebOrigin`), whose `/api/*` behaviour
-   * is a static SPA — every extensionless path under it, `/api/config`
-   * included, is rewritten to `/api/index.html` at the edge and answered
-   * `200 text/html`. There is nothing on that host for a same-origin call to
-   * reach, so the bundle calls this hostname directly, cross-origin and
-   * same-site — the pattern the explorer's own SPA uses for its API.
+   * application's distribution (`portalWebOrigin`), whose `/prices-api/*`
+   * behaviour is a static SPA — every extensionless path under it is rewritten
+   * to `/prices-api/index.html` at the edge and answered `200 text/html`, and
+   * `/api/config` there is a `301` into it (task 0326). There is nothing on
+   * that host for a same-origin call to reach, so the bundle calls this
+   * hostname directly, cross-origin and same-site — the pattern the explorer's
+   * own SPA uses for its API.
    *
    * `hostedZoneName` must be a suffix of `domainName`, and the zone must live
    * in this account: the certificate's validation record and the alias records
@@ -279,10 +280,13 @@ export interface EnvironmentConfig {
      * Coverage sweep probe (task 0100, layer 3 of the coverage model). Weekly
      * sweep over a trailing 14-day ledger window of BE's `soroban_events` for
      * swap/trade-shaped emitters in neither `prices.pool_registry` nor the
-     * committed allow-list → `Prices/Coverage` `UnclassifiedSwapEvents`.
+     * committed allow-list → `Prices/Coverage` `UnclassifiedSwapEvents`
+     * (published on every run, `0` when clean; task 0323).
      * Weekly and off-peak; not coarse-sweep's minute 30.
      */
     readonly coverageSweepProbe: string;
+    /** Weekly backfill claim reconcile (task 0272); ~1.08 GB scan, so not every 15 min. */
+    readonly backfillReconcileProbe: string;
   };
 
   // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
@@ -939,6 +943,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'rollupFreshnessProbe',
       'mtlsNotafterProbe',
       'coverageSweepProbe',
+      'backfillReconcileProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];
