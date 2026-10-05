@@ -173,9 +173,9 @@
 > depends on the Stellar side. SDF settled the Discord integration by asking
 > the project to run it itself.
 >
-> To open the CloudWatch dashboard and the alarms, send your name, surname,
-> e-mail, purpose and the end date of access to `<ACCESS_REQUEST_EMAIL>`; a
-> read-only IAM Identity Center user is issued for the review window.
+> To open the CloudWatch dashboard and the alarms, ask us with your name,
+> surname, e-mail, purpose and the end date of access; a read-only IAM Identity
+> Center user is issued for the review window.
 
 ---
 
@@ -198,4 +198,3 @@
       `301` on submission day
 - [ ] The video was recorded against the public deployment, no secrets on
       screen (see the scenario's ⚠️ section)
-- [ ] `<ACCESS_REQUEST_EMAIL>` is a shared address, not a person's
