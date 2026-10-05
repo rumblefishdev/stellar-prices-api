@@ -507,6 +507,113 @@ fn resolve_asset_id_sql(where_sql: &str) -> String {
 }
 
 // ----------------------------------------------------------------------------
+// SAC alias (task 0242, D5)
+// ----------------------------------------------------------------------------
+
+/// A classic row named by its SAC address. Positional: field order is the
+/// [`sac_alias_sql`] SELECT order.
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+struct SacAliasRow {
+    sac_address: String,
+    asset_code: String,
+    issuer_address: String,
+}
+
+/// The classic rows whose stored `sac_address` is one of `n` bound addresses.
+/// Read from the column only: every classic row carries it (XLM's included).
+fn sac_alias_sql(n: usize) -> String {
+    let binds = vec!["?"; n].join(", ");
+    format!(
+        "SELECT a.sac_address, a.asset_code, a.issuer_address \
+         FROM assets AS a FINAL \
+         WHERE a.contract_address = '' AND a.sac_address IN ({binds})"
+    )
+}
+
+/// A classic row's identifier: XLM with no issuer is `native`.
+fn alias_identifier(code: String, issuer: String) -> AssetIdentifier {
+    if code == "XLM" && issuer.is_empty() {
+        AssetIdentifier::Native
+    } else {
+        AssetIdentifier::Classic { code, issuer }
+    }
+}
+
+/// The distinct contract addresses in `ids`, in first-seen order — the only
+/// identifiers an alias can replace. Empty means no lookup is needed.
+fn sac_alias_candidates(ids: &[AssetIdentifier]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        if let AssetIdentifier::Contract(c) = id
+            && !out.contains(c)
+        {
+            out.push(c.clone());
+        }
+    }
+    out
+}
+
+/// Replace each `Contract(c)` that `aliases` names with its classic; every
+/// other identifier passes through.
+fn apply_sac_aliases(
+    ids: Vec<AssetIdentifier>,
+    aliases: &std::collections::HashMap<String, AssetIdentifier>,
+) -> Vec<AssetIdentifier> {
+    ids.into_iter()
+        .map(|id| match id {
+            AssetIdentifier::Contract(c) => aliases
+                .get(&c)
+                .cloned()
+                .unwrap_or(AssetIdentifier::Contract(c)),
+            other => other,
+        })
+        .collect()
+}
+
+/// Answer a classic asset's SAC address as that classic asset (task 0242, D5).
+///
+/// Run once at the handler boundary, before any lookup. Together with
+/// [`identity_where`]'s contract arm (`a.contract_address = ?`) a `C…`
+/// identifier matches `contract_address = ? OR sac_address = ?`, and the
+/// classic wins when both rows exist (a pre-heal SAC `Contract` row). The
+/// response then echoes `CODE:ISSUER` / `native` through `to_canonical`.
+/// No query when `ids` holds no contract.
+pub async fn resolve_sac_aliases(
+    ch: &Client,
+    ids: Vec<AssetIdentifier>,
+) -> Result<Vec<AssetIdentifier>, clickhouse::error::Error> {
+    let candidates = sac_alias_candidates(&ids);
+    if candidates.is_empty() {
+        return Ok(ids);
+    }
+    let sql = sac_alias_sql(candidates.len());
+    let mut q = ch.query(&sql);
+    for c in candidates {
+        q = q.bind(c);
+    }
+    let aliases = q
+        .fetch_all::<SacAliasRow>()
+        .await?
+        .into_iter()
+        .map(|r| {
+            (
+                r.sac_address,
+                alias_identifier(r.asset_code, r.issuer_address),
+            )
+        })
+        .collect();
+    Ok(apply_sac_aliases(ids, &aliases))
+}
+
+/// [`resolve_sac_aliases`] for one identifier.
+pub async fn resolve_sac_alias(
+    ch: &Client,
+    id: AssetIdentifier,
+) -> Result<AssetIdentifier, clickhouse::error::Error> {
+    Ok(resolve_sac_aliases(ch, vec![id]).await?.remove(0))
+}
+
+// ----------------------------------------------------------------------------
 // OHLCV (overview §4.2)
 // ----------------------------------------------------------------------------
 
@@ -2332,6 +2439,108 @@ mod tests {
             BatchPriceRow::COLUMN_NAMES.len(),
             14,
             "BatchPriceRow is CurrentPriceRow's 11 plus the three identity columns"
+        );
+    }
+
+    const XCR_ISSUER: &str = "GBLJBHWVORDFI4J7CLBDRPECMYT3XO5S6GERXGC74VXOJMZPLI6ZU3S7";
+    const XCR_SAC: &str = "CDJQXBQO5ICVQUPHZHW7SHOM56K2UNNPPAIXUUSA3XACEI6Q4JQLXNVI";
+    const XLM_SAC: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+
+    fn xcr() -> AssetIdentifier {
+        AssetIdentifier::Classic {
+            code: "XCR".into(),
+            issuer: XCR_ISSUER.into(),
+        }
+    }
+
+    /// Task 0242: classic rows only, one bind per address, positional order
+    /// matching [`SacAliasRow`].
+    #[test]
+    fn sac_alias_sql_reads_classic_rows_by_stored_sac_address() {
+        use clickhouse::Row;
+
+        let sql = sac_alias_sql(2);
+        for needle in [
+            "FROM assets AS a FINAL",
+            "a.contract_address = ''",
+            "a.sac_address IN (?, ?)",
+        ] {
+            assert!(sql.contains(needle), "missing {needle}: {sql}");
+        }
+        let expected: Vec<String> = SacAliasRow::COLUMN_NAMES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(projected_columns(&sql), expected, "SQL: {sql}");
+    }
+
+    #[test]
+    fn alias_identifier_maps_xlm_to_native_and_the_rest_to_classic() {
+        for (code, issuer, expected) in [
+            ("XLM", "", AssetIdentifier::Native),
+            ("XCR", XCR_ISSUER, xcr()),
+            (
+                "XLM",
+                XCR_ISSUER,
+                AssetIdentifier::Classic {
+                    code: "XLM".into(),
+                    issuer: XCR_ISSUER.into(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                alias_identifier(code.into(), issuer.into()),
+                expected,
+                "{code}:{issuer}"
+            );
+        }
+    }
+
+    /// Only contracts need a lookup; none means no query at all.
+    #[test]
+    fn sac_alias_candidates_are_the_distinct_contracts() {
+        let c = |s: &str| AssetIdentifier::Contract(s.into());
+        for (ids, expected) in [
+            (vec![], vec![]),
+            (vec![AssetIdentifier::Native, xcr()], vec![]),
+            (
+                vec![c(XCR_SAC), AssetIdentifier::Native, c(XLM_SAC), c(XCR_SAC)],
+                vec![XCR_SAC, XLM_SAC],
+            ),
+        ] {
+            assert_eq!(sac_alias_candidates(&ids), expected, "{ids:?}");
+        }
+    }
+
+    /// A matched SAC becomes its classic; an unmatched contract and every
+    /// non-contract pass through in order.
+    #[test]
+    fn apply_sac_aliases_replaces_only_matched_contracts() {
+        let c = |s: &str| AssetIdentifier::Contract(s.into());
+        let other = stellar_strkey::Contract([9u8; 32]).to_string();
+        let aliases = std::collections::HashMap::from([
+            (XCR_SAC.to_string(), xcr()),
+            (XLM_SAC.to_string(), AssetIdentifier::Native),
+        ]);
+        let got = apply_sac_aliases(
+            vec![
+                c(XCR_SAC),
+                c(&other),
+                xcr(),
+                c(XLM_SAC),
+                AssetIdentifier::Native,
+            ],
+            &aliases,
+        );
+        assert_eq!(
+            got,
+            vec![
+                xcr(),
+                c(&other),
+                xcr(),
+                AssetIdentifier::Native,
+                AssetIdentifier::Native
+            ]
         );
     }
 

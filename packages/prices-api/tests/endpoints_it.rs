@@ -27,6 +27,11 @@ fn issuer() -> &'static str {
     prices_clickhouse::USDC_ISSUER
 }
 
+/// XLM's SAC, stored on the XLM row as prod holds it (task 0242).
+const XLM_SAC: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+const XCR_ISSUER: &str = "GBLJBHWVORDFI4J7CLBDRPECMYT3XO5S6GERXGC74VXOJMZPLI6ZU3S7";
+const XCR_SAC: &str = "CDJQXBQO5ICVQUPHZHW7SHOM56K2UNNPPAIXUUSA3XACEI6Q4JQLXNVI";
+
 /// Create + seed a scratch db with assets, current prices, oracle prices, and
 /// backfill progress; return a client scoped to it.
 async fn setup(db: &str) -> Client {
@@ -46,7 +51,7 @@ async fn setup(db: &str) -> Client {
         .unwrap();
 
     let assets = [
-        AssetFixture::new("XLM", "native", "", ""),
+        AssetFixture::new("XLM", "native", "", "").with_sac(XLM_SAC),
         AssetFixture::new("USDC", "credit", issuer(), ""),
     ];
     admin
@@ -302,6 +307,186 @@ async fn asset_detail_unknown_is_404() {
     let client = setup(db).await;
     let (status, _) = get(client, &format!("/v1/assets/FOO:{}", issuer())).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn asset_detail_unknown_contract_is_404() {
+    let db = "it_ep_detail_unknown_c_0242";
+    let client = setup(db).await;
+    let (status, _) = get(client, &format!("/v1/assets/{}", contract())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    teardown(db).await;
+}
+
+/// Seed XCR as a classic row carrying its SAC, priced at 0.25. `pre_heal` adds
+/// the second identity task 0242 heals: a Contract row for the SAC, priced at
+/// 9.0, so a lookup that reached it would show.
+async fn seed_xcr(db: &str, pre_heal: bool) {
+    let admin = Client::default().with_url(ch_url());
+    let classic = AssetFixture::new("XCR", "credit", XCR_ISSUER, "").with_sac(XCR_SAC);
+    let sac = AssetFixture::new("", "contract", "", XCR_SAC);
+    let usdc = AssetFixture::new("USDC", "credit", issuer(), "").id();
+    let mut rows = vec![classic];
+    let mut prices = vec![format!(
+        "({}, 0.25, 0.25, 10, '2026-02-10 12:00:30')",
+        classic.id()
+    )];
+    // One XCR/USDC hour per identity, `close_usd = close` (par quote).
+    let candle = |id: String, px: f64, trades: u32| {
+        format!(
+            "('2026-02-10 12:00:00', {id}, {usdc}, 'soroswap', {px}, {px}, {px}, {px}, \
+             10, 10, {px}, {px}, {trades}, 1)"
+        )
+    };
+    let mut candles = vec![candle(classic.id(), 0.25, 7)];
+    if pre_heal {
+        rows.push(sac);
+        prices.push(format!(
+            "({}, 9.0, 9.0, 1, '2026-02-10 12:00:30')",
+            sac.id()
+        ));
+        candles.push(candle(sac.id(), 9.0, 1));
+    }
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES {}",
+            candles.join(", ")
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&assets_insert(db, &rows))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) VALUES {}",
+            prices.join(", ")
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0242 (D5): a classic asset's SAC address answers as the classic, and
+/// the classic wins over a pre-heal Contract row for the same address.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn sac_address_answers_as_its_classic_asset() {
+    let xcr = format!("XCR:{XCR_ISSUER}");
+    for (db, pre_heal) in [
+        ("it_ep_sac_alias_0242", false),
+        ("it_ep_sac_alias_pre_heal_0242", true),
+    ] {
+        let client = setup(db).await;
+        seed_xcr(db, pre_heal).await;
+
+        let (status, json) = get(client.clone(), &format!("/v1/assets/{XCR_SAC}")).await;
+        assert_eq!(status, StatusCode::OK, "{db}: body={json}");
+        assert_eq!(json["asset"], xcr, "{db}");
+        assert_eq!(json["asset_kind"], "credit", "{db}");
+        assert_eq!(json["code"], "XCR", "{db}");
+        assert_eq!(json["issuer"], XCR_ISSUER, "{db}");
+        assert_eq!(json["contract"], "", "{db}");
+
+        let (status, json) = get(client.clone(), &format!("/v1/assets/{XCR_SAC}/price")).await;
+        assert_eq!(status, StatusCode::OK, "{db}: body={json}");
+        assert_eq!(json["asset"], xcr, "{db}");
+        approx(&json["price_usd"], 0.25);
+
+        let (status, json) = get(client.clone(), &format!("/v1/oracles/{XCR_SAC}")).await;
+        assert_eq!(status, StatusCode::OK, "{db}: body={json}");
+        assert_eq!(json["asset"], xcr, "{db}");
+
+        // The classic's series only: without the alias the clean case is 404
+        // and the pre-heal case answers the SAC row's 9.0 candle.
+        let uri = format!(
+            "/v1/assets/{XCR_SAC}/ohlcv?granularity=1h\
+             &start=2026-02-10T00:00:00Z&end=2026-02-11T00:00:00Z&base_currency=USD"
+        );
+        let (status, json) = get(client, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{db}: body={json}");
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "{db}: body={json}");
+        approx(&data[0]["close"], 0.25);
+        assert_eq!(data[0]["trade_count"], 7, "{db}");
+
+        teardown(db).await;
+    }
+}
+
+/// XLM's SAC answers as `native`, off the stored `sac_address` alone.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn xlm_sac_address_answers_as_native() {
+    let db = "it_ep_xlm_sac_0242";
+    let client = setup(db).await;
+
+    let (status, json) = get(client.clone(), &format!("/v1/assets/{XLM_SAC}")).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["asset"], "native");
+    assert_eq!(json["asset_kind"], "native");
+    assert_eq!(json["code"], "XLM");
+    assert_eq!(json["is_active"], true);
+
+    let (status, json) = get(client, &format!("/v1/assets/{XLM_SAC}/price")).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["asset"], "native");
+    approx(&json["price_usd"], 0.5);
+
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn batch_answers_sac_addresses_as_their_classic_assets() {
+    let db = "it_ep_batch_sac_0242";
+    let client = setup(db).await;
+    seed_xcr(db, false).await;
+
+    let body = json!({ "assets": [XCR_SAC, XLM_SAC] });
+    let (status, json) = post(client, "/v1/prices/batch", body).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let assets: Vec<&str> = json["prices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["asset"].as_str().unwrap())
+        .collect();
+    assert_eq!(assets, [format!("XCR:{XCR_ISSUER}").as_str(), "native"]);
+    assert_eq!(json["not_found"], json!([]));
+
+    teardown(db).await;
+}
+
+/// Task 0242: an unpriced SAC is listed in `not_found` as the address the
+/// client sent, not as its classic.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn batch_not_found_echoes_the_sac_address_asked() {
+    let db = "it_ep_batch_sac_nf_0242";
+    let client = setup(db).await;
+    let classic = AssetFixture::new("XCR", "credit", XCR_ISSUER, "").with_sac(XCR_SAC);
+    Client::default()
+        .with_url(ch_url())
+        .query(&assets_insert(db, &[classic]))
+        .execute()
+        .await
+        .unwrap();
+
+    let body = json!({ "assets": [XCR_SAC] });
+    let (status, json) = post(client, "/v1/prices/batch", body).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["prices"], json!([]));
+    assert_eq!(json["not_found"], json!([XCR_SAC]));
+
     teardown(db).await;
 }
 
