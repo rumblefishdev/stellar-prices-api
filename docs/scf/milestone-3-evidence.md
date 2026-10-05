@@ -39,9 +39,9 @@ State of the nine Tranche 3 acceptance criteria on 2026-10-01:
 | AC  | Criterion (short)                                           | State on 2026-10-01                                                                                                                                                             |
 | --- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met: 2015-11-18.** Liveness graded on the amended wording (deviations §1); every signal OK on 10-01                                                                     |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint green in CI on 09-30 (Redocly CLI 2.44.0); reference at `…/prices-api/docs` (deviations §4). _To fill:_ lint output from the release run                                   |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | **Met on 2026-10-05:** lint clean on the release run on `master` (Redocly CLI 2.44.0, no errors or warnings); reference at `…/prices-api/docs` (deviations §4)                  |
 | 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk                                                       |
-| 4   | Integration suite passes on CI, link provided               | **Met** in pull-request CI since PR #327 (09-22); run linked in §5. `master` (last release 09-11) runs the suite from the next release                                          |
+| 4   | Integration suite passes on CI, link provided               | **Met:** 1,407 unit and 306 ClickHouse integration tests pass on the release run on `master` (10-05), linked in §5; PR CI runs the suite since #327 (09-22)                     |
 | 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                                 |
 | 6   | Security checklist signed off                               | **Met.** ClickHouse over mTLS only, secrets in Secrets Manager, inputs validated, no `Action: "*"` or `service:*`; every `Resource: "*"` statement inventoried in §5            |
 | 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo public, `README.md` → `infra/README.md` on `develop`, on `master` from the next release. Not run in an empty account |
@@ -147,7 +147,7 @@ curl -s -H "x-api-key: $API_KEY" \
 
 ### AC 2 — OpenAPI spec passes lint with no errors; Swagger UI deployed
 
-**Verdict: _to fill_ — the lint output from the release run.** The document is
+**Verdict: met; the release run on `master` lints it clean.** The document is
 generated from the handler code (utoipa) and served at `/api-docs-json`. Since
 task 0306 it carries a production-shaped example for every field, and the lint
 fails on any example that no longer matches its schema
@@ -161,8 +161,16 @@ the reference and the OpenAPI version differ from the wording: deviations §4.
 npm run openapi:lint          # extracts target/openapi.json from the code and lints it
 ```
 
-_To fill:_ the lint summary line from the release run, and a screenshot of
-`/prices-api/docs`.
+The release run on `master`, [`37298469682`](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/37298469682)
+(2026-10-05, merge of #381, job _Rust (fmt, clippy, test, lambda build)_, step
+_Lint OpenAPI document_, Redocly CLI 2.44.0):
+
+```text
+target/openapi.json: validated in 88ms
+Woohoo! Your API description is valid. 🎉
+```
+
+_To fill:_ a screenshot of `/prices-api/docs`.
 
 ### AC 3 — Onboarding portal accessible; self-service API key request flow functional
 
@@ -201,9 +209,12 @@ A run to cite: [`36001067242`](https://github.com/rumblefishdev/stellar-prices-a
 ClickHouse → Apply the ClickHouse schema → Start the ClickHouse reverse proxy →
 ClickHouse integration tests_, all `success`).
 
-_To fill:_ the first green run on `master` after the release, and the test
-count from its log (229 integration tests at #327). CI runs on pull requests and
-on pushes to `master`.
+The first run on `master` after the release, [`37298469682`](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/37298469682)
+(2026-10-05, merge of #381, same job, all steps `success`):
+`cargo test --workspace` passes 1,407 tests, and the integration step passes
+all 306 ClickHouse tests in 39 targets (229 at #327), 0 failed. Ten more `#[ignore]`d
+tests need the network (5) or production (5); `ignored-tests.sh` records them
+and CI does not run them. CI runs on pull requests and on pushes to `master`.
 
 #### Reproduce it locally
 

@@ -36,12 +36,14 @@ walk — sign-in, key, a /v1 call, revocation — with its timestamps>`
 >    at `/api-docs-json`, generated from the handler code, with 74
 >    production-shaped examples. CI lints it on every Rust change with
 >    Redocly's strict ruleset, and the portal renders it as an API reference.
->    `<TO FILL: lint summary line from the release run>`
+>    The release run on `master` (2026-10-05) lints it with no errors or
+>    warnings: `https://github.com/rumblefishdev/stellar-prices-api/actions/runs/37298469682`
 > 3. **Integration tests in CI against a real database.** Since 2026-09-22,
 >    CI starts ClickHouse, applies the schema, starts the mTLS proxy and runs
 >    the integration suite against it, covering each of the seven `/v1`
->    routes. `<TO FILL: test count and the link to the first green run on
-master after the release>`
+>    routes. On the first run on `master` after the release (2026-10-05)
+>    1,407 unit and 306 ClickHouse integration tests pass, 0 failed:
+>    `https://github.com/rumblefishdev/stellar-prices-api/actions/runs/37298469682`
 > 4. **Load-tested at the approved target.** 100 requests per second for five
 >    minutes: **p95 49.0 ms** against a 100 ms bar, **0 errors in 30,001
 >    requests**, on the purpose-built plan the criterion asks us to name. The
@@ -118,16 +120,18 @@ templates>`
 >    is 2015-11-18 against a 2018-01-01 bar; liveness is graded on the
 >    ingestion alarms and `realtime_tip_ledger` (deviation 1).
 >    `GET https://prices-api.sorobanscan.rumblefish.dev/v1/backfill/status`
-> 2. **OpenAPI lints clean; reference deployed.** `<TO FILL: lint summary
-line from the release run>` Reference:
+> 2. **OpenAPI lints clean; reference deployed.** Met: the release run on
+>    `master` (2026-10-05) lints it with no errors or warnings. Reference:
 >    `https://sorobanscan.rumblefish.dev/prices-api/docs` (deviation 4).
 >    Reproduce: `npm run openapi:lint`
 > 3. **Portal accessible; self-service key flow works.**
 >    `https://sorobanscan.rumblefish.dev/prices-api/`, anonymous since
 >    2026-09-23; Discord sign-in for keys. `<TO FILL: the recorded walk with
 its timestamps>`
-> 4. **Integration suite passes on CI.** `<TO FILL: link to the first green
-run on master after the release, and its test count>` Reproduce locally:
+> 4. **Integration suite passes on CI.** Met: first run on `master` after the
+>    release, `https://github.com/rumblefishdev/stellar-prices-api/actions/runs/37298469682`
+>    (2026-10-05): 1,407 unit and 306 ClickHouse integration tests, 0 failed.
+>    Reproduce locally:
 >    `tools/scripts/ignored-tests.sh`
 > 5. **Load test: met.** p95 49.0 ms at 100 req/s for five minutes, 0 errors
 >    in 30,001 requests, plan `prices-production-loadtest-plan`; scope in
