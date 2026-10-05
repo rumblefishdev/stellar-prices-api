@@ -96,9 +96,8 @@ Set out in full in
 | --- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
 | 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                                     | disclosed, delivered early     |
 | 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat since 2026-07-27; the report carries ingest-queue age and `current_prices` freshness against their alarm thresholds instead                    | disclosed                      |
-| 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a named reviewer gets an IAM Identity Center user with read-only dashboard access for the review window                                | disclosed                      |
-| 4   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/prices-api/docs` is the portal's own renderer, in Swagger UI's layout | disclosed                      |
-| 5   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met on a scenario with 98.3 % cache hits; declared with the miss-only row, the 500 and 1000 req/s rows and the client's location                             | met as written, scope declared |
+| 3   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/prices-api/docs` is the portal's own renderer, in Swagger UI's layout | disclosed                      |
+| 4   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met on a scenario with 98.3 % cache hits; declared with the miss-only row, the 500 and 1000 req/s rows and the client's location                             | met as written, scope declared |
 
 ## 5. Acceptance-criteria evidence
 
