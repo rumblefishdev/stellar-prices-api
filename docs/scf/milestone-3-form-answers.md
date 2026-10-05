@@ -56,8 +56,7 @@ templates>`
 >    processor, the oracle and the enrichment worker, and on the gateway stage.
 >    The `prices-production-overview` dashboard covers API latency and errors,
 >    ingestion lag, ClickHouse write latency, the workers and an alarm strip with
->    every `prices-production-*` alarm. `<TO FILL: alarm count (83 on
-2026-10-02, was 65) and the "all OK" date>`
+>    every `prices-production-*` alarm; all 83 were OK on 2026-10-05.
 > 7. **Seven days of post-launch monitoring.** From 2026-09-23 09:40 to
 >    2026-09-30 09:40 CEST: **uptime 100.000 %, 0 × 5XX in 65,806 requests,
 >    gateway p95 145.2 ms.** The report recomputes from a raw CloudWatch export
@@ -143,8 +142,8 @@ run on master after the release, and its test count>` Reproduce locally:
 >    empty AWS account; the claim rests on the runbook, a credential-free synth
 >    in CI and a name-by-name check of the runbook against the code.
 > 8. **Dashboard and alarms: met on the amended wording.**
->    `prices-production-overview`, `eu-central-1`; `<TO FILL: all N alarms
-OK on DATE>`. Read-only access for a named reviewer on request
+>    `prices-production-overview`, `eu-central-1`; all 83 alarms OK on
+>    2026-10-05. Read-only access for a named reviewer on request
 >    (deviation 3; see Field 4).
 > 9. **7-day post-launch report: met.** Uptime 100.000 %, 0 × 5XX in 65,806
 >    requests, gateway p95 145.2 ms; two named metrics replaced by live
