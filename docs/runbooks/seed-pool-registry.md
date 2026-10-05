@@ -131,11 +131,146 @@ API returned a contract of an unexpected type — investigate before seeding it.
   see task 0080. They land only once that task confirms the extractor handles
   them.
 - **Ongoing coverage.** This seeds _pre-existing_ pools. Pools created after
-  go-live are picked up by the live processor's own factory-event stream and
-  persisted by the asset-discovery worker (task 0069). Re-run this seeder any
-  time to reconcile against the API's current set.
+  go-live are learned by the live processor from factory events and, since task
+  0291, written back to `prices.pool_registry` (new rows only). ⚠️ Before 0291
+  nothing persisted them: the asset-discovery worker was meant to (task 0069),
+  but its ledger scan has never run on production (task 0256), so the table
+  stopped growing on 2026-07-06. To fill a gap, prefer
+  [the factory-event route below](#discover-missing-pools-from-factory-events-task-0291),
+  which writes only the missing rows.
 - **Not a substitute for the historical OHLCV backfill.** For historical AMM
   price _candles_, use the 0053 backfill; this only seeds the registry (live
   pricing).
 - **Secret hygiene.** The key is read from `SOROSWAP_API_KEY` and only sent in the
   `Authorization` header — never logged. Keep `.env.local` local and uncommitted.
+
+---
+
+## Discover missing pools from factory events (task 0291)
+
+`events-backfill --discover-pools` reads the AMM factory events in a ledger
+range from BE's `default.soroban_events` (Aquarius `add_pool`, Phoenix `create`,
+Soroswap `new_pair`, SushiSwap V3 `pool_created` — task 0290), runs them through the same `learn_factory` the live
+processor uses, and writes **only the pools `prices.pool_registry` does not
+already hold**. No API key, no rewrite of existing rows, no candles. A re-run
+writes nothing.
+
+Use it:
+
+- **once, for task 0291**, to add the pools created after the history backfill
+  ended (2026-07-06) that the live processor forgot on its cold starts. Run it
+  **before** deploying the 0291 ledger-processor: the tool does not depend on
+  that deploy, and the deploy's cold start then loads the new rows;
+- **before any reprice that `DROP`s a partition** ([task 0286 phase 3](0286-reingest-history.md)):
+  a dry run over the month that reports `to_write=0` shows the registry covers
+  it; anything else means the drop would delete candles the reprice cannot put
+  back;
+- **when `prices-production-ledger-processor-unregistered-pool` fires**, over
+  the range holding the pool's factory event.
+
+**Run identity** is the same as the reprice
+([events-sourced-amm-reprice.md](events-sourced-amm-reprice.md), precondition
+2): on the Hetzner host, as ClickHouse `default`, against `localhost:8123`. The
+host needs a static build, because its glibc is older than a local toolchain's:
+
+```bash
+# Local machine, repo root:
+cargo build --release -p events-backfill --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/events-backfill <prod-host>:~/events-backfill
+```
+
+**Keep the range tight.** The read parses `topics_xdr` for the string-topic
+factories (Phoenix and Soroswap leave `signature` NULL), 2-4 s per 320k-ledger
+chunk on the shared box. As of 2026-09-17 every missing pool was created after
+ledger 63,000,000 (checked per venue over the whole Soroban era), so the
+catch-up only needs `63000000` to the tip. **Task 0290 is the exception:**
+SushiSwap V3's pools go back to ledger 60,147,305, so its run starts at
+`60000000` — the command is [below](#task-0290--sushiswap-v3s-wider-range).
+
+```bash
+# On the prod host, under tmux:
+read -rs CH_PW
+CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+  --start 63000000 --end <TIP> \
+  --clickhouse-url http://localhost:8123 --dry-run
+```
+
+Expected on 2026-09-17 (grows if pools are created meanwhile): one
+`pool not in prices.pool_registry` line per pool, every one `change="new"`,
+then `to_write=42 per_venue={"aquarius": 27, "phoenix": 1, "soroswap": 14}`.
+A `change="changed"` line means an existing row would be rewritten — stop and
+investigate before the write.
+
+Then drop `--dry-run` to write, and run the dry run once more: it must report
+`to_write=0`.
+
+#### Task 0290 — SushiSwap V3's wider range
+
+SushiSwap V3 is the one venue whose pools predate ledger 63,000,000: the first
+`pool_created` is at 60,147,305 and the live factory's pools start at ~61.49M,
+so the 63M catch-up above misses them. Run it over its own range **once**, then
+the 63M catch-up covers it like every other venue:
+
+```bash
+# On the prod host, under tmux:
+read -rs CH_PW
+CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+  --start 60000000 --end <TIP> \
+  --clickhouse-url http://localhost:8123 --dry-run
+```
+
+That is ~4.5M ledgers, so ~14 chunks at the default `--chunk-size 320000` and
+2-4 s of `topics_xdr` parsing each — a couple of minutes, well inside a tmux
+session. It reads the same factory events as the run above; only `--start`
+differs.
+
+Expect `per_venue` to carry a `"sushiswap"` entry. The read has **no emitter
+filter**, so it learns every generation's pools, not just the live factory's —
+which is what this wider range is for: 99 SushiSwap pools have traded all-time
+and three of them come from an earlier factory generation that is still trading.
+Confirm with the same `FINAL` count below, then drop `--dry-run` to write.
+
+### Factory-less pools (task 0300)
+
+Some pools have no factory event, so neither `learn_factory` nor this tool can
+find them. They are registered by a committed list, `STATIC_POOLS` in
+`packages/prices-ingest-core/src/static_pools.rs`. Today it holds one pool:
+Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`
+(venue `comet`).
+
+- The live processor and the events-backfill reprice route it from the list,
+  with or without a table row.
+- `--discover-pools` writes its row once when the table lacks it, over **any**
+  range (the list is not read from events). A one-ledger dry run shows it:
+
+  ```bash
+  CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+    --start <TIP> --end <TIP> \
+    --clickhouse-url http://localhost:8123 --dry-run
+  ```
+
+  Expected until written: a `change="new"` line for `CAS3FL6T…` with
+  `venue="comet"`, then `to_write=1 per_venue={"comet": 1}` (plus any
+  factory pools created in that ledger).
+
+- sdex-backfill's end-of-run registry write also persists it — the identical
+  row, idempotent under the table's `ReplacingMergeTree`.
+- asset-discovery neither adds nor removes it.
+
+Adding a pool = a reviewed commit to the list, then a ledger-processor deploy
+(its cold start picks the pool up), then a `--discover-pools` WRITE, all
+before any 0286 phase-3 month that needs the pool — `reingest_0286.py` refuses
+Comet months until the row exists (gate `0300 registry write`).
+
+### Verify
+
+```sql
+SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue ORDER BY venue;
+-- 2026-09-17 before: aquarius 488, phoenix 19, soroswap 221
+-- expected after:    aquarius 515, phoenix 20, soroswap 235
+```
+
+The live processor reads the table only at cold start, so a warm container
+keeps pricing without the new rows until its next one. Any code or
+configuration deploy of the function forces it, which is why the task-0291
+order is discover first, deploy second.

@@ -50,7 +50,12 @@ export function secretsManagerLayerArn(region: string): string {
  * ClickHouse, mirroring BE's per-service Lambda model:
  *
  * - `ingestion` → CH user `prices_writer` (ledger processor + periodic
- *   workers; `SELECT, INSERT, OPTIMIZE ON prices.*`).
+ *   workers; `SELECT, INSERT, OPTIMIZE ON prices.*`). Task 0100's
+ *   coverage-sweep-probe also reads `default.soroban_events` and
+ *   `default.soroban_contracts` over this identity; those two SELECTs are
+ *   BE's to grant (request text: docs/runbooks/0100-coverage-sweep-triage.md
+ *   §4.1), and until they land the probe fails with Code 497. A dedicated
+ *   read-only identity for it is task 0258's later clean-up.
  * - `api`       → CH user `prices_reader` (axum read handlers;
  *   `SELECT ON prices.*`).
  */

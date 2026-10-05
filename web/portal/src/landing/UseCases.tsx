@@ -20,27 +20,27 @@ import { Section, SectionHeading, cardBorder, cardSurface } from './primitives';
 const USE_CASES: readonly { title: string; body: string }[] = [
   {
     title: 'Wallet Applications',
-    body: 'Display live token values in XLM, USD or any other asset. Keep users informed about their portfolio at a glance.',
+    body: 'Display token values in USD or XLM. Keep users informed about their portfolio at a glance.',
   },
   {
     title: 'DEX Aggregators',
-    body: 'Power swap routing and token comparisons. Use liquidity depth data to find optimal trade paths across Soroswap pools.',
+    body: 'Compare token prices across venues. Each price comes with a per-venue breakdown for SDEX, Soroswap, Aquarius, Phoenix and SushiSwap.',
   },
   {
     title: 'Portfolio Trackers',
-    body: 'Calculate real-time portfolio value across all Stellar assets. Combine current prices with historical data for P&L.',
+    body: 'Calculate current portfolio value for traded Stellar assets. Combine current prices with historical data for P&L.',
   },
   {
     title: 'Trading Bots',
-    body: 'Automate market monitoring and arbitrage detection. Low-latency responses let you act on price movements as they happen.',
+    body: 'Automate market monitoring and alerts on price and volume changes, with the last price on each venue alongside.',
   },
   {
     title: 'Analytics Platforms',
-    body: 'Build charts, track market trends and generate historical insights. Full time-series data for any Stellar asset pair.',
+    body: 'Build charts, track market trends and generate historical insights. Full time series for any priced Stellar asset, in USD or against XLM.',
   },
   {
     title: 'Payment Applications',
-    body: 'Estimate token values during transactions. Let users pay in their preferred asset with accurate, real-time conversion rates.',
+    body: 'Estimate token values during transactions. Let users pay in their preferred asset with current conversion rates and the age of each price stated.',
   },
 ];
 
@@ -63,7 +63,7 @@ export function UseCases() {
             align="left"
             label="Use Cases"
             title="What can you build?"
-            subtitle="From simple price displays to complex trading infrastructure."
+            subtitle="From simple price displays to analytics and trading tools."
           />
         </Box>
 

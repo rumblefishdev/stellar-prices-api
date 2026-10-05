@@ -291,7 +291,20 @@ export function exampleOf(
   switch (type) {
     case 'object': {
       const out: Record<string, unknown> = {};
+      const required = new Set(schema.required ?? []);
       for (const [name, prop] of Object.entries(schema.properties ?? {})) {
+        // An optional field with no example of its own is one the API leaves
+        // out when absent (`ErrorEnvelope.details`, `OhlcvResponse
+        // .backfill_note`), so the example leaves it out too — as `null` or
+        // `"string"` it showed a field no response carries (task 0306). A
+        // reference is kept: its component supplies the example.
+        if (
+          !required.has(name) &&
+          prop.example === undefined &&
+          !linkedComponent(prop)
+        ) {
+          continue;
+        }
         out[name] = exampleOf(doc, prop, depth + 1, hops);
       }
       return out;

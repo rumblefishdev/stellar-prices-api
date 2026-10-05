@@ -131,7 +131,7 @@ export function workerErrorAlarmName(
  *
  * The per-worker duration / no-invocations health alarms are NOT derived from
  * it: they carry hand-written timeout, cadence and impact text per worker in
- * `observability-stack.ts` (`workerHealth`), and three workers deliberately
+ * `observability-stack.ts` (`workerHealth`), and two workers deliberately
  * have none. That stack asserts every name here is either in `workerHealth`
  * or in its explicit exemption list, so a new worker cannot fall through.
  */
@@ -145,6 +145,7 @@ export const SCHEDULED_WORKERS = [
   'backfill-freshness-probe',
   'rollup-freshness-probe',
   'mtls-notafter-probe',
+  'coverage-sweep-probe',
 ] as const;
 
 export type ScheduledWorker = (typeof SCHEDULED_WORKERS)[number];
@@ -157,6 +158,57 @@ export type ScheduledWorker = (typeof SCHEDULED_WORKERS)[number];
 export const SCHEDULE_DISABLED_WORKERS: readonly ScheduledWorker[] = [
   'cleanup',
 ];
+
+/**
+ * Scheduled workers that deliberately have NO liveness alarm
+ * (`-no-invocations`) and no duration alarm — keyed by name, valued by the
+ * reason, because the reason is what the `-errors` alarm's description has to
+ * say out loud (task 0223).
+ *
+ * WHY THE REASON IS DATA, NOT A COMMENT
+ * -------------------------------------
+ * An `-errors` alarm is CONDITIONAL: `AWS/Lambda` publishes nothing for a
+ * period with zero invocations, and `treatMissingData: NOT_BREACHING` renders
+ * that as OK. So a dead worker reads green here. For every other worker that
+ * is honest, because a `-no-invocations` sibling on the same alarm strip goes
+ * red instead. For the workers listed here nothing does — and the previous
+ * comment justified that with "their -errors alarm is the coverage today",
+ * which is circular. Keeping the reason next to the name means
+ * {@link createWorkerLambda} appends it to the alarm's description, so the gap
+ * is visible where an operator reads it, and adding a name here without a
+ * reason does not type-check.
+ *
+ * ObservabilityStack asserts every SCHEDULED_WORKER is in exactly one of
+ * this map and its `workerHealth` list, so a tenth worker must be placed
+ * deliberately.
+ */
+export const WORKERS_WITHOUT_HEALTH_ALARMS: Readonly<
+  Partial<Record<ScheduledWorker, string>>
+> = {
+  cleanup:
+    'its EventBridge rule is disabled on purpose (task 0200), so zero invocations is the intended state and a liveness alarm would fire forever',
+  'coverage-sweep-probe':
+    "it runs weekly (task 0100), and a -no-invocations alarm needs three cadences (21 days), over CloudWatch's 7-day evaluation limit; confirm a run from its Monday 'coverage sweep complete' log line",
+};
+
+/**
+ * The sentence every `-errors` alarm carries so that its OK is unambiguous
+ * to an operator who did not write it (task 0223 AC 2). Two shapes: the
+ * conditional-by-design one names the liveness sibling; the exempt one names
+ * the reason there is none.
+ */
+export function withLivenessNote(
+  envName: string,
+  lambdaName: ScheduledWorker,
+  description: string,
+): string {
+  const reason = WORKERS_WITHOUT_HEALTH_ALARMS[lambdaName];
+  const note =
+    reason === undefined
+      ? `OK here means no failing invocation was observed in the last period; a worker that does not run at all publishes nothing and ALSO reads OK. Liveness is prices-${envName}-${lambdaName}-no-invocations, on the same alarm strip (task 0223).`
+      : `⚠ OK here also means nothing ran: this worker has NO liveness alarm — ${reason} (task 0223).`;
+  return `${description} ${note}`;
+}
 
 /**
  * Creates an IAM role for a prices-api Lambda with the baseline
@@ -255,6 +307,16 @@ export interface WorkerLambdaProps extends BaselineLambdaContext {
   /** Period over which the error alarm sums invocation errors. */
   readonly alarmPeriod: cdk.Duration;
   /**
+   * How many `alarmPeriod`s the `-errors` alarm looks back over, alarming on a
+   * single erroring period (`datapointsToAlarm: 1`). Default 1 — the alarm
+   * clears one period after the failure. A worker that runs far less often
+   * than `alarmPeriod` (the weekly coverage sweep, task 0100) sets this so a
+   * failed run stays in ALARM until the next run can clear it, instead of
+   * flipping to OK at the next period boundary. CloudWatch caps
+   * `period × evaluationPeriods` at 7 days.
+   */
+  readonly alarmEvaluationPeriods?: number;
+  /**
    * Actions wired to the worker's `-errors` alarm (e.g. an ops SNS topic).
    * Optional: the alarm is created either way, but with no action it is inert
    * (transitions to ALARM but notifies no one). Wire an action for any worker
@@ -291,8 +353,8 @@ export interface WorkerLambda {
  * into a single factory.
  *
  * Returns the `function` and `role` so callers can attach worker-specific
- * permissions afterwards (e.g. asset-discovery grants S3 read on BE's
- * ledger bucket via `role`).
+ * permissions afterwards (e.g. the oracle worker adds its namespaced
+ * `cloudwatch:PutMetricData` statement via `role`).
  */
 export function createWorkerLambda(
   scope: Construct,
@@ -369,10 +431,17 @@ export function createWorkerLambda(
 
   const errorAlarm = new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
     alarmName: workerErrorAlarmName(env, name),
-    alarmDescription,
+    alarmDescription: withLivenessNote(
+      env,
+      name as ScheduledWorker,
+      alarmDescription,
+    ),
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
     threshold: 1,
-    evaluationPeriods: 1,
+    evaluationPeriods: props.alarmEvaluationPeriods ?? 1,
+    ...(props.alarmEvaluationPeriods !== undefined && {
+      datapointsToAlarm: 1,
+    }),
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   // Both directions. Only the ALARM action was wired before, so a worker that

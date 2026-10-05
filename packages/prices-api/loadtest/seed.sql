@@ -1,6 +1,6 @@
 -- Minimal seed for a local /price load test (the `prices` database created by
 -- docker-compose's init.sql). Idempotent-ish: ReplacingMergeTree collapses
--- duplicate asset_id rows on merge / FINAL.
+-- duplicate rows on merge / FINAL.
 --
 --   curl --data-binary @packages/prices-api/loadtest/seed.sql \
 --     'http://localhost:8123/?database=prices'
@@ -14,10 +14,12 @@
 -- schema (no MV) is present, OR drop the MV first:
 --   DROP VIEW IF EXISTS prices.mv_current_prices;
 
+-- `assets` derives asset_id from the identity (task 0139); current_prices
+-- names the same id through the same expression.
 INSERT INTO prices.assets
-    (asset_id, asset_code, asset_type, issuer_address, contract_address)
-VALUES (1, 'XLM', 'native', '', '');
+    (asset_code, asset_type, issuer_address, contract_address)
+VALUES ('XLM', 'native', '', '');
 
 INSERT INTO prices.current_prices
     (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at)
-VALUES (1, 0.5, 0.51, 1234.5, now());
+VALUES (xxh3(concat('XLM', ':', '', ':', '')), 0.5, 0.51, 1234.5, now());

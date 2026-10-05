@@ -3,7 +3,7 @@ id: "0144"
 title: "BE 0199 report: close_usd read surfaces publish a wrong answer while enrichment is in flight, and price_usd_series won't scale"
 type: BUG
 status: completed
-related_adr: []
+related_adr: ["0292"]
 related_tasks:
   ["0135", "0139", "0116", "0114", "0061", "0072", "0118", "0131", "0138", "0142", "0143",
    "0145", "0146", "0147", "0148", "0149", "0150", "0151", "0154", "0137", "0088", "0136",
@@ -117,6 +117,15 @@ history:
       foreign candles as XLM/USDC, silently), **O3** asked of BE in the reply
       above. Next: [[0145]], which is deadline-gated on the [[0088]] pass-2
       pre-roll.
+  - date: "2026-09-17"
+    status: completed
+    who: akot
+    note: >
+      Cross-link only: ADR 0292 (from [[0151]], this chain's phase 9) decides
+      the question every finding here was an instance of — `close_usd = 0`
+      stays the storage sentinel, its four meanings are named, and the reason
+      is computed at read time and published beside the number. The guardrail
+      inventory is `docs/database-schema/close-usd-zero-guardrails.md`.
 ---
 
 # BE 0199 report — three defects in the USD read surfaces

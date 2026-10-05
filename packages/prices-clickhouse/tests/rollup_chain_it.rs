@@ -1,7 +1,7 @@
 //! Full-chain rollup version-propagation integration test (task 0059).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test rollup_chain_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test rollup_chain_it -- --ignored --test-threads=1
 //!
 //! Exercises the REAL shipped refreshable-MV chain (`schema/rollups.sql`,
 //! landed by task 0051) end-to-end across every granularity `_1m → _15m → _1h
@@ -96,7 +96,12 @@ const CHAIN: &[(&str, &str)] = &[
     ("mv_ohlcv_1h_to_4h", "price_ohlcv_4h"),
     ("mv_ohlcv_4h_to_1d", "price_ohlcv_1d"),
     ("mv_ohlcv_1d_to_1w", "price_ohlcv_1w"),
-    ("mv_ohlcv_1w_to_1M", "price_ohlcv_1M"),
+    // Task 0286 / BRIEF F10: the month rolls from the DAY, not the week —
+    // a week belongs wholly to the month it STARTS in, so a week-fed month
+    // took its close and extremes from whichever month owned the straddling
+    // week. `price_ohlcv_1d` is refreshed two entries above, so the
+    // front-to-back drive still reads what the previous level wrote.
+    ("mv_ohlcv_1d_to_1M", "price_ohlcv_1M"),
 ];
 
 /// Trigger an immediate refresh of one MV and block until its target reflects
@@ -207,7 +212,7 @@ async fn assert_bucket(
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn enrichment_propagates_through_full_rollup_chain() {
     let db = "it_rollup_chain";
     let admin = Client::default().with_url(ch_url());
@@ -235,6 +240,18 @@ async fn enrichment_propagates_through_full_rollup_chain() {
     prices_clickhouse::apply_sql(&mv_client, &rewrite(prices_clickhouse::ROLLUPS_SQL, db))
         .await
         .expect("create rollup MV chain");
+
+    // Task 0203: `rollups.sql` also ships six hourly reconciliation MVs. This
+    // test never drives reconciliation, and a real `:00` crossing mid-test would
+    // otherwise append reconcile rows into the targets under assertion — so
+    // they are STOPped (which also cancels their CREATE-time refresh).
+    for tier in prices_clickhouse::rollup_sql::TIERS {
+        mv_client
+            .query(&format!("SYSTEM STOP VIEW {db}.{}", tier.reconcile_mv))
+            .execute()
+            .await
+            .unwrap_or_else(|e| panic!("stop {}: {e}", tier.reconcile_mv));
+    }
 
     // One fixed bucket boundary, reused by BOTH the un-enriched and the enriched
     // INSERT so the enrichment re-INSERT dedups against the original (same PKs)
@@ -317,7 +334,7 @@ async fn enrichment_propagates_through_full_rollup_chain() {
 /// first-open / last-close at EVERY grain (the bug task 0059's full-chain test
 /// surfaced: the `AS timestamp` bucket alias shadowing the source column).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn preroll_reaggregates_full_chain_ohlc_correctly() {
     let db = "it_preroll_chain";
     let admin = Client::default().with_url(ch_url());

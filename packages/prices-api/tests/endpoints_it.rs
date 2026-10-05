@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration tests for the Phase 2 endpoints (asset detail,
 //! batch, oracles, backfill). Gated `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test endpoints_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test endpoints_it -- --ignored --test-threads=1
 //!
 //! Each test owns an isolated scratch database, dropped at the end.
 
@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -44,33 +45,47 @@ async fn setup(db: &str) -> Client {
         .await
         .unwrap();
 
+    let assets = [
+        AssetFixture::new("XLM", "native", "", ""),
+        AssetFixture::new("USDC", "credit", issuer(), ""),
+    ];
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'XLM', 'native', '', ''), \
-             (2, 'USDC', 'credit', '{iss}', '')",
-            iss = issuer()
-        ))
+        .query(&assets_insert(db, &assets))
         .execute()
         .await
         .unwrap();
+    let [xlm, usdc] = assets.map(|a| a.id());
     // home_domain is enrichment — it lives in the single-writer asset_metadata
     // table, not on the assets identity row (task 0067). The read path LEFT JOINs
     // it back in.
     admin
         .query(&format!(
-            "INSERT INTO {db}.asset_metadata (asset_id, home_domain) VALUES (2, 'centre.io')"
+            "INSERT INTO {db}.asset_metadata (asset_id, home_domain) VALUES ({usdc}, 'centre.io')"
         ))
         .execute()
         .await
         .unwrap();
     admin
         .query(&format!(
+            // Task 0216: XLM carries a REAL as_of/price_status pair dated
+            // behind its updated_at.
             "INSERT INTO {db}.current_prices \
-             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) VALUES \
-             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30'), \
-             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
+             VALUES \
+             ({xlm}, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            // USDC names neither new column, so it really takes the table
+            // DEFAULT pair (the epoch and ''), which the wire must render as
+            // ""/"" — not a hand-written copy of those values.
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) \
+             VALUES \
+             ({usdc}, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
         ))
         .execute()
         .await
@@ -79,18 +94,32 @@ async fn setup(db: &str) -> Client {
         .query(&format!(
             "INSERT INTO {db}.oracle_prices \
              (timestamp, asset_id, oracle_name, price_usd, raw_data) VALUES \
-             ('2026-02-10 11:55:00', 2, 'reflector', 1.0, ''), \
-             ('2026-02-10 11:58:00', 2, 'redstone', 1.0001, '')"
+             ('2026-02-10 11:55:00', {usdc}, 'reflector', 1.0, ''), \
+             ('2026-02-10 11:58:00', {usdc}, 'redstone', 1.0001, '')"
         ))
         .execute()
         .await
         .unwrap();
+    // `INSERT … SELECT` so `now()` evaluates (the idiom of
+    // backfill-freshness-probe/tests/freshness_it.rs). The running stream's
+    // `last_push_at` is now()-relative: `/v1/backfill/status` reports a
+    // `running` stream whose last push is older than 7 days as `stalled`, and
+    // the literal this seed used to carry ('2026-06-15 11:30:00') aged past that
+    // threshold and turned `backfill_status_maps_both_streams` red (task 0275).
+    // Every other value is a literal on purpose — none of them is compared
+    // against the clock. Siblings checked for the same rot by reading what
+    // their seeds compare against `now()`, not by waiting: `ohlcv_it` seeds no
+    // `last_push_at` (NULL is never stalled), prices-clickhouse `views_it` uses
+    // year 2096, enrichment-worker `ch_enrich_it` is all now()-relative.
     admin
         .query(&format!(
             "INSERT INTO {db}.backfill_progress \
-             (task_name, start_ledger, target_ledger, current_ledger, status, last_push_at, completed_at, earliest_data_available) VALUES \
-             ('sdex_archive', 1, 57234198, 34891234, 'running', '2026-06-15 11:30:00', NULL, '2015-11-18 03:47:00'), \
-             ('soroban_amm', 0, 0, 0, 'completed', '2026-04-14 08:23:11', '2026-04-14 08:23:11', '2024-02-20 17:00:00')"
+             (task_name, start_ledger, target_ledger, current_ledger, status, last_push_at, completed_at, earliest_data_available) \
+             SELECT 'sdex_archive', 1, 57234198, 34891234, 'running', \
+                    toDateTime(now() - INTERVAL 1 DAY), CAST(NULL AS Nullable(DateTime)), toDateTime('2015-11-18 03:47:00') \
+             UNION ALL \
+             SELECT 'soroban_amm', 0, 0, 0, 'completed', \
+                    toDateTime('2026-04-14 08:23:11'), toDateTime('2026-04-14 08:23:11'), toDateTime('2024-02-20 17:00:00')"
         ))
         .execute()
         .await
@@ -170,7 +199,7 @@ fn approx(v: &Value, expected: f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_native() {
     let db = "it_ep_detail_0040";
     let client = setup(db).await;
@@ -184,7 +213,7 @@ async fn asset_detail_native() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_returns_home_domain_from_metadata() {
     // Task 0067: home_domain is served from the asset_metadata LEFT JOIN, not the
     // assets identity row. The fixture only seeds it in asset_metadata.
@@ -211,11 +240,9 @@ fn contract() -> String {
 async fn seed_soroban(db: &str, symbol: Option<&str>) {
     let admin = Client::default().with_url(ch_url());
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (3, '', 'contract', '', '{c}')",
-            c = contract()
+        .query(&assets_insert(
+            db,
+            &[AssetFixture::new("", "contract", "", &contract())],
         ))
         .execute()
         .await
@@ -233,7 +260,7 @@ async fn seed_soroban(db: &str, symbol: Option<&str>) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_returns_soroban_symbol_as_code() {
     // Task 0210. The symbol is served from the asset_symbol LEFT JOIN, not the
     // assets identity row — the same single-writer shape 0067 gave home_domain,
@@ -252,7 +279,7 @@ async fn asset_detail_returns_soroban_symbol_as_code() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_unresolved_soroban_code_is_empty() {
     // No asset_symbol row: the join misses and `code` stays `""`, which is the
     // pre-0210 behaviour. Consumers must not see a partially-composed value.
@@ -267,7 +294,7 @@ async fn asset_detail_unresolved_soroban_code_is_empty() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_unknown_is_404() {
     let db = "it_ep_detail_unknown_0040";
     let client = setup(db).await;
@@ -277,7 +304,7 @@ async fn asset_detail_unknown_is_404() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn batch_returns_found_and_not_found() {
     let db = "it_ep_batch_0040";
     let client = setup(db).await;
@@ -288,11 +315,33 @@ async fn batch_returns_found_and_not_found() {
     assert_eq!(json["prices"].as_array().unwrap().len(), 2);
     assert_eq!(json["not_found"].as_array().unwrap().len(), 1);
     assert_eq!(json["not_found"][0], format!("FOO:{}", issuer()));
+
+    // Task 0216 — the batch surface reads through its OWN row struct and then
+    // hand-copies into the price response, so it can drift from `/price`
+    // independently. Asserted by value on both arms: native carries a real
+    // pair, USDC the DEFAULT pair that must publish as two empty strings.
+    let by_asset: std::collections::HashMap<&str, &Value> = json["prices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["asset"].as_str().unwrap(), p))
+        .collect();
+    let native = by_asset["native"];
+    assert_eq!(native["as_of"], "2026-02-10T11:30:00Z");
+    assert_ne!(
+        native["as_of"], native["updated_at"],
+        "the batch surface must publish the price's own time, not the snapshot's"
+    );
+    assert_eq!(native["price_status"], "carried");
+    let usdc = by_asset[format!("USDC:{}", issuer()).as_str()];
+    assert_eq!(usdc["as_of"], "", "the epoch sentinel is never formatted");
+    assert_eq!(usdc["price_status"], "");
+
     teardown(db).await;
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn batch_empty_is_400() {
     let db = "it_ep_batch_empty_0040";
     let client = setup(db).await;
@@ -303,7 +352,7 @@ async fn batch_empty_is_400() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn oracles_returns_latest_per_name() {
     let db = "it_ep_oracles_0040";
     let client = setup(db).await;
@@ -320,7 +369,7 @@ async fn oracles_returns_latest_per_name() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn oracles_unknown_asset_is_404() {
     let db = "it_ep_oracles_unknown_0040";
     let client = setup(db).await;
@@ -330,7 +379,7 @@ async fn oracles_unknown_asset_is_404() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn backfill_status_maps_both_streams() {
     let db = "it_ep_backfill_0040";
     let client = setup(db).await;
@@ -344,7 +393,20 @@ async fn backfill_status_maps_both_streams() {
     // oldest ledger reflected and what remains is the stretch still BELOW it:
     // remaining = current - start = 34891234 - 1
     assert_eq!(json["sdex"]["ledgers_remaining"], 34891233u64);
-    assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
+    // Seeded as `now() - INTERVAL 1 DAY`, so pin the wire format (RFC 3339,
+    // UTC `Z`) and the value to within a few minutes, never its text.
+    let last_push = json["sdex"]["last_push_at"]
+        .as_str()
+        .expect("last_push_at is a string");
+    assert!(last_push.ends_with('Z'), "last_push_at={last_push}");
+    let age = chrono::Utc::now()
+        - chrono::DateTime::parse_from_rfc3339(last_push)
+            .expect("last_push_at is RFC 3339")
+            .with_timezone(&chrono::Utc);
+    assert!(
+        (age - chrono::Duration::days(1)).num_seconds().abs() < 300,
+        "last_push_at={last_push} is not ~1 day ago (age {age})"
+    );
     // earliest_data_available = oldest OHLCV row this stream has landed (AC 6)
     assert_eq!(
         json["sdex"]["earliest_data_available"],

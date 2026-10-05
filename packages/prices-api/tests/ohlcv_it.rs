@@ -1,13 +1,15 @@
 //! Live-ClickHouse integration tests for `GET /v1/assets/{id}/ohlcv`. Gated
 //! `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test ohlcv_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test ohlcv_it -- --ignored --test-threads=1
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -24,6 +26,17 @@ fn rewrite(sql: &str, db: &str) -> String {
 fn iss() -> &'static str {
     prices_clickhouse::USDC_ISSUER
 }
+
+// The fixture assets. Each displays as its id, derived from its identity
+// (`asset_id::fixture`), so a candle written `({FOO}, {USDC}, …)` always agrees
+// with the `assets` row a test seeds for it.
+const XLM: AssetFixture = AssetFixture::new("XLM", "native", "", "");
+const USDC: AssetFixture = AssetFixture::new("USDC", "credit", USDC_ISSUER, "");
+const FOO: AssetFixture = AssetFixture::new("FOO", "credit", USDC_ISSUER, "");
+const BAR: AssetFixture = AssetFixture::new("BAR", "credit", USDC_ISSUER, "");
+const BAZ: AssetFixture = AssetFixture::new("BAZ", "credit", USDC_ISSUER, "");
+const USDT: AssetFixture = AssetFixture::new("USDT", "credit", USDT_ISSUER, "");
+const GHOST: AssetFixture = AssetFixture::new("GHOST", "credit", USDC_ISSUER, "");
 
 /// Seed FOO/USDC candles in `price_ohlcv_1h`: bucket T1 has two sources (to
 /// exercise the merge), T2 a single source. SDEX backfill = running.
@@ -43,18 +56,11 @@ async fn setup(db: &str) -> Client {
         .await
         .unwrap();
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'XLM', 'native', '', ''), \
-             (2, 'USDC', 'credit', '{i}', ''), \
-             (3, 'FOO', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, FOO]))
         .execute()
         .await
         .unwrap();
-    // asset_id=3 (FOO) quoted in asset_id=2 (USDC).
+    // FOO quoted in USDC.
     //
     // `close_usd` is seeded EQUAL TO `close` (task 0170). Two reasons, and the
     // second is why the expected numbers below did not have to change:
@@ -67,15 +73,18 @@ async fn setup(db: &str) -> Client {
     // 2. `close_usd = close` is exactly the $1 peg signature, so the derived
     //    rate is 1 and every scaled value equals the stored one. The merge
     //    assertions are therefore unchanged from the pre-0170 fixture, and it
-    //    also pins `method = "peg"`.
+    //    also pins the candle path's par label — which task 0268 renamed from
+    //    the 0165 spelling to `assumed-par`, because on a quote leg the word
+    //    has to name the ASSUMPTION rather than borrow USDC's own-series
+    //    meaning. `ohlcv_peg_series` (a `USDC:...` request) still says `peg`.
     admin
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 3, 2, 'sdex',     1.0, 1.2, 0.9, 1.1, 100, 110, 1.1, 1.05, 10, 1), \
-             ('2026-02-10 10:00:00', 3, 2, 'soroswap', 1.05, 1.3, 0.95, 1.15, 300, 345, 1.15, 1.10, 20, 1), \
-             ('2026-02-10 11:00:00', 3, 2, 'sdex',     1.1, 1.15, 1.05, 1.12, 50, 56, 1.12, 1.1, 5, 1)"
+             ('2026-02-10 10:00:00', {FOO}, {USDC}, 'sdex',     1.0, 1.2, 0.9, 1.1, 100, 110, 1.1, 1.05, 10, 1), \
+             ('2026-02-10 10:00:00', {FOO}, {USDC}, 'soroswap', 1.05, 1.3, 0.95, 1.15, 300, 345, 1.15, 1.10, 20, 1), \
+             ('2026-02-10 11:00:00', {FOO}, {USDC}, 'sdex',     1.1, 1.15, 1.05, 1.12, 50, 56, 1.12, 1.1, 5, 1)"
         ))
         .execute()
         .await
@@ -153,7 +162,7 @@ fn approx(v: &Value, expected: f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_merges_sources_and_notes_backfill() {
     let db = "it_ohlcv_merge_0040";
     let client = setup(db).await;
@@ -195,7 +204,7 @@ async fn ohlcv_merges_sources_and_notes_backfill() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_quote_has_no_candles() {
     let db = "it_ohlcv_xlm_0040";
     let client = setup(db).await;
@@ -213,7 +222,7 @@ async fn ohlcv_xlm_quote_has_no_candles() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_invalid_timeframe_is_400() {
     let db = "it_ohlcv_badtf_0040";
     let client = setup(db).await;
@@ -228,7 +237,7 @@ async fn ohlcv_invalid_timeframe_is_400() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_unknown_asset_is_404() {
     let db = "it_ohlcv_unknown_0040";
     let client = setup(db).await;
@@ -245,15 +254,10 @@ async fn ohlcv_unknown_asset_is_404() {
 /// and ordering tests need. Separate from `setup` so the merge test's fixture
 /// stays exactly what it was.
 ///
-/// asset_id 4 = `BAR`, quoted in XLM (asset_id 1) throughout.
+/// `BAR`, quoted in XLM throughout.
 async fn seed_xlm_only(db: &str, admin: &Client) {
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (4, 'BAR', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[BAR]))
         .execute()
         .await
         .unwrap();
@@ -268,9 +272,9 @@ async fn seed_xlm_only(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1), \
-             ('2026-02-10 11:00:00', 4, 1, 'sdex', 11.0, 11.0, 11.0, 11.0, 20, 0, 0, 11.0, 3, 1), \
-             ('2026-02-10 12:00:00', 4, 1, 'sdex', 13.0, 13.0, 13.0, 13.0, 5, 5, 13.0, 13.0, 2, 1)"
+             ('2026-02-10 10:00:00', {BAR}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1), \
+             ('2026-02-10 11:00:00', {BAR}, {XLM}, 'sdex', 11.0, 11.0, 11.0, 11.0, 20, 0, 0, 11.0, 3, 1), \
+             ('2026-02-10 12:00:00', {BAR}, {XLM}, 'sdex', 13.0, 13.0, 13.0, 13.0, 5, 5, 13.0, 13.0, 2, 1)"
         ))
         .execute()
         .await
@@ -283,7 +287,7 @@ async fn seed_xlm_only(db: &str, admin: &Client) {
 /// `quote_asset_id = <USDC>` and returned `200` with an empty array — the answer
 /// 20,481 assets were getting, indistinguishable from "never traded".
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usd_serves_an_asset_that_never_traded_against_usdc() {
     let db = "it_ohlcv_xlm_only_0170";
     let client = setup(db).await;
@@ -318,7 +322,7 @@ async fn ohlcv_usd_serves_an_asset_that_never_traded_against_usdc() {
 /// right-hand edge of every chart and make "not yet priced" look like "did not
 /// trade" — the confusion this task exists to remove.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_unpriced_bucket_is_returned_with_price_fields_absent() {
     let db = "it_ohlcv_unpriced_0170";
     let client = setup(db).await;
@@ -346,6 +350,13 @@ async fn ohlcv_unpriced_bucket_is_returned_with_price_fields_absent() {
     // Activity that does not depend on the USD rate is still reported.
     approx(&c["volume_base"], 20.0);
     assert_eq!(c["trade_count"], 3);
+    // Task 0286: this bucket DID form prices — all three of its trades did.
+    // "Has no USD rate yet" and "held nothing that could set a price" are two
+    // different absences, and they are distinguishable on the wire.
+    assert_eq!(
+        c["pf_trade_count"], 3,
+        "an unpriced bucket is not a dust bucket: {c}"
+    );
 
     teardown(db).await;
 }
@@ -356,7 +367,7 @@ async fn ohlcv_unpriced_bucket_is_returned_with_price_fields_absent() {
 /// aggregation rather than labelled, because every available label — `peg` above
 /// all — would assert something false.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_signature_on_a_pivot_leg_is_not_labelled_peg() {
     let db = "it_ohlcv_anomaly_0170";
     let client = setup(db).await;
@@ -377,7 +388,14 @@ async fn ohlcv_peg_signature_on_a_pivot_leg_is_not_labelled_peg() {
         c["method"].is_null() && c["close"].is_null(),
         "an XLM-leg row at exactly 1x must not be priced or labelled, got {c}"
     );
+    // Both par spellings, because task 0268 renamed this label on the candle
+    // path: asserting only the retired word would leave the guard vacuously
+    // true — the exact way a regression here would slip through unnoticed.
     assert_ne!(c["method"], "peg", "there is no peg on an XLM leg");
+    assert_ne!(
+        c["method"], "assumed-par",
+        "no $1 assumption was ever applied to an XLM leg"
+    );
 
     teardown(db).await;
 }
@@ -390,7 +408,7 @@ async fn ohlcv_peg_signature_on_a_pivot_leg_is_not_labelled_peg() {
 /// Converting first makes the comparison 3.0 vs 1.3, and the answer is 3.0 for
 /// a reason rather than by luck.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_converts_each_leg_before_merging_across_them() {
     let db = "it_ohlcv_order_0170";
     let client = setup(db).await;
@@ -402,7 +420,7 @@ async fn ohlcv_converts_each_leg_before_merging_across_them() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 4, 2, 'sdex', 1.0, 1.3, 0.8, 1.2, 10, 12, 1.2, 1.2, 4, 1)"
+             ('2026-02-10 10:00:00', {BAR}, {USDC}, 'sdex', 1.0, 1.3, 0.8, 1.2, 10, 12, 1.2, 1.2, 4, 1)"
         ))
         .execute()
         .await
@@ -445,7 +463,7 @@ async fn ohlcv_converts_each_leg_before_merging_across_them() {
 /// a column-type mismatch in that branch is invisible to it. `BAR` is quoted in
 /// XLM, so this one actually decodes rows.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_denomination_decodes_rows() {
     let db = "it_ohlcv_xlm_rows_0170";
     let client = setup(db).await;
@@ -474,18 +492,23 @@ async fn ohlcv_xlm_denomination_decodes_rows() {
 async fn seed_peg_rate(db: &str, admin: &Client) {
     admin
         .query(&format!(
+            // ⚠️ The explicit column list now names task 0267's `quality`, and
+            // these ORACLE rows leave it at ''. That is not a placeholder: the
+            // column carries the IMPORTING series' confidence in its own
+            // observation, and a polled Reflector reading has no such series.
+            // '' means "does not apply" here, never "unknown".
             "INSERT INTO {db}.usd_rate \
              (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
-              usd_rate, method, reference_asset, hops, version) VALUES \
-             ('credit', 'USDC', '{i}', '', '2026-02-10 10:00:00', 0.9993, 'oracle', '', 0, 1), \
-             ('credit', 'USDC', '{i}', '', '2026-02-10 11:00:00', 1.0007, 'oracle', '', 0, 1)",
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 10:00:00', 0.9993, 'oracle', '', '', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 11:00:00', 1.0007, 'oracle', '', '', 0, 1)",
             i = iss()
         ))
         .execute()
         .await
         .unwrap();
     // The peg series takes its buckets from the XLM/USDC reference market
-    // (asset_id 1 quoted in asset_id 2), NOT from "any USDC-quoted candle":
+    // (XLM quoted in USDC), NOT from "any USDC-quoted candle":
     // price_ohlcv_* is ORDER BY (asset_id, quote_asset_id, …), so filtering on
     // the quote alone is not a key prefix and degenerates into a full FINAL
     // scan. `close_usd = 0.25` is XLM's USD price, which the XLM denomination
@@ -499,13 +522,536 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2024-01-05 09:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 11:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2024-01-05 09:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 10:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 11:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
         .unwrap();
+}
+
+/// 🔑 The epoch-day gap hour: the one bucket where the day-wide external net
+/// used to outlive the oracle epoch.
+///
+/// The imported series stops at 13:00 on 2026-03-11 and the first poll is at
+/// 14:00 (`USDC_ORACLE_EPOCH_S`). `e_ok` floored an imported row at
+/// `toStartOfDay(bkt, 'UTC')`, so an hour at or after 14:00 THAT DAY whose own
+/// oracle window found nothing reached back to the 13:00 import and published it
+/// as a measurement — while `price_usd_series_1h`, which buckets strictly by
+/// hour, published the $1 peg for the same hour. Two read surfaces, two
+/// different answers for one bucket, and the candle path was the one claiming a
+/// measurement for an hour the imported series does not cover.
+///
+/// A bound on the imported ROW cannot fix this: the offending row is at 13:00,
+/// already below the epoch. The bucket is what must be bounded.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
+    let db = "it_ohlcv_epoch_gap_0267";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    // The last imported hour (13:00), and NO oracle row at all — the enrichment
+    // gap this test is about. With a poll present the oracle rank would take
+    // these buckets and the leak would be invisible, which is exactly how it
+    // survived: the bound cannot be tested through a surface that outranks it.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-03-11 13:00:00', 0.99123400000000, \
+              'external', 'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Buckets for the series to render, on the reference market.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-11 13:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-03-11 14:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-03-11 15:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-03-11T13:00:00Z\
+         &end=2026-03-11T15:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+
+    let at = |ts: &str| {
+        data.iter()
+            .find(|c| c["timestamp"] == ts)
+            .unwrap_or_else(|| panic!("{ts} missing: {json}"))
+            .clone()
+    };
+
+    // 13:00 is below the epoch and the import covers it: measured.
+    let below = at("2026-03-11T13:00:00Z");
+    assert_eq!(below["method"], "external", "the imported hour: {below}");
+    approx(&below["close"], 0.991234);
+
+    // ⚠️ 14:00 is the first bucket the epoch opens. It is excluded by a bound on
+    // either end — the SPANNING bucket below is what separates them.
+    let boundary = at("2026-03-11T14:00:00Z");
+    assert_eq!(
+        boundary["method"], "peg",
+        "the bucket the epoch opens must not take the import: {boundary}"
+    );
+    approx(&boundary["close"], 1.0);
+
+    // 15:00 is wholly above the epoch. The imported series holds nothing there,
+    // so the only honest answer is the labelled $1 peg.
+    let above = at("2026-03-11T15:00:00Z");
+    assert_eq!(
+        above["method"], "peg",
+        "an hour above the oracle epoch must not be priced from an import \
+         stamped below it — the imported series does not cover it: {above}"
+    );
+    approx(&above["close"], 1.0);
+
+    // 🔑 THE SPANNING BUCKET, and the reason the bound is on `bend` and not on
+    // `bkt`. The 1d bucket of 2026-03-11 STARTS at 00:00 — below the epoch — and
+    // runs to midnight, ten hours past it. A bound on the bucket's start leaves
+    // it holding the day-wide net, so with no poll anywhere in the day the
+    // 13:00 import wins the whole day and the API publishes it as a measurement
+    // over the ten hours the series does not hold. At 1w and 1M the same shape
+    // spans days and weeks. Normally the oracle rank hides this; an enrichment
+    // gap is exactly when it does not, and relying on another surface to mask a
+    // wrong answer is not a bound.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1d&start=2026-03-11T00:00:00Z\
+         &end=2026-03-11T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(Client::default().with_url(ch_url()).with_database(db), &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let day = &json["data"].as_array().unwrap()[0];
+    assert_eq!(
+        day["method"], "peg",
+        "a bucket that extends past the epoch must not be priced from an import \
+         stamped below it, at any grain: {day}"
+    );
+    approx(&day["close"], 1.0);
+
+    teardown(db).await;
+}
+
+/// 🔑 BRIEF acceptance criterion 4, and the falsifier for the whole of task
+/// 0267: **2023-03-11 must stop publishing a dollar.**
+///
+/// USDC lost its peg that day — the composed series (task 0265) measured a
+/// 0.96812 close from Chainlink — and until this task the API published a
+/// literal 1.0 labelled `peg` for it, because `usd_rate` held no row and
+/// `ohlcv_peg_series` read only `method = 'oracle'`. The row is seeded exactly
+/// as `load-external-rate` writes it: stamped at the UTC day START, carrying the
+/// CSV's source in `reference_asset` and its quality in `quality`.
+///
+/// ⚠️ The close is asserted as the STORED decimal, not as `0.9681`. The column
+/// is `Decimal(38, 14)` and the value is returned through `toString`, which
+/// TRIMS trailing zeros — so the wire carries `0.96812`, not
+/// `0.96812000000000` (review WR-02; `views_it.rs` pins the same trimming for
+/// the views). `0.9681` is a four-significant-figure QUOTATION of it from the
+/// task text, and an equality assertion against that string WILL fail. The
+/// exact string plus the numeric check together say what matters: the right
+/// number, at full stored precision, in the form the operator's runbook expects.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
+    let db = "it_ohlcv_0267_depeg";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 00:00:00', 0.96812, 'external', \
+              'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The peg series takes its buckets from the XLM/USDC reference market, so
+    // the day needs a candle there or there is no bucket to report at all.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1d&start=2023-03-11T00:00:00Z\
+         &end=2023-03-11T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "the depeg day must have a bucket: {json}");
+    let row = &data[0];
+
+    let close = row["close"].as_str().expect("close is a string");
+    assert_eq!(
+        close, "0.96812",
+        "the depeg day must publish the MEASURED rate, trailing zeros trimmed. \
+         `1` means the imported row is not being read at all"
+    );
+    approx(&row["close"], 0.96812);
+
+    assert_eq!(
+        row["method"], "external",
+        "an imported measurement must say so — a consumer has to be able to tell \
+         it from a poll AND from the $1 assumption it replaces"
+    );
+    assert_eq!(row["source"], "chainlink", "{json}");
+    assert_eq!(row["quality"], "measured", "{json}");
+
+    teardown(db).await;
+}
+
+/// 🔑 BRIEF acceptance criterion 5: **no discontinuity at the oracle epoch, and
+/// no cross-contamination in either direction.**
+///
+/// Task 0267 loads history strictly BELOW `USDC_ORACLE_EPOCH_S` and our own
+/// polling is primary from it. The two populations share NO key, but they DO
+/// share one daily bucket (review IN-01): the epoch is 14:00 UTC, the composed
+/// series' last loadable row is the 00:00 of that same day, so the 1d bucket of
+/// the epoch day holds one `external` row and the day's `oracle` rows. That is
+/// the one bucket in production on which the preference rule does real work,
+/// and it is the seam seeded here: the day before (import only) must read as
+/// the import it is, and the epoch day (import at 00:00, poll at 14:00) must
+/// read as the POLL, with the import's provenance nowhere on the wire.
+///
+/// ⚠️ `source`/`quality` on the polled bucket are asserted `null`, not `""`
+/// (review CR-01): a poll's `reference_asset` is `''` and its `quality` the
+/// column DEFAULT, and `toNullable('')` is `''`. Before the fix this assertion
+/// could never have held.
+///
+/// ⚠️ Every timestamp is DERIVED from the shared constant, in SQL, rather than
+/// typed. Two hand-written epochs is precisely the drift the constant exists to
+/// prevent, and a test that restates the number would keep passing while the
+/// code moved away from it.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
+    use prices_clickhouse::USDC_ORACLE_EPOCH_S as EPOCH;
+
+    let db = "it_ohlcv_0267_epoch_seam";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    // Two imported days: the day START one day below the epoch, and the day
+    // START of the epoch day itself — the last row the loader admits (it is
+    // 00:00, strictly below a 14:00 epoch). The polled reading: the epoch
+    // instant, which is the first one prod holds. The epoch-day import is
+    // planted at a value no measured USDC rate could hold, so a rank regression
+    // shows in the NUMBER, not only in the label.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) \
+             SELECT 'credit', 'USDC', '{i}', '', \
+                    toStartOfDay(toDateTime({EPOCH} - 86400)), 0.98765, 'external', \
+                    'chainlink', 'measured-disputed', 0, 1 \
+             UNION ALL \
+             SELECT 'credit', 'USDC', '{i}', '', \
+                    toStartOfDay(toDateTime({EPOCH})), 0.5, 'external', \
+                    'bitstamp', 'fallback', 0, 1 \
+             UNION ALL \
+             SELECT 'credit', 'USDC', '{i}', '', \
+                    toDateTime({EPOCH}), 1.00042, 'oracle', '', '', 0, 1",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // One XLM/USDC candle per day bucket, on both sides of the seam.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT toStartOfDay(toDateTime({EPOCH} - 86400)), {XLM}, {USDC}, 'sdex', \
+                    0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
+             UNION ALL \
+             SELECT toStartOfDay(toDateTime({EPOCH})), {XLM}, {USDC}, 'sdex', \
+                    0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The request window, also derived: five days either side of the seam.
+    let (from, to): (String, String) = admin
+        .query(
+            "SELECT formatDateTime(toDateTime(? - 5 * 86400), '%Y-%m-%dT%H:%i:%SZ'), \
+                    formatDateTime(toDateTime(? + 5 * 86400), '%Y-%m-%dT%H:%i:%SZ')",
+        )
+        .bind(EPOCH)
+        .bind(EPOCH)
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1d&start={from}&end={to}&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "one bucket each side of the seam: {json}");
+
+    // Ascending by timestamp, so [0] is the imported day and [1] the polled one.
+    let (imported, polled) = (&data[0], &data[1]);
+
+    assert_eq!(
+        imported["method"], "external",
+        "the day below the epoch must read as the IMPORT it is: {json}"
+    );
+    approx(&imported["close"], 0.98765);
+    assert_eq!(imported["source"], "chainlink");
+    assert_eq!(
+        imported["quality"], "measured-disputed",
+        "a disputed cross-check must survive to the wire — it is what tells a \
+         consumer the number is real but less certain: {json}"
+    );
+
+    assert_eq!(
+        polled["method"], "oracle",
+        "the bucket holding our own first reading must read as a POLL, not as \
+         the import that shares its day: {json}"
+    );
+    approx(&polled["close"], 1.00042);
+    assert_eq!(
+        polled["source"],
+        Value::Null,
+        "a polled reading has no outside series, and naming one would attach a \
+         provenance nobody measured. `\"\"` here is the '' DEFAULT leaking \
+         through `toNullable` (review CR-01); `bitstamp` is the outranked \
+         import's provenance leaking across methods: {json}"
+    );
+    assert_eq!(polled["quality"], Value::Null, "{json}");
+
+    // Neither bucket may be labelled `peg`: both HAVE a measurement, and a `peg`
+    // here would be the original defect returning in a new place.
+    for row in data {
+        assert_ne!(row["method"], "peg", "{json}");
+    }
+
+    teardown(db).await;
+}
+
+/// 🔑 Review WR-05 — a valid ORACLE reading wins the WHOLE bucket, even when
+/// an import is stamped LATER in it; and `/ohlcv` and `price_usd_series`
+/// resolve that bucket by the SAME rule.
+///
+/// This is `views_it.rs`'s `an_oracle_row_outranks_an_imported_row_in_the_same_
+/// bucket` fixture, run through the API. Before the fix the peg series ranked
+/// oracle only WITHIN one instant and let the ASOF's recency choose across
+/// instants, so this seed published `0.5`/`external` here while the view
+/// published `1.00066…`/`oracle` for the same bucket. The loader's day-start
+/// stamping hid the divergence in production; a rule held only by another
+/// tool's invariant is not a rule either surface can be trusted on.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usdc_oracle_outranks_a_later_import_in_the_same_bucket() {
+    let db = "it_ohlcv_0267_oracle_outranks_import";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    prices_clickhouse::apply_sql(
+        &Client::default().with_url(ch_url()),
+        &rewrite(prices_clickhouse::VIEWS_SQL, db),
+    )
+    .await
+    .unwrap();
+
+    const ORACLE: &str = "1.00066784838102";
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-08-10 23:30:00', {ORACLE}, 'oracle', '', '', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-08-10 23:45:00', 0.5, 'external', \
+              'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-08-10 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1d&start=2026-08-10T00:00:00Z\
+         &end=2026-08-10T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "{json}");
+    let row = &data[0];
+
+    assert_eq!(
+        row["close"], ORACLE,
+        "the POLLED rate must win a bucket that holds both. `0.5` means recency \
+         decided across instants and the later import outranked the poll: {json}"
+    );
+    assert_eq!(row["method"], "oracle", "{json}");
+    assert_eq!(
+        row["source"],
+        Value::Null,
+        "the outranked import's provenance must not leak onto the oracle's bucket: {json}"
+    );
+    assert_eq!(row["quality"], Value::Null, "{json}");
+
+    // And the view says the same — the cross-surface criterion of task 0246,
+    // now on a bucket that holds two provenances.
+    let (view_close, view_method) = admin
+        .query(&format!(
+            "SELECT toString(close_usd), method FROM {db}.price_usd_series \
+             WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+        ))
+        .bind("USDC")
+        .bind(iss())
+        .bind("2026-08-10 00:00:00")
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap();
+    assert_eq!(row["close"], view_close.as_str(), "{json}");
+    assert_eq!(row["method"], view_method.as_str(), "{json}");
+
+    teardown(db).await;
+}
+
+/// 🔑 Review WR-06 — an imported day prices EVERY bucket of its UTC day, at a
+/// finer grain than the daily row it came from.
+///
+/// The composed series is daily and stamped at 00:00. Task 0268's external tier
+/// prices every hourly XLM/USDC candle of 2023-03-11 from that one row, so an
+/// hourly candle's `close_usd` at 13:00 says USDC was worth 0.96812. Before this
+/// fix USDC's OWN hourly series said `1`/`peg` for the same hour — a one-bucket
+/// staleness window on a daily row served the 00:00 hour only. The two surfaces
+/// must agree on what USDC was worth at 13:00.
+///
+/// The window still ends at the day's end: the next midnight, with no row of
+/// its own, falls back to the labelled peg. Forward-filling a daily import
+/// past its day would be task 0246's defect returning in a new place.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usdc_serves_an_imported_day_at_every_hour_of_it() {
+    let db = "it_ohlcv_0267_hourly_import_window";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 00:00:00', 0.96812, 'external', \
+              'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // Three hours of the depeg day and the first hour of the next.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 13:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 23:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-12 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z\
+         &end=2023-03-12T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 4, "{json}");
+
+    for row in &data[..3] {
+        let ts = row["timestamp"].as_str().unwrap();
+        assert_eq!(
+            row["close"], "0.96812",
+            "{ts}: every hour of an imported day carries that day's rate. `1` \
+             means the import's window is one bucket wide and only 00:00 saw it: {json}"
+        );
+        assert_eq!(row["method"], "external", "{ts}: {json}");
+        assert_eq!(row["source"], "chainlink", "{ts}: {json}");
+        assert_eq!(row["quality"], "measured", "{ts}: {json}");
+    }
+
+    let next = &data[3];
+    assert_eq!(next["timestamp"], "2023-03-12T00:00:00Z", "{json}");
+    assert_eq!(
+        next["method"], "peg",
+        "the day AFTER has no row of its own and must not inherit the \
+         previous day's import: {json}"
+    );
+    assert_eq!(next["close"], "1", "{json}");
+    assert_eq!(next["source"], Value::Null, "{json}");
+    assert_eq!(next["quality"], Value::Null, "{json}");
+
+    teardown(db).await;
 }
 
 /// 🔑 ADR 0011 §6 — the ORIGINAL narrow defect this task was named for.
@@ -514,7 +1060,7 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
 /// USDC/USDC self-pair and matched zero rows. Dropping the quote filter does not
 /// help; the series has to be synthesized.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate() {
     let db = "it_ohlcv_peg_0170";
     let client = setup(db).await;
@@ -551,7 +1097,7 @@ async fn ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate() {
 /// `usd_rate` starts 2026-03-11 on prod while `timeframe=all` reads back to
 /// 2021, so this is the majority of the real series — not an edge case.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
     let db = "it_ohlcv_peg_fallback_0170";
     let client = setup(db).await;
@@ -590,7 +1136,7 @@ async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
 /// request, as a `readonly = 1` user, must still answer. A future `SETTINGS`
 /// clause fails here instead of on prod.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_series_answers_for_a_readonly_user() {
     let db = "it_ohlcv_peg_readonly_0170";
     let _ = setup(db).await;
@@ -643,7 +1189,7 @@ async fn ohlcv_peg_series_answers_for_a_readonly_user() {
 /// entirely ordinary-looking number, which is exactly why a band check on the
 /// derived rate cannot catch it. The inputs are what is wrong, not the value.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
     let db = "it_ohlcv_precision_0170";
     let client = setup(db).await;
@@ -653,7 +1199,7 @@ async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-01 10:00:00', 3, 2, 'sdex', 0.00000000000005, 0.00000000000005, \
+             ('2026-03-01 10:00:00', {FOO}, {USDC}, 'sdex', 0.00000000000005, 0.00000000000005, \
               0.00000000000005, 0.00000000000005, 9, 9, 0.00000000000004, \
               0.00000000000005, 1, 1)"
         ))
@@ -685,7 +1231,7 @@ async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
 /// `close = 0` is a distinct population from `close_usd = 0` and needs its own
 /// coverage: dividing by it is what the guard exists to prevent.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_guards_a_zero_close() {
     let db = "it_ohlcv_zero_close_0170";
     let client = setup(db).await;
@@ -695,7 +1241,7 @@ async fn ohlcv_guards_a_zero_close() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-02 10:00:00', 3, 2, 'sdex', 0, 0, 0, 0, 4, 0, 2.0, 0, 1, 1)"
+             ('2026-03-02 10:00:00', {FOO}, {USDC}, 'sdex', 0, 0, 0, 0, 4, 0, 2.0, 0, 1, 1)"
         ))
         .execute()
         .await
@@ -719,18 +1265,13 @@ async fn ohlcv_guards_a_zero_close() {
 /// USDT is not at par, and overriding real market data with an assumed rate is
 /// how 44,657 candles came to be overstated ~7.4x.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
     let db = "it_ohlcv_usdt_base_0170";
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (5, 'USDT', 'credit', '{u}', '')",
-            u = prices_clickhouse::USDT_ISSUER
-        ))
+        .query(&assets_insert(db, &[USDT]))
         .execute()
         .await
         .unwrap();
@@ -740,7 +1281,7 @@ async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 10:00:00', 5, 2, 'sdex', 0.13, 0.14, 0.12, 0.13, 100, 13, 0.13, 0.13, 6, 1)"
+             ('2026-03-03 10:00:00', {USDT}, {USDC}, 'sdex', 0.13, 0.14, 0.12, 0.13, 100, 13, 0.13, 0.13, 6, 1)"
         ))
         .execute()
         .await
@@ -769,19 +1310,14 @@ async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
 /// distinguishable from one that is merely unrepresentable in the requested
 /// denomination. Before the fix both were an empty `200`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_never_traded_is_distinguishable_from_unrepresentable() {
     let db = "it_ohlcv_never_traded_0170";
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     seed_xlm_only(db, &admin).await;
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (6, 'GHOST', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&assets_insert(db, &[GHOST]))
         .execute()
         .await
         .unwrap();
@@ -827,7 +1363,7 @@ async fn ohlcv_never_traded_is_distinguishable_from_unrepresentable() {
 /// `USDC_usd / XLM_usd`. Seeded so the answer is unambiguous: USDC at 0.9993 USD
 /// and XLM at 0.25 USD gives 3.9972 XLM per USDC.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
     let db = "it_ohlcv_usdc_xlm_0170";
     let client = setup(db).await;
@@ -862,7 +1398,7 @@ async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
 /// as "this bucket is priced" would dereference a null. The unpriced right-hand
 /// edge is exactly where it would have bitten.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_in_xlm_nulls_provenance_when_the_denominator_is_unpriced() {
     let db = "it_ohlcv_xlm_den_null_0170";
     let client = setup(db).await;
@@ -876,7 +1412,7 @@ async fn ohlcv_usdc_in_xlm_nulls_provenance_when_the_denominator_is_unpriced() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 12:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 0, 0, 0.25, 9, 1)"
+             ('2026-02-10 12:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 0, 0, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -943,7 +1479,7 @@ fn assert_ohlc_ordered(c: &Value, label: &str) {
 /// `low > close` and the assertion fires. The magnitude matters: at three
 /// figures the float has precision to spare and nothing crosses.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
     let db = "it_ohlcv_low_above_close_0229";
     let client = setup(db).await;
@@ -953,7 +1489,7 @@ async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 10:00:00', 3, 2, 'sdex', 1.1, 1.2, 1.0, 1.0, \
+             ('2026-03-03 10:00:00', {FOO}, {USDC}, 'sdex', 1.1, 1.2, 1.0, 1.0, \
               10, 10, 68421.98765432109876, 1.05, 3, 1)"
         ))
         .execute()
@@ -989,7 +1525,7 @@ async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
 /// **6.57e-12 below** the exact close. Both directions are covered because a
 /// clamp on only one of them is a fix that looks complete and is not.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
     let db = "it_ohlcv_high_below_close_0229";
     let client = setup(db).await;
@@ -999,7 +1535,7 @@ async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 11:00:00', 3, 2, 'sdex', 0.9, 1.0, 0.8, 1.0, \
+             ('2026-03-03 11:00:00', {FOO}, {USDC}, 'sdex', 0.9, 1.0, 0.8, 1.0, \
               10, 10, 76943.51350417596657, 0.95, 3, 1)"
         ))
         .execute()
@@ -1032,18 +1568,18 @@ async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
 /// nothing is on a second scale. The test exists to PIN that, not to catch a
 /// live bug: if the as-stored arm ever grows a conversion, this fails.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_denomination_keeps_ohlc_ordered() {
     let db = "it_ohlcv_xlm_ordered_0229";
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
-    // FOO/XLM (quote_asset_id = 1), same awkward magnitude in the stored columns.
+    // FOO/XLM, same awkward magnitude in the stored columns.
     admin
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 12:00:00', 3, 1, 'sdex', \
+             ('2026-03-03 12:00:00', {FOO}, {XLM}, 'sdex', \
               68421.98765432109876, 68421.98765432109876, 68421.98765432109876, \
               68421.98765432109876, 10, 10, 68421.98765432109876, \
               68421.98765432109876, 3, 1)"
@@ -1078,7 +1614,7 @@ async fn ohlcv_xlm_denomination_keeps_ohlc_ordered() {
 /// identity. Pinned rather than assumed, because ADR 0011 §6 could later give the
 /// extremes their own derivation and the equality would stop being free.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_series_keeps_ohlc_ordered() {
     let db = "it_ohlcv_peg_ordered_0229";
     let client = setup(db).await;
@@ -1089,7 +1625,7 @@ async fn ohlcv_peg_series_keeps_ohlc_ordered() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 13:00:00', 1, 2, 'sdex', 0.2, 0.21, 0.19, 0.2, \
+             ('2026-03-03 13:00:00', {XLM}, {USDC}, 'sdex', 0.2, 0.21, 0.19, 0.2, \
               100, 20, 0.2, 0.2, 5, 1)"
         ))
         .execute()
@@ -1138,7 +1674,7 @@ async fn ohlcv_peg_series_keeps_ohlc_ordered() {
 /// compute, presented as if measured. The bucket is still returned; only the
 /// unrepresentable field is absent, per ADR 0011 §5.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_close() {
     let db = "it_ohlcv_overflow_null_0229";
     let client = setup(db).await;
@@ -1150,7 +1686,7 @@ async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_cl
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-03 14:00:00', 3, 2, 'sdex', 1000, 1000, 1000, 0.000000000001, \
+             ('2026-03-03 14:00:00', {FOO}, {USDC}, 'sdex', 1000, 1000, 1000, 0.000000000001, \
               10, 10, 10000000000, 1000, 3, 1)"
         ))
         .execute()
@@ -1192,7 +1728,7 @@ async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_cl
 /// 🔑 Nothing would have surfaced this: [[0120]]'s assertion is
 /// `low <= open,close <= high` and never looks at vwap.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_vwap_cannot_round_above_the_high() {
     let db = "it_ohlcv_vwap_above_0229";
     let client = setup(db).await;
@@ -1202,7 +1738,7 @@ async fn ohlcv_vwap_cannot_round_above_the_high() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-04 10:00:00', 3, 2, 'sdex', 1.0, 1.0, 1.0, 1.0, \
+             ('2026-03-04 10:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.0, 1.0, 1.0, \
               3, 3, 70000.00000299999232, 1.0, 1, 1)"
         ))
         .execute()
@@ -1223,7 +1759,7 @@ async fn ohlcv_vwap_cannot_round_above_the_high() {
 
 /// The mirror — the merged `vwap` rounds BELOW the clamped low.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_vwap_cannot_round_below_the_low() {
     let db = "it_ohlcv_vwap_below_0229";
     let client = setup(db).await;
@@ -1233,7 +1769,7 @@ async fn ohlcv_vwap_cannot_round_below_the_low() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-04 11:00:00', 3, 2, 'sdex', 1.0, 1.0, 1.0, 1.0, \
+             ('2026-03-04 11:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.0, 1.0, 1.0, \
               7, 7, 70000.00001000000512, 1.0, 1, 1)"
         ))
         .execute()
@@ -1265,7 +1801,7 @@ async fn ohlcv_vwap_cannot_round_below_the_low() {
 /// 🔑 The lesson is the seed, not the fix: a one-row probe of a MERGE aggregate
 /// tests a path production does not have.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_merged_vwap_stays_inside_the_band() {
     let db = "it_ohlcv_xlm_vwap_0229";
     let client = setup(db).await;
@@ -1280,11 +1816,11 @@ async fn ohlcv_xlm_merged_vwap_stays_inside_the_band() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-03-04 12:00:00', 3, 1, 'sdex', \
+             ('2026-03-04 12:00:00', {FOO}, {XLM}, 'sdex', \
               70000.00000099999744, 70000.00000099999744, 70000.00000099999744, \
               70000.00000099999744, 3, 3, 70000.00000099999744, \
               70000.00000099999744, 1, 1), \
-             ('2026-03-04 12:00:00', 3, 1, 'soroswap', \
+             ('2026-03-04 12:00:00', {FOO}, {XLM}, 'soroswap', \
               70000.00000099999744, 70000.00000099999744, 70000.00000099999744, \
               70000.00000099999744, 2, 2, 70000.00000099999744, \
               70000.00000099999744, 1, 1)"
@@ -1324,9 +1860,9 @@ async fn seed_0246(db: &str, admin: &Client) {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 11:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
-             ('2026-02-10 12:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+             ('2026-02-10 10:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 11:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 12:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -1340,6 +1876,90 @@ async fn seed_0246(db: &str, admin: &Client) {
               usd_rate, method, reference_asset, hops, version) VALUES \
              ('credit', 'USDC', '{i}', '', '2026-02-10 10:05:00', 0.99930000000000, 'oracle', '', 0, 1), \
              ('credit', 'USDC', '{i}', '', '2026-02-10 10:55:00', 1.00070000000000, 'oracle', '', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // 🔴 Review round 2, WR-09 — a SECOND day, on which the rate is IMPORTED
+    // rather than polled.
+    //
+    // The fixture used to seed `oracle` rows only, so the cross-surface test
+    // below could not reach the population on which the two surfaces actually
+    // diverged: `/ohlcv` floors an imported row at the UTC day start (one daily
+    // row is valid for all 24 hours) and `price_usd_series_1h` buckets it by the
+    // hour. That gap is what let the divergence ship. It is closed by loading at
+    // HOURLY grain — `usd_rate` carries an imported row for every hour — and
+    // this seed is that shape: three imported HOURS on 2026-02-11, each with a
+    // candle of its own, so both surfaces resolve the same row per bucket.
+    //
+    // 2026-02-12 00:00 has a candle and NO rate of any method, and it is the
+    // control: it must read `1`/'peg' on both surfaces. Without it, a regression
+    // that forward-filled the previous day's import across the day boundary
+    // would pass — and `/ohlcv`'s day floor is exactly the expression that would
+    // do it.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-11 07:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-11 23:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-12 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // 🔑 Task 0147 (D-07h) — a NON-USDC, XLM-quoted bucket.
+    //
+    // Every arm above asks for `USDC:...`, i.e. the PEG arm, which the coverage
+    // gate does not touch: it has no traded weight, so it publishes on the
+    // gate's peg disjunct with a literal share of 1. That leaves the arm the
+    // gate actually governs — a traded base — unchecked across the two
+    // surfaces, which is exactly the isolation this test exists to break.
+    //
+    // ⚠️ EXACTLY ONE priced row in the bucket, deliberately. `/ohlcv`'s USD
+    // close is `argMaxIf(close_usd, volume_base, ...)` — the largest print —
+    // while the view's is a volume-weighted MEAN. The two are the same number
+    // only when the bucket holds one priced row, or every priced row carries
+    // the same price; a fixture with two different prices would fail here for
+    // a reason that is not a defect.
+    //
+    // ⚠️ And the view must PUBLISH it, or the comparison proves nothing: its
+    // one row is priced, so the share is 1 and clears X. There is no absolute
+    // USD floor (task 0147 phase 2); `volume_quote_usd = 250` is incidental.
+    // The XLM leg carries `close_usd != close`, which is what makes it
+    // convertible under the shared predicate.
+    admin
+        .query(&assets_insert(db, &[BAZ]))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-13 05:00:00', {BAZ}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The three values are the real 2023-03-11 shape, transplanted: the day
+    // opens near par, troughs at 07:00 and closes at the daily close. Distinct
+    // per hour on purpose — a surface that resolved the wrong hour's row would
+    // otherwise still match.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-02-11 00:00:00', 0.99503491000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-11 07:00:00', 0.88330000000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-11 23:00:00', 0.96812000000000, 'external', 'chainlink', 'measured', 0, 1)",
             i = iss()
         ))
         .execute()
@@ -1361,7 +1981,7 @@ async fn seed_0246(db: &str, admin: &Client) {
 /// (both sit later in the hour) and rendered the bucket as the `$1` peg, while
 /// the view published the measured 1.0007.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
     let db = "it_ohlcv_0246_cross_surface";
     let client = setup(db).await;
@@ -1376,13 +1996,17 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
 
     let uri = format!(
         "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
-         &end=2026-02-10T12:00:00Z&base_currency=USD",
+         &end=2026-02-12T00:00:00Z&base_currency=USD",
         iss()
     );
-    let (status, json) = get(client, &uri).await;
+    let (status, json) = get(client.clone(), &uri).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
     let data = json["data"].as_array().unwrap();
-    assert_eq!(data.len(), 3, "three buckets expected: {json}");
+    assert_eq!(
+        data.len(),
+        7,
+        "three polled buckets, three IMPORTED ones and the un-priced control: {json}"
+    );
 
     for row in data {
         let bucket = row["timestamp"].as_str().unwrap().replace('T', " ");
@@ -1422,6 +2046,154 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
     approx(&data[0]["close"], 1.0007);
     assert_eq!(data[0]["method"], "oracle");
 
+    // 🔴 Review round 2, WR-09 — the imported day, hour by hour. The loop above
+    // proves the two surfaces AGREE; these four assertions prove they agree on
+    // the right number, which "both wrong" would otherwise satisfy.
+    for (i, (want, method)) in [
+        (0.99503491, "external"),
+        (0.8833, "external"),
+        (0.96812, "external"),
+        (1.0, "peg"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = &data[3 + i];
+        let ts = row["timestamp"].as_str().unwrap().to_string();
+        assert_eq!(
+            row["method"], method,
+            "{ts}: an imported hour must read `external`, and the day AFTER the              import must NOT — `/ohlcv`'s day floor must not forward-fill across              a UTC day boundary: {json}"
+        );
+        approx(&row["close"], want);
+    }
+
+    // 🔑 Task 0147 (D-07h) — the same agreement on a TRADED base with an XLM
+    // quote leg, i.e. the population the coverage gate governs. Asserted across
+    // the two surfaces, not against a literal, for the same reason the USDC
+    // loop above is.
+    //
+    // `method` is NOT compared here and that is deliberate: `/ohlcv` labels how
+    // one candle's QUOTE LEG was priced (task 0268's vocabulary) while the view
+    // labels how a BUCKET's close_usd was arrived at (task 0165's). views.sql's
+    // header says so in as many words — the two enums are not one enum.
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1h&start=2026-02-13T05:00:00Z\
+         &end=2026-02-13T05:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "one XLM-quoted bucket: {json}");
+    let api_close: f64 = data[0]["close"].as_str().unwrap().parse().unwrap();
+
+    let (view_close, view_share): (String, String) = admin
+        .query(&format!(
+            "SELECT toString(close_usd), toString(priced_volume_share) \
+             FROM {db}.price_usd_series_1h \
+             WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+        ))
+        .bind("BAZ")
+        .bind(iss())
+        .bind("2026-02-13 05:00:00")
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the view must PUBLISH this bucket — one priced row, so its \
+                 share is 1 and clears X: {e}"
+            )
+        });
+    let view_close_f: f64 = view_close.parse().unwrap();
+    assert!(
+        (api_close - view_close_f).abs() < 1e-12,
+        "2026-02-13 05:00: /ohlcv published {api_close} but price_usd_series_1h \
+         published {view_close} — one priced predicate means one answer"
+    );
+    assert_eq!(
+        view_share.parse::<f64>().unwrap(),
+        1.0,
+        "every eligible unit in the bucket is priced, so the share is 1 — if it \
+         is not, the comparison above is comparing two different populations"
+    );
+
+    teardown(db).await;
+}
+
+/// 🔑 Review round 2, WR-09 / the hourly load (Adam, 2026-09-09) — the depeg
+/// day at `granularity=1h`, which is the whole argument for loading the hourly
+/// grain.
+///
+/// From a DAILY-only load, every hour of 2023-03-11 reads 0.96812: one row,
+/// valid for its whole UTC day by `/ohlcv`'s safety net. That is right for the
+/// day and wrong for the hour — the peg troughed at **0.8833** at 07:00 UTC and
+/// had largely recovered by 23:00. With the hourly file loaded, `/ohlcv` at
+/// `1h` shows the trough where it happened.
+///
+/// The instants here are the REAL ones from `composed_usdc_usd_1h.csv`, not a
+/// transplant: `DEPEG_HOUR_S` and its value are asserted against the versioned
+/// file by `composed_usdc_csv.rs`, so this test and the loader cannot disagree
+/// about what the answer should be.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import() {
+    let db = "it_ohlcv_0267_hourly_depeg";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 00:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 07:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 23:00:00', {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 00:00:00', 0.99503491000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 07:00:00', 0.88330000000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 23:00:00', 0.96812000000000, 'external', 'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z\
+         &end=2023-03-11T23:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "one bucket per seeded hour: {json}");
+
+    for (row, want) in data.iter().zip([0.99503491, 0.8833, 0.96812]) {
+        let ts = row["timestamp"].as_str().unwrap().to_string();
+        approx(&row["close"], want);
+        assert_eq!(row["method"], "external", "{ts}: {json}");
+        assert_eq!(row["source"], "chainlink", "{ts}: {json}");
+        assert_eq!(row["quality"], "measured", "{ts}: {json}");
+    }
+
+    // The point, stated as its own assertion: the trough hour and the day's
+    // close are DIFFERENT numbers. A daily-only load makes them equal, and this
+    // is the check that says so out loud.
+    assert_ne!(
+        data[1]["close"], data[2]["close"],
+        "07:00 must not publish the day's close — that is the daily-only \
+         behaviour this grain exists to replace: {json}"
+    );
+
     teardown(db).await;
 }
 
@@ -1438,7 +2210,7 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
 /// both returned 1.0007/`oracle`; they must now return the `$1` fallback and say
 /// so.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_does_not_forward_fill_a_stale_rate_into_later_buckets() {
     let db = "it_ohlcv_0246_no_forward_fill";
     let client = setup(db).await;
@@ -1501,7 +2273,7 @@ async fn ohlcv_does_not_forward_fill_a_stale_rate_into_later_buckets() {
 /// So this pins BOTH halves: the measurement carries across the poll gap, and it
 /// still stops. A regression in either direction fails here.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
     let db = "it_ohlcv_0246_1m_cadence";
     let client = setup(db).await;
@@ -1513,7 +2285,7 @@ async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) \
              SELECT toDateTime('2026-02-10 10:00:00') + INTERVAL number MINUTE, \
-                    1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
+                    {XLM}, {USDC}, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
              FROM numbers(6)"
         ))
         .execute()
@@ -1560,6 +2332,590 @@ async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
          is older than ORACLE_POLL_FLOOR_S it must fall back and say so"
     );
     approx(&data[5]["close"], 1.0);
+
+    teardown(db).await;
+}
+
+/// 🔑 Task 0268: the candle path's three USDC labels, in one scratch DB.
+///
+/// `method` is not stored — it is reconstructed from the quote leg, the
+/// `close_usd = close` signature and the candle's timestamp
+/// (`queries_ch::usd_method_expr`). The arms are ordered, every one of them is
+/// valid SQL in any order, and a reordering relabels whole populations on the
+/// wire without failing anywhere. This pins all three against a real query
+/// planner rather than against the emitted string.
+///
+/// The three cases, all on a **non-USDC base** so the request takes the candle
+/// path and not `ohlcv_peg_series` (a `USDC:...` request, which still says
+/// `peg` and is asserted elsewhere in this file):
+///
+/// 1. **pre-epoch, `close_usd = close`** -> `assumed-par`. Nothing measured it;
+///    the literal 1.0 supplied the value.
+/// 2. **pre-epoch, scaled** -> `external`. Before the first measured oracle row
+///    the only thing that can have scaled a USDC leg is task 0267's imported
+///    series. The rate seeded here is USDC's real 2023-03-11 close, 0.9681 —
+///    the 3% the whole task exists to stop discarding.
+/// 3. **post-epoch, scaled** -> `oracle`. Same signature as case 2, different
+///    side of the epoch, and that is the ONLY thing separating them.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() {
+    let db = "it_ohlcv_labels_0268";
+    let _ = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    // FOO quoted in USDC. `close = 10` throughout, so
+    // the only difference between rows is close_usd and the timestamp.
+    //
+    // The epoch is 2026-03-11T14:00:00Z (prices_clickhouse::USDC_ORACLE_EPOCH_S).
+    // 2026-03-11 13:00 is the last bucket BELOW it and 15:00 the first above —
+    // deliberately adjacent, so an off-by-an-hour in the arm's comparison shows
+    // up here rather than on prod.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 12:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
+             ('2026-03-11 13:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
+             ('2026-03-11 15:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
+             ('2024-06-01 12:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 48, 9.900, 10, 1, 1), \
+             ('2026-03-11 11:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
+             ('2026-03-11 16:00:00', {FOO}, {USDC}, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // ⚠️ The imported series is what makes case 2 `external`, and seeding it is
+    // the point of this fixture. The label is decided by whether an imported
+    // rate covers the bucket's UTC DAY — not by `close_usd`'s bytes, which a
+    // measured rate of exactly 1.0 makes indistinguishable from the assumption
+    // (174 of the 2049 imported days close at exactly 1.00000000).
+    //
+    // 2026-03-11 is covered. 2023-03-11 and 2024-06-01 are deliberately NOT,
+    // which is what separates cases 1 and 4 below.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-03-11 13:00:00', 0.96810000000000, \
+              'external', 'chainlink', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for (ts, expected, why) in [
+        (
+            "2023-03-11T12:00:00Z",
+            "assumed-par",
+            "close_usd = close exactly: the $1 assumption supplied the value and \
+             nothing measured it",
+        ),
+        (
+            "2026-03-11T13:00:00Z",
+            "external",
+            "scaled below the epoch on a day the imported series covers: task \
+             0267's rate priced this, and calling it 'oracle' would claim a poll \
+             that never happened",
+        ),
+        (
+            "2026-03-11T15:00:00Z",
+            "oracle",
+            "same signature as the row above, two hours later: at or after the \
+             epoch a scaled USDC leg was priced by a measured Reflector reading",
+        ),
+        (
+            // 🔑 UN-REPAIRED, on a day the imported series DOES cover. Day
+            // coverage says nothing about whether the repair campaign has
+            // reached this row: the campaign runs for hours, per grain and per
+            // month, and skips months outside its span entirely. Labelling this
+            // `external` would report a measured series over a value that is
+            // still `close x $1.00` — 522,321 candles' worth on prod.
+            "2026-03-11T11:00:00Z",
+            "assumed-par",
+            "the day is covered but the value is still the assumed dollar, and \
+             the row cannot say which",
+        ),
+        (
+            // 🔑 Post-epoch and at par: `peg_sql` carries no epoch bound, so the
+            // peg tier writes $1 whenever the oracle tier missed a bucket. The
+            // prod measurement puts that at 134,193 candles. Reporting `oracle`
+            // here claims a poll that never happened.
+            "2026-03-11T16:00:00Z",
+            "assumed-par",
+            "an oracle miss falls to the peg tier, and $1 is what it wrote",
+        ),
+        (
+            // 🔑 Scaled, below the epoch, on a day NO imported rate covers. The
+            // arm list used to answer `external` here on the timestamp alone —
+            // asserting a measurement from a series that holds nothing for this
+            // day. No tier can produce this state, so the honest answer is null.
+            "2024-06-01T12:00:00Z",
+            "null",
+            "scaled below the epoch but no imported rate covers the day: nothing \
+             can attribute this bucket, and a label would be a claim",
+        ),
+    ] {
+        let uri = format!(
+            "/v1/assets/FOO:{}/ohlcv?granularity=1h&start={ts}&end={ts}&base_currency=USD",
+            iss()
+        );
+        let (status, json) =
+            get(Client::default().with_url(ch_url()).with_database(db), &uri).await;
+        assert_eq!(status, StatusCode::OK, "body={json}");
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "{ts}: one bucket expected: {json}");
+        if expected == "null" {
+            assert!(data[0]["method"].is_null(), "{ts}: {why}: {json}");
+        } else {
+            assert_eq!(data[0]["method"], expected, "{ts}: {why}");
+        }
+    }
+
+    // The retired word must not reach the wire on a quote leg at all — a
+    // regression that reinstated it would otherwise only show as an unexpected
+    // string in one of the three assertions above.
+    //
+    // ⚠️ Swept as day-wide windows, one per seeded bucket, NOT as one span from
+    // 2023 to 2026: that span is ~26329 buckets at `1h` and the handler refuses
+    // anything over `OHLCV_MAX_POINTS` (5000) with a 400, so the sweep asserted
+    // `OK` against `invalid_query` and this test could never reach its own
+    // assertion. Each window still carries a seeded row, which is what the
+    // sweep needs.
+    for (start, end) in [
+        ("2023-03-11T00:00:00Z", "2023-03-12T00:00:00Z"),
+        ("2024-06-01T00:00:00Z", "2024-06-02T00:00:00Z"),
+        ("2026-03-11T00:00:00Z", "2026-03-12T00:00:00Z"),
+    ] {
+        let uri = format!(
+            "/v1/assets/FOO:{}/ohlcv?granularity=1h&start={start}&end={end}&base_currency=USD",
+            iss()
+        );
+        let (status, json) =
+            get(Client::default().with_url(ch_url()).with_database(db), &uri).await;
+        assert_eq!(status, StatusCode::OK, "body={json}");
+        let rows = json["data"].as_array().unwrap();
+        assert!(
+            !rows.is_empty(),
+            "{start}: the sweep must see its seeded row"
+        );
+        for c in rows {
+            assert_ne!(
+                c["method"], "peg",
+                "0268 retired this label from the candle path; it survives only \
+                 on USDC's own series: {c}"
+            );
+        }
+    }
+
+    teardown(db).await;
+}
+
+// ---------------------------------------------------------------------------
+// Task 0286 — a candle's prices come only from the price-forming trades of its
+// own bucket, and `pf_trade_count` is how a stored row says whether it had any.
+// ---------------------------------------------------------------------------
+
+/// Seed one FOO/USDC bucket per case the price-forming gate has to get right.
+///
+/// The three pf columns are written EXPLICITLY here. Left out, they take their
+/// migration DEFAULTs (`pf_trade_count = trade_count`, `pf_volume =
+/// volume_base`, `pf_price_volume = volume_quote`), which is the pre-0286
+/// meaning "every fill formed price" — the exact value that would make these
+/// tests assert nothing.
+///
+///   09:00  one source, two dust fills only — a 1/17 print on 3.4 stroops
+///   10:00  two sources; the DUST one carries the larger volume
+///   11:00  one source, price-forming, whose close sits 15% off its own
+///          price-forming vwap
+/// ⚠️ The 10:00 soroswap row's stored `vwap` (1.0) deliberately DISAGREES with
+/// its `open`/`high`/`low`/`close` (99.0), and its volumes are what say so:
+/// 990 base for 990 quote. That is the dust shape ADR 0287 describes — the
+/// per-fill prints are unusable, the amount-derived ratio is not — and it is
+/// what lets `vwap` be checked as a real Σ quote / Σ base (review IN-04). With
+/// the two agreeing, the merge landed outside the price-forming band and the
+/// assertion could only ever read the clamp's edge, which any merge ≥ `high`
+/// satisfies.
+async fn seed_price_forming(db: &str, admin: &Client) {
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-01 09:00:00', {FOO}, {USDC}, 'sdex', 0.05882352941176, 0.05882352941176, \
+              0.05882352941176, 0.05882352941176, 0.0000034, 0.0000002, 0.0000002, \
+              0.05882352941176, 0.05882352941176, 2, 1, 0, 0, 0), \
+             ('2026-03-01 10:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, \
+              4, 1, 4, 10, 11), \
+             ('2026-03-01 10:00:00', {FOO}, {USDC}, 'soroswap', 99.0, 99.0, 99.0, 99.0, 990, 990, 990, \
+              99.0, 1.0, 2, 1, 0, 0, 0), \
+             ('2026-03-01 11:00:00', {FOO}, {USDC}, 'sdex', 1.0, 1.3, 0.9, 1.15, 100, 100, 100, 1.15, \
+              1.0, 8, 1, 8, 100, 100)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A bucket whose every fill was dust has no price at all — and still reports
+/// the trading that happened. Carrying a price forward from a neighbouring
+/// bucket, or publishing the 1/17 print, are the two wrong answers.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_a_dust_only_bucket_has_no_price_and_keeps_its_volume() {
+    let db = "it_ohlcv_dust_only_0286";
+    let client = setup(db).await;
+    seed_price_forming(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T09:00:00Z\
+         &end=2026-03-01T09:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "the bucket must survive, not be dropped");
+
+    let c = &data[0];
+    for field in ["open", "high", "low", "close", "vwap", "method", "derived"] {
+        assert!(
+            c[field].is_null(),
+            "{field} must be absent, got {}",
+            c[field]
+        );
+    }
+    approx(&c["volume_base"], 0.0000034);
+    assert_eq!(c["trade_count"], 2, "the dust fills still traded");
+    assert_eq!(
+        c["pf_trade_count"], 0,
+        "the bucket reports that nothing in it formed a price: {c}"
+    );
+
+    teardown(db).await;
+}
+
+/// The merge across sources ranks by volume, and a dust source can out-volume a
+/// real one. Volume is not evidence that a price is usable: the price-forming
+/// count is.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_a_dust_only_source_with_the_larger_volume_does_not_supply_the_prices() {
+    let db = "it_ohlcv_dust_source_0286";
+    let client = setup(db).await;
+    seed_price_forming(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T10:00:00Z\
+         &end=2026-03-01T10:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    let c = &data[0];
+
+    approx(&c["close"], 1.1); // the sdex leg, on a hundredth of the volume
+    approx(&c["open"], 1.0);
+    approx(&c["high"], 1.2); // NOT 99.0
+    approx(&c["low"], 0.9);
+    // ⚠️ `vwap` is the one field that DOES weigh the dust leg (ADR 0287 §7,
+    // review C2): it is Σ quote / Σ base over every fill, and the dust source
+    // carries ninety-nine times the base volume. (1.1 × 10 + 1.0 × 990) / 1000
+    // = 1.001 — strictly INSIDE the price-forming band [0.9, 1.2], so the
+    // number asserted here is the merge itself and not the clamp's edge
+    // (review IN-04). `pf_vwap`, 1.1, is the price-forming mean, and the gap
+    // between the two is exactly what publishing both is for.
+    approx(&c["vwap"], 1.001);
+    approx(&c["pf_vwap"], 1.1);
+    // Volume and count are the whole bucket's, dust included — only prices are
+    // filtered.
+    approx(&c["volume_base"], 1000.0);
+    assert_eq!(c["trade_count"], 6);
+    assert_eq!(c["pf_trade_count"], 4);
+
+    teardown(db).await;
+}
+
+/// The three fields task 0286 adds to the wire, on a bucket where the close and
+/// the price-forming vwap genuinely disagree.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_publishes_the_price_forming_count_vwap_and_divergence() {
+    let db = "it_ohlcv_pf_wire_0286";
+    let client = setup(db).await;
+    seed_price_forming(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T10:00:00Z\
+         &end=2026-03-01T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "body={json}");
+
+    // 10:00 — pf_price_volume 11 over pf_volume 10 = 1.1, which IS the close.
+    let c0 = &data[0];
+    assert_eq!(c0["pf_trade_count"], 4);
+    approx(&c0["pf_vwap"], 1.1);
+    assert_eq!(c0["close_divergent"], false, "1.1 against 1.1: {c0}");
+
+    // 11:00 — pf_price_volume 100 over pf_volume 100 = 1.0 against a close of
+    // 1.15: 15% apart, well past the 1% flag.
+    let c1 = &data[1];
+    assert_eq!(c1["pf_trade_count"], 8);
+    approx(&c1["pf_vwap"], 1.0);
+    assert_eq!(c1["close_divergent"], true, "1.15 against 1.00: {c1}");
+
+    teardown(db).await;
+}
+
+/// The quote-leg arm (`base_currency=XLM`) applies no rate and aggregates the
+/// stored decimals directly, so it needs its own gate — and its own proof.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
+    let db = "it_ohlcv_xlm_dust_0286";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&assets_insert(db, &[BAR]))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-02 10:00:00', {BAR}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
+              10.0, 7, 1, 7, 100, 1000), \
+             ('2026-03-02 10:00:00', {BAR}, {XLM}, 'soroswap', 900.0, 900.0, 900.0, 900.0, 5000, \
+              55100, 1, 225.0, 11.02, 1, 1, 0, 0, 0), \
+             ('2026-03-02 11:00:00', {BAR}, {XLM}, 'sdex', 7.0, 7.0, 7.0, 7.0, 3000, 2, 1, 1.75, 7.0, \
+              1, 1, 0, 0, 0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-03-02T10:00:00Z\
+         &end=2026-03-02T11:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "body={json}");
+
+    let c0 = &data[0];
+    approx(&c0["close"], 10.0); // NOT 900.0, which carries 50x the volume
+    approx(&c0["high"], 12.0);
+    approx(&c0["low"], 9.0);
+    // Same as the USD arm: the merged `vwap` weighs the dust leg too. Read off
+    // the volume columns (review WR-04), Σ quote / Σ base = (1000 + 55 100) /
+    // (100 + 5000) = 11.0 — strictly INSIDE the price-forming band [9, 12], so
+    // this asserts the merge and not the clamp's edge (review IN-04). The dust
+    // leg's o/h/l/c of 900 are its unusable per-fill prints; its volumes say
+    // 11.02, and `high` stays 12 either way.
+    approx(&c0["vwap"], 11.0);
+    approx(&c0["pf_vwap"], 10.0); // 1000 / 100
+    approx(&c0["volume_base"], 5100.0);
+    assert_eq!(c0["pf_trade_count"], 7);
+
+    // 11:00 is dust-only: no price at all, and no provenance to invent.
+    let c1 = &data[1];
+    for field in ["open", "high", "low", "close", "vwap", "pf_vwap"] {
+        assert!(
+            c1[field].is_null(),
+            "{field} must be absent on a dust-only quote-leg bucket, got {}",
+            c1[field]
+        );
+    }
+    assert_eq!(c1["pf_trade_count"], 0);
+    assert!(c1["close_divergent"].is_null(), "no close, no divergence");
+    approx(&c1["volume_base"], 3000.0);
+    assert_eq!(c1["trade_count"], 1);
+
+    teardown(db).await;
+}
+
+/// ADR 0287 §7 and review C2, the positive case: `vwap` counts the dust, and
+/// `pf_vwap` does not. Both are on the wire, and the pair is the point — a
+/// reader can see how far the amount-derived mean sits from the price-forming
+/// one without either being hidden.
+///
+/// One priced source (mean 1.0 over 100 base) beside a DUST-ONLY source (mean
+/// 2.0 over 100 base, no price at all). Σ quote / Σ base over both is 1.5, and
+/// it sits inside the price-forming band `[0.9, 2.0]`, so nothing is clamped
+/// and the merge itself is what the assertion reads.
+///
+/// RED before this slice: `vwap` came back 1.0 — the price-forming mean under
+/// the name of the all-trades one, while the published OpenAPI text said
+/// "over every trade it holds, including the ones too small to form a price".
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_vwap_counts_the_dust_and_pf_vwap_does_not() {
+    let db = "it_ohlcv_vwap_all_trades_0286";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&assets_insert(db, &[BAR]))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-05 10:00:00', {BAR}, {XLM}, 'sdex', 1.0, 2.0, 0.9, 1.0, 100, 100, 25, 0.25, \
+              1.0, 4, 1, 4, 100, 100), \
+             ('2026-03-05 10:00:00', {BAR}, {XLM}, 'soroswap', 0, 0, 0, 0, 100, 200, 50, 0, \
+              2.0, 2, 1, 0, 0, 0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-03-05T10:00:00Z\
+         &end=2026-03-05T10:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "body={json}");
+    let c = &data[0];
+
+    approx(&c["vwap"], 1.5); // (1.0 x 100 + 2.0 x 100) / 200 — dust included
+    approx(&c["pf_vwap"], 1.0); // 100 / 100 — the price-forming fills alone
+    approx(&c["close"], 1.0); // and the prices come from the priced row only
+    approx(&c["low"], 0.9);
+    approx(&c["high"], 2.0);
+    assert_eq!(c["pf_trade_count"], 4);
+    assert_eq!(c["trade_count"], 6);
+
+    teardown(db).await;
+}
+
+/// Review C1 (BLOCKER), on the wire. A LEGACY row — `pf_trade_count` from the
+/// migration's `DEFAULT trade_count`, `close = 0` because its price underflowed
+/// `Decimal(38, 14)` — passed the quote-leg arm's one-term gate and was
+/// published as a price of `"0"`. The USD arm was immune all along: its `valid`
+/// carries a precision floor.
+///
+/// The fixture is the real row shape (local `price_ohlcv_1m`, 2026-04-02 06:39,
+/// `volume_base = 39 791 362 431.76`), merged with a healthy venue — which is
+/// where it does the most damage: its volume wins both `argMaxIf`s and its zero
+/// wins `minIf(low, ...)`, so the bucket published `open = low = close = 0`
+/// beside a real `high`.
+///
+/// RED before the floor: `close` and `low` come back `"0"`.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_in_xlm_takes_no_price_from_a_legacy_row_that_cannot_print_one() {
+    let db = "it_ohlcv_xlm_legacy_zero_0286";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&assets_insert(db, &[BAR]))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-04 10:00:00', {BAR}, {XLM}, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
+              10.0, 7, 1, 7, 100, 1000), \
+             ('2026-03-04 10:00:00', {BAR}, {XLM}, 'soroswap', 0, 0, 0, 0, 39791362431.76, 0.0001622, \
+              0, 0, 0.0000000000000041, 2, 1, 2, 39791362431.76, 0.0001622)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-03-04T10:00:00Z\
+         &end=2026-03-04T10:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "body={json}");
+    let c = &data[0];
+
+    approx(&c["open"], 10.0);
+    approx(&c["high"], 12.0);
+    approx(&c["low"], 9.0); // NOT 0, which the legacy row's stored low is
+    approx(&c["close"], 10.0); // NOT 0, on 400 million times the volume
+    approx(&c["pf_vwap"], 10.0); // 1000 / 100, not ~4e-15
+
+    // Its volume and its trades are real and still counted — only its claim to
+    // a price is refused.
+    approx(&c["volume_base"], 39_791_362_531.76);
+    assert_eq!(c["trade_count"], 9);
+    assert_eq!(
+        c["pf_trade_count"], 9,
+        "the pf counts are reported as stored, DEFAULTs and all: {c}"
+    );
+
+    teardown(db).await;
+}
+
+/// The synthesized USDC self-series has no stored candle behind it, so it has
+/// no price-forming fills to count. All three fields are `null` there — not
+/// `0`, which would claim a bucket of dust.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_the_usdc_peg_series_reports_no_price_forming_fields() {
+    let db = "it_ohlcv_peg_pf_0286";
+    let client = setup(db).await;
+    seed_peg_rate(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert!(
+        !data.is_empty(),
+        "the peg series must return buckets: {json}"
+    );
+    for c in data {
+        for field in ["pf_trade_count", "pf_vwap", "close_divergent"] {
+            // `Value::Index` yields Null for a MISSING key too, so the field is
+            // looked up rather than indexed: the assertion has to distinguish
+            // "published as null" from "not published at all".
+            let v = c
+                .get(field)
+                .unwrap_or_else(|| panic!("{field} must be on the wire: {c}"));
+            assert!(
+                v.is_null(),
+                "{field} must be null on the synthesized series, got {v}"
+            );
+        }
+    }
 
     teardown(db).await;
 }

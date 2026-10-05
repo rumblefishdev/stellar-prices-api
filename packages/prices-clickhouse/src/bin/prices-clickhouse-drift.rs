@@ -48,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A report that lists nothing is indistinguishable from a clean one at a
     // glance, and this tool exists precisely because a false all-clear is the
-    // failure mode. The file declares six.
+    // failure mode. The file declares twelve: six fast MVs and six
+    // reconciliation MVs (task 0203).
     if reports.is_empty() {
         println!("FAIL  the check produced no reports at all — nothing was compared");
         std::process::exit(1);
@@ -129,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The second clause is the part the file alone cannot support: walking
         // rollups.sql finds only what it declares, so without the sweep this
         // line would read as a whole-chain all-clear while claiming only that
-        // the six named objects are fine.
+        // the twelve named objects are fine.
         //
         // It is scoped to the database on purpose, and says so: the sweep filters
         // `system.tables` by `database`, so an MV in ANOTHER database writing into
@@ -154,10 +155,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `system.tables` is grant-filtered, so "no row" and "no grant" arrive
     // identically and both read as MISSING. This check is documented as runnable
     // by an unprivileged reader, which makes a grant gap the likelier cause of
-    // the all-missing shape than six tiers failing at once — and reading it as
+    // the all-missing shape than twelve MVs failing at once — and reading it as
     // the latter would send an operator to DROP+CREATE against a healthy chain.
     // Every-single-one is the discriminator: a real outage takes tiers out from
-    // the bottom of the chain, not all six together.
+    // the bottom of the chain, not all twelve together.
     if reports
         .iter()
         .all(|r| matches!(r.status, MvStatus::Missing))

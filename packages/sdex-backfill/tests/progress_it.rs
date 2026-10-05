@@ -5,8 +5,8 @@
 //! `Enum8` insert coercion, and the ReplacingMergeTree read-modify-write
 //! (preserve `started_at`, honour `Current::Keep`, monotonic window).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p sdex-backfill --test progress_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p sdex-backfill --test progress_it -- --ignored --nocapture --test-threads=1
 //!
 //! Destructive to the local `prices.backfill_progress` table (truncates it);
 //! never run against a shared/prod cluster.
@@ -91,7 +91,7 @@ async fn write(sink: &Sink, mode: ExtractMode, start: u32, obs: Observed, phase:
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn combined_then_sdex_progress_end_to_end() {
     let c = client();
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)

@@ -3,7 +3,7 @@ import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
-import { useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { PUBLIC_API_BASE_URL } from '../landing/links';
 
@@ -59,7 +59,7 @@ import { panelBorder } from '../landing/DashboardPanel';
  */
 
 const BASE_URL = PUBLIC_API_BASE_URL;
-const PLACEHOLDER_KEY = 'YOUR_API_KEY';
+export const PLACEHOLDER_KEY = 'YOUR_API_KEY';
 
 /** The sections, in page order. Doubles as the left-hand table of contents. */
 const SECTIONS = [
@@ -69,6 +69,7 @@ const SECTIONS = [
   { id: 'first-request', label: 'First request' },
   { id: 'response', label: 'Understanding the response' },
   { id: 'endpoints', label: 'Endpoints' },
+  { id: 'examples', label: 'Example queries' },
   { id: 'errors', label: 'Error handling' },
   { id: 'rate-limits', label: 'Rate limits' },
   { id: 'sdk', label: 'SDK examples' },
@@ -306,6 +307,20 @@ const FIRST_REQUEST_TITLE: Record<FirstRequestLang, string> = {
 };
 
 /**
+ * The example response's venues — `GET /v1/assets/native/price` on production,
+ * 2026-09-23 08:08 UTC, with the per-venue values rounded to fit the card.
+ * Every venue the API reports, in the order it writes them (task 0306: the
+ * page named three while production answered five).
+ */
+const EXAMPLE_SOURCES: readonly (readonly [string, string, string])[] = [
+  ['aquarius', '0.2209', '3496887.57'],
+  ['phoenix', '0.2195', '143.34'],
+  ['sdex', '0.2208', '3706994.75'],
+  ['soroswap', '0.2208', '12137.73'],
+  ['sushiswap', '0.2197', '98918.84'],
+];
+
+/**
  * The 200 response, and what each field means — the two columns of the frame.
  *
  * Exported for `QuickStart.spec.tsx`, which ties `value` to `raw` the way it
@@ -329,8 +344,8 @@ export const RESPONSE_FIELDS: readonly {
   },
   {
     key: 'price_usd',
-    value: <Tok c={STR}>&quot;0.17735783908195&quot;</Tok>,
-    raw: '"0.17735783908195"',
+    value: <Tok c={STR}>&quot;0.22086251378147&quot;</Tok>,
+    raw: '"0.22086251378147"',
     dot: NUM,
     meaning: 'Current price in USD. A decimal string, never a float',
   },
@@ -343,71 +358,95 @@ export const RESPONSE_FIELDS: readonly {
   },
   {
     key: 'vwap_24h',
-    value: <Tok c={STR}>&quot;0.17729898377938&quot;</Tok>,
-    raw: '"0.17729898377938"',
+    value: <Tok c={STR}>&quot;0.220818422853&quot;</Tok>,
+    raw: '"0.220818422853"',
     dot: NUM,
     meaning: 'Volume-weighted average price over the last 24 hours',
   },
   {
     key: 'volume_24h_usd',
-    value: <Tok c={STR}>&quot;383736.40419055725213&quot;</Tok>,
-    raw: '"383736.40419055725213"',
+    value: <Tok c={STR}>&quot;9232178.49610106508283&quot;</Tok>,
+    raw: '"9232178.49610106508283"',
     dot: NUM,
-    meaning: '24h traded volume in USD, all venues combined',
+    meaning:
+      '24h USD volume of every trade in the asset, as either side of the pair — more than the venues below add up to',
   },
   {
     key: 'change_24h_pct',
-    value: <Tok c={STR}>&quot;-1.6635&quot;</Tok>,
-    raw: '"-1.6635"',
+    value: <Tok c={STR}>&quot;4.2307&quot;</Tok>,
+    raw: '"4.2307"',
     dot: NUM,
     meaning: '% change over the last 24 hours',
   },
   {
-    // All three venues spelled out, in `value` and `raw` alike. An earlier
-    // version elided two of them as `{…}` — fine on screen, but `raw` feeds
-    // the Copy button, and "Copy example response" then wrote a block no JSON
-    // parser accepts (task 0194's PR review). The per-venue volumes sum to
-    // `volume_24h_usd` above, as the real response's do.
+    // Every venue spelled out, in `value` and `raw` alike, from one list so
+    // the two cannot disagree. An earlier version elided venues as `{…}` —
+    // fine on screen, but `raw` feeds the Copy button, and "Copy example
+    // response" then wrote a block no JSON parser accepts (task 0194's PR
+    // review). The venues add up to LESS than `volume_24h_usd`, as a real
+    // response's do: a venue counts the trades where the asset is the base,
+    // the total counts both sides (task 0306).
     key: 'sources',
     value: (
       <>
-        {'{\n    '}
-        <Tok c={KEY}>&quot;aquarius&quot;</Tok>: {'{ '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;277436.70&quot;</Tok>
-        {' },\n    '}
-        <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1773&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;98211.53&quot;</Tok>
-        {' },\n    '}
-        <Tok c={KEY}>&quot;soroswap&quot;</Tok>: {'{ '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1775&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;8088.17&quot;</Tok>
-        {' }\n  }'}
+        {'{'}
+        {EXAMPLE_SOURCES.map(([venue, price, volume], i) => (
+          <Fragment key={venue}>
+            {'\n    '}
+            <Tok c={KEY}>&quot;{venue}&quot;</Tok>: {'{ '}
+            <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
+            <Tok c={STR}>&quot;{price}&quot;</Tok>,{' '}
+            <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
+            <Tok c={STR}>&quot;{volume}&quot;</Tok>
+            {i < EXAMPLE_SOURCES.length - 1 ? ' },' : ' }'}
+          </Fragment>
+        ))}
+        {'\n  }'}
       </>
     ),
     raw: [
       '{',
-      '    "aquarius": { "price": "0.1774", "volume_24h": "277436.70" },',
-      '    "sdex": { "price": "0.1773", "volume_24h": "98211.53" },',
-      '    "soroswap": { "price": "0.1775", "volume_24h": "8088.17" }',
+      ...EXAMPLE_SOURCES.map(
+        ([venue, price, volume], i) =>
+          `    "${venue}": { "price": "${price}", "volume_24h": "${volume}" }${i < EXAMPLE_SOURCES.length - 1 ? ',' : ''}`,
+      ),
       '  }',
     ].join('\n'),
     dot: STR,
-    meaning: 'Per-venue price and 24h volume: aquarius, sdex, soroswap',
+    meaning:
+      'Per-venue price and 24h volume, counting the trades where the asset is the base: aquarius, phoenix, sdex, soroswap, sushiswap',
   },
   {
     key: 'updated_at',
-    value: <Tok c={STR}>&quot;2026-08-31T12:22:00Z&quot;</Tok>,
-    raw: '"2026-08-31T12:22:00Z"',
+    value: <Tok c={STR}>&quot;2026-09-23T08:08:00Z&quot;</Tok>,
+    raw: '"2026-09-23T08:08:00Z"',
     dot: STR,
-    meaning: 'When this price was last computed (ISO 8601, UTC)',
+    meaning:
+      'When this snapshot row was last refreshed (ISO 8601, UTC) — not the age of the price',
+  },
+  {
+    // `PriceResponse` requires it, and the table went without it until task
+    // 0233's diff of this page against `/api-docs-json` (2026-09-22).
+    key: 'method',
+    value: <Tok c={STR}>&quot;traded&quot;</Tok>,
+    raw: '"traded"',
+    dot: STR,
+    meaning:
+      "How price_usd was obtained: traded (this asset's own trades) or oracle (an oracle rate, currently USDC only); empty when no priced trade fell in the window",
+  },
+  {
+    key: 'as_of',
+    value: <Tok c={STR}>&quot;2026-09-23T08:02:00Z&quot;</Tok>,
+    raw: '"2026-09-23T08:02:00Z"',
+    dot: STR,
+    meaning: "The price's own time: the minute price_usd was read from",
+  },
+  {
+    key: 'price_status',
+    value: <Tok c={STR}>&quot;carried&quot;</Tok>,
+    raw: '"carried"',
+    dot: STR,
+    meaning: 'priced, carried or unpriced — what kind of price this is',
   },
 ];
 
@@ -469,6 +508,9 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;code&quot;</Tok>: <Tok c={STR}>&quot;USDC&quot;</Tok>
         , <Tok c={KEY}>&quot;issuer&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;GA5Z…KZVN&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;contract&quot;</Tok>: <Tok c={STR}>&quot;&quot;</Tok>
+        , <Tok c={KEY}>&quot;home_domain&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;is_active&quot;</Tok>: <Tok c={NUM}>true</Tok> {'}'}
       </>
     ),
@@ -486,10 +528,11 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2209&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;price_xlm&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;1&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;vwap_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1773&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;sources&quot;</Tok>: {'{…}'}, ... {'}'}
+        <Tok c={STR}>&quot;0.2208&quot;</Tok>, ... {'}'}
       </>
     ),
   },
@@ -508,20 +551,22 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;granularity&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;15m&quot;</Tok>, <Tok c={KEY}>&quot;data&quot;</Tok>:
+        <Tok c={STR}>&quot;15m&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;base_currency&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;USD&quot;</Tok>, <Tok c={KEY}>&quot;data&quot;</Tok>:
         [{'{ '}
         <Tok c={KEY}>&quot;timestamp&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2026-08-30T12:30:00Z&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;2026-09-22T08:15:00Z&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;open&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1806&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2116&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;high&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1807&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2134&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;low&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1801&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2102&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;close&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1806&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_quote_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;1491.51&quot;</Tok>, ... {'}, ...] }'}
+        <Tok c={STR}>&quot;0.2105&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;volume_base&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;256744.77&quot;</Tok>, ... {'}, ...] }'}
       </>
     ),
   },
@@ -541,9 +586,9 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;name&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;reflector&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1770&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2181&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;updated_at&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2026-08-31T12:20:00Z&quot;</Tok> {'}] }'}
+        <Tok c={STR}>&quot;2026-09-23T08:05:00Z&quot;</Tok> {'}] }'}
       </>
     ),
   },
@@ -560,11 +605,11 @@ const ENDPOINTS: readonly {
         </Tok>
         {'\n{ '}
         <Tok c={KEY}>&quot;realtime_tip_ledger&quot;</Tok>:{' '}
-        <Tok c={NUM}>63795749</Tok>, <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
+        <Tok c={NUM}>64573020</Tok>, <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
         <Tok c={KEY}>&quot;status&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;completed&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;completed&quot;</Tok>, ...,{' '}
         <Tok c={KEY}>&quot;earliest_data_available&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2015-11-18T03:47:00Z&quot;</Tok>, ... {'}, '}
+        <Tok c={STR}>&quot;2015-11-18T03:47:00Z&quot;</Tok> {'}, '}
         <Tok c={KEY}>&quot;soroban_amm&quot;</Tok>: {'{…} }'}
       </>
     ),
@@ -585,7 +630,8 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1774&quot;</Tok>, ... {'}, ...] }'}
+        <Tok c={STR}>&quot;0.2209&quot;</Tok>, ... {'}, ...],'}{' '}
+        <Tok c={KEY}>&quot;not_found&quot;</Tok>: [] {'}'}
       </>
     ),
   },
@@ -600,20 +646,20 @@ const ERROR_CODES: readonly {
   {
     status: 400,
     tone: 'muted',
-    when: 'Malformed identifier or query — body { "code": "invalid_id" | "invalid_query", "message": … }',
-    fix: 'The message names the parameter. Identifiers are native, CODE:ISSUER (uppercase code, G… issuer) or a C… contract; limit is 1–200; timeframe is one of 1h, 24h, 7d, 30d, 1y, all.',
+    when: 'Malformed identifier, query or body — body { "code": "invalid_id" | "invalid_query" | "invalid_body", "message": … }',
+    fix: 'The message names the parameter. Identifiers are native, CODE:ISSUER (the code as issued — yXLM is not YXLM — and the G… issuer) or a C… contract; limit is 1–200; timeframe is one of 1h, 24h, 7d, 30d, 1y, all. A POST body must be JSON, sent with content-type: application/json.',
   },
   {
     status: 403,
     tone: 'error',
     when: 'Missing or invalid x-api-key header — body { "message": "Forbidden" }, from the gateway',
-    fix: 'Check that your key is correct and the header name matches exactly. A 403 with "Missing Authentication Token" means the PATH is wrong, not the key.',
+    fix: 'Check that your key is correct and the header name matches exactly.',
   },
   {
     status: 404,
     tone: 'muted',
-    when: 'No such asset, or no price for it yet — body { "code": "not_found", "message": … }',
-    fix: 'List /assets (with ?search=) to find the identifier; an asset with no recent trades has no current price.',
+    when: 'No such asset, no price for it yet, or no such route — body { "code": "not_found", "message": … }',
+    fix: 'A "no such route" message means the path or method is wrong — check it against the API reference. Otherwise list /assets (with ?search=) to find the identifier; an asset with no recent trades has no current price.',
   },
   {
     status: 429,
@@ -621,14 +667,16 @@ const ERROR_CODES: readonly {
     when: 'Rate limit exceeded (1 req/s) or monthly quota reached',
     // No `Retry-After`: API Gateway's throttle response carries none, and
     // telling a reader to wait for a header that never comes is worse than
-    // no advice. Measured — see `RATE_LIMIT_BODY`.
+    // no advice. Measured — see `RATE_LIMIT`.
     fix: 'Slow down to 1 request per second and retry after a short pause — the response carries no Retry-After header. Monitor quota on your dashboard.',
   },
   {
     status: 500,
     tone: 'muted',
     when: 'Server error — temporary issue on our side',
-    fix: 'Retry with exponential backoff. Check the status page for incidents.',
+    // No status page exists (task 0301 looked); a sentence that names one
+    // is a promise the page cannot keep.
+    fix: 'Retry with exponential backoff.',
   },
 ];
 
@@ -646,11 +694,35 @@ const ERROR_CODES: readonly {
  * the design said only "what headers to watch", so the concrete contract is
  * decided here, from a measurement, and not from the frame.
  *
+ * ⚠️ The card kept rendering it until task 0305: that fix reached the Copy
+ * text only, so the page showed the invented body and copied the measured one.
+ * A `Snippet` in `SNIPPET_TABLES` now, so the spec holds the two together.
+ *
  * Not measured: the MONTHLY quota's 429, which API Gateway documents as
  * `{"message":"Limit Exceeded"}` — producing it means spending the plan's
  * 100 000 requests. The page does not show a body it has not seen.
  */
-const RATE_LIMIT_BODY = `// HTTP 429 Too Many Requests\n// x-amzn-errortype: TooManyRequestsException\n{\n  "message": "Too Many Requests"\n}`;
+const RATE_LIMIT: Snippet = {
+  text: `// HTTP 429 Too Many Requests\n// x-amzn-errortype: TooManyRequestsException\n{\n  "message": "Too Many Requests"\n}`,
+  view: (
+    <>
+      <Tok c={MUTED}>{'// HTTP 429 Too Many Requests'}</Tok>
+      {'\n'}
+      <Tok c={MUTED}>{'// x-amzn-errortype: TooManyRequestsException'}</Tok>
+      {'\n{\n  '}
+      <Tok c={KEY}>&quot;message&quot;</Tok>:{' '}
+      <Tok c={STR}>&quot;Too Many Requests&quot;</Tok>
+      {'\n}'}
+    </>
+  ),
+};
+
+/**
+ * The free plan's burst — `pricingApiFreePlanBurstLimit` in
+ * `infra/envs/production.json`. A literal because the portal's config probe
+ * reports the per-second rate only; the plan has not moved since task 0157.
+ */
+const FREE_PLAN_BURST = 5;
 
 const SDK_LANGS = [
   { key: 'js', label: 'JavaScript' },
@@ -757,10 +829,103 @@ const SDK: Record<SdkLang, Snippet> = {
 };
 
 const SDK_TITLE: Record<SdkLang, string> = {
-  js: 'javascript — fetch all prices',
-  python: 'python — fetch all prices',
-  rust: 'rust — fetch all prices',
-  go: 'go — fetch all prices',
+  js: 'javascript — fetch a price',
+  python: 'python — fetch a price',
+  rust: 'rust — fetch a price',
+  go: 'go — fetch a price',
+};
+
+/**
+ * The four calls to make first (task 0163): a credit asset by CODE:ISSUER,
+ * candles over a window, several prices in one request, and the keyless
+ * liveness probe. Each is meant to run as it stands once the key is real, so
+ * nothing is elided — the USDC issuer is the full G… address — and the page
+ * lists them in the order to run them: one after another, inside a free key's
+ * burst of five. `QuickStart.live.spec.tsx` runs each snippet's copy text
+ * against production, gated on `PRICES_API_KEY`; task 0164 repeats the same
+ * commands as its end-to-end check.
+ */
+const USDC = 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+
+/** `/health` sits at the API's root, outside the versioned base. */
+const HEALTH_URL = `${BASE_URL.replace(/\/v1$/, '')}/health`;
+
+type ExampleKey = 'price' | 'ohlcv' | 'batch' | 'health';
+/** Page order — also the order to run them in. */
+const EXAMPLE_KEYS: readonly ExampleKey[] = [
+  'price',
+  'ohlcv',
+  'batch',
+  'health',
+];
+
+/**
+ * The path template each example calls — for `QuickStart.spec.tsx`, which
+ * holds the snippet's URL against it and finds it in the OpenAPI document.
+ */
+export const EXAMPLE_PATHS: Record<ExampleKey, string> = {
+  price: '/v1/assets/{id}/price',
+  ohlcv: '/v1/assets/{id}/ohlcv',
+  batch: '/v1/prices/batch',
+  health: '/health',
+};
+
+const EXAMPLE_TITLE: Record<ExampleKey, string> = {
+  price: 'GET /assets/{id}/price — one credit asset, by CODE:ISSUER',
+  ohlcv: 'GET /assets/{id}/ohlcv — hourly candles for the last 7 days',
+  batch: 'POST /prices/batch — several prices in one request',
+  health: 'GET /health — no key needed',
+};
+
+export const EXAMPLES: Record<ExampleKey, Snippet> = {
+  price: {
+    text: `curl "${BASE_URL}/assets/${USDC}/price" \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}"`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl </Tok>
+        <Tok c={NUM}>{`"${BASE_URL}/assets/${USDC}/price"`}</Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
+      </>
+    ),
+  },
+  ohlcv: {
+    text: `curl "${BASE_URL}/assets/native/ohlcv?timeframe=7d&granularity=1h" \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}"`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl </Tok>
+        <Tok c={NUM}>
+          {`"${BASE_URL}/assets/native/ohlcv?timeframe=7d&granularity=1h"`}
+        </Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
+      </>
+    ),
+  },
+  batch: {
+    text: `curl -X POST "${BASE_URL}/prices/batch" \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}" \\\n  -H "content-type: application/json" \\\n  -d '{"assets": ["native", "${USDC}"]}'`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl -X POST </Tok>
+        <Tok c={NUM}>{`"${BASE_URL}/prices/batch"`}</Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;content-type: application/json&quot;</Tok>
+        {' \\\n  -d '}
+        <Tok c={STR}>{`'{"assets": ["native", "${USDC}"]}'`}</Tok>
+      </>
+    ),
+  },
+  health: {
+    text: `curl -i "${HEALTH_URL}"`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl -i </Tok>
+        <Tok c={NUM}>{`"${HEALTH_URL}"`}</Tok>
+      </>
+    ),
+  },
 };
 
 /**
@@ -772,8 +937,20 @@ const SDK_TITLE: Record<SdkLang, string> = {
  */
 export const SNIPPET_TABLES: Record<string, Record<string, Snippet>> = {
   FIRST_REQUEST,
+  EXAMPLES,
   SDK,
+  RATE_LIMIT: { body: RATE_LIMIT },
 };
+
+/**
+ * Every path this page names — the endpoint list and the examples — for
+ * `QuickStart.spec.tsx` to find in the committed OpenAPI document. Task 0233's
+ * first criterion, as a test rather than a one-off diff.
+ */
+export const DOCUMENTED_PATHS: readonly string[] = [
+  ...ENDPOINTS.map((e) => `/v1${e.path}`),
+  ...Object.values(EXAMPLE_PATHS),
+];
 
 /* -------------------------------------------------------------------------- */
 /* Sections                                                                   */
@@ -795,7 +972,8 @@ function Prerequisites() {
           >
             Stellar Discord server
           </Link>
-          .
+          . A Discord account created moments ago is turned away for a short
+          while.
         </>
       ),
     },
@@ -882,7 +1060,7 @@ function Authentication() {
     <DocSection
       id="authentication"
       title="Authentication"
-      lede="Every request must include your API key in the x-api-key header. There is no other authentication method."
+      lede="Every /v1 request must include your API key in the x-api-key header. There is no other authentication method. Two routes take no key at all: /health and /api-docs-json."
     >
       <DocCard title="Required header">
         <Stack spacing={2} sx={{ p: 2 }}>
@@ -894,14 +1072,27 @@ function Authentication() {
               gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' },
             }}
           >
+            {/* The page's placeholder, not the frame's `sf_live_…` — the
+                design's shape for a key, not one this API issues (task 0233). */}
             <Verdict tone="ok" label="Correct">
-              -H &quot;x-api-key: sf_live_k8mN...&quot;
+              -H &quot;x-api-key: {PLACEHOLDER_KEY}&quot;
             </Verdict>
             <Verdict tone="bad" label="Wrong — returns 403">
-              -H &quot;Authorization: Bearer sf_live...&quot;
+              -H &quot;Authorization: Bearer {PLACEHOLDER_KEY}&quot;
             </Verdict>
           </Box>
         </Stack>
+      </DocCard>
+      {/* One paragraph the frame does not have (task 0163): the portal's
+          audience includes frontend developers, and the key is a bearer
+          credential with a quota on it. */}
+      <DocCard title="Keep the key on your side">
+        <Typography variant="body1" sx={{ p: 2, color: color.text.tertiary }}>
+          The key is a bearer credential with a monthly quota attached: whoever
+          reads it can spend it. Do not ship it in a browser bundle or a mobile
+          app — call the API from your own backend and pass on only what your
+          page needs.
+        </Typography>
       </DocCard>
     </DocSection>
   );
@@ -1092,7 +1283,7 @@ function Endpoints() {
     <DocSection
       id="endpoints"
       title="Endpoints"
-      lede="All endpoints require the x-api-key header. Click any endpoint to see an example response."
+      lede="Every endpoint here lives under /v1 and takes the x-api-key header. Click any endpoint to see an example response."
     >
       <Stack spacing={1.5}>
         {ENDPOINTS.map(({ method, path, summary, example }) => {
@@ -1189,6 +1380,31 @@ function Endpoints() {
   );
 }
 
+function Examples() {
+  return (
+    <DocSection
+      id="examples"
+      title="Example queries"
+      lede="The four calls to make first, each one runnable as it stands once the key is yours. Run them one after another: a free key allows a burst of five requests, then one per second."
+    >
+      <Stack spacing={2}>
+        {EXAMPLE_KEYS.map((k) => (
+          <DocCard
+            key={k}
+            title={EXAMPLE_TITLE[k]}
+            copy={{
+              text: EXAMPLES[k].text,
+              label: `${EXAMPLE_TITLE[k]} example`,
+            }}
+          >
+            <Code>{EXAMPLES[k].view}</Code>
+          </DocCard>
+        ))}
+      </Stack>
+    </DocSection>
+  );
+}
+
 function Errors() {
   const statusColor = {
     error: color.text.error,
@@ -1210,7 +1426,7 @@ function Errors() {
     <DocSection
       id="errors"
       title="Error handling"
-      lede="All errors return a JSON body with a code and message field."
+      lede="Every error has a JSON body. The API's own errors carry a stable code and a message; the gateway's 403 and 429 carry a message only."
     >
       <DocCard title="HTTP error codes">
         {/* A real table, scrolling inside its card at 375px rather than
@@ -1268,21 +1484,9 @@ function Errors() {
         </Typography>
         <DocCard
           title="JSON"
-          copy={{ text: RATE_LIMIT_BODY, label: '429 response body' }}
+          copy={{ text: RATE_LIMIT.text, label: '429 response body' }}
         >
-          <Code>
-            <Tok c={MUTED}>{'// HTTP 429 Too Many Requests'}</Tok>
-            {'\n'}
-            <Tok c={MUTED}>{'// Retry-After: 1'}</Tok>
-            {'\n{\n  '}
-            <Tok c={KEY}>&quot;code&quot;</Tok>:{' '}
-            <Tok c={STR}>&quot;RATE_LIMIT_EXCEEDED&quot;</Tok>,{'\n  '}
-            <Tok c={KEY}>&quot;message&quot;</Tok>:{' '}
-            <Tok c={STR}>
-              &quot;Request rate limit exceeded. Retry after 1 second.&quot;
-            </Tok>
-            {'\n}'}
-          </Code>
+          <Code>{RATE_LIMIT.view}</Code>
         </DocCard>
       </Stack>
     </DocSection>
@@ -1301,7 +1505,7 @@ function RateLimits({ rateLimit }: { rateLimit?: number }) {
       label: 'Rate limit',
       value: String(perSecond),
       unit: 'req / second',
-      note: `${perSecond * 60} requests per minute`,
+      note: `${perSecond * 60} requests per minute, up to ${FREE_PLAN_BURST} at once`,
     },
     {
       label: 'Monthly quota',
@@ -1375,6 +1579,16 @@ function RateLimits({ rateLimit }: { rateLimit?: number }) {
           </Stack>
         ))}
       </Box>
+      {/* What task 0157 measured on the production plan: a cache miss meets
+          the 1 req/s bucket at once, and a cache hit is never rejected at any
+          rate it could produce. Whether a hit still spends a bucket token or a
+          quota unit was NOT settled by that run, so the page says only what
+          was seen. */}
+      <Typography variant="body1" sx={{ color: color.text.tertiary }}>
+        The per-second limit is a token bucket: up to {FREE_PLAN_BURST} requests
+        may go out at once, then one per second. A response the gateway serves
+        from its cache is never throttled.
+      </Typography>
       <Typography
         variant="body1"
         sx={{
@@ -1532,6 +1746,7 @@ export function QuickStart({ rateLimit }: { rateLimit?: number }) {
       <FirstRequest />
       <Response />
       <Endpoints />
+      <Examples />
       <Errors />
       <RateLimits rateLimit={rateLimit} />
       <Sdk />

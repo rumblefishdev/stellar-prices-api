@@ -15,6 +15,15 @@
 -- vwap_24h / market_cap_usd = 0 for every asset. Apply this MV only once
 -- enrichment is live, otherwise current_prices serves all-zero rows.
 --
+-- ⚠️ DEPENDS ON prices.price_ohlcv_1m.pf_trade_count (task 0286), read by
+-- base_tip below. This file is DROP VIEW + CREATE MATERIALIZED VIEW: on a
+-- database that has not run 0286's schema step the DROP succeeds and the
+-- CREATE fails with `Code: 47 … Unknown expression or function identifier
+-- 'pf_trade_count'`, leaving current_prices with NO writer at all — REPLACE
+-- mode, every asset frozen on its last row. Apply 0286's ALTERs first:
+-- init.sql does on a fresh apply; on prod that is rollout step B, before
+-- step E re-creates this view.
+--
 -- ⚠️ REDEPLOY MECHANICS (task 0068 → 0072): a refreshable MV's definition is
 -- FIXED AT CREATE TIME. Changing this SELECT requires DROP VIEW + re-CREATE —
 -- an ALTER does not take. No backfill/migration is needed: the MV fully
@@ -29,10 +38,12 @@
 -- EVERY new column must be added to BOTH the TO(...) list and the SELECT, in
 -- matching order.
 --
--- Columns (0072 completed the original ten; 0178 appends `method` for eleven):
+-- Columns (0072 completed the original ten; 0178 appends `method` for eleven;
+-- 0216 appends `as_of` and `price_status` for thirteen):
 --   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
 --                     NOT age-bounded — see the unfiltered CTE for why. The
---                     per-venue pipeline IS bounded, but conditionally: see 1b
+--                     per-venue pipeline IS bounded, but conditionally: see 1b.
+--                     `as_of` below carries this close's own timestamp
 --   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
 --   change_24h_pct  — vs the oldest close inside the 24h window
 --   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
@@ -47,6 +58,11 @@
 --   sources         — JSON per-source {price, volume_24h}; sources excluded by
 --                     min_volume_usd or outlier detection are ABSENT from the
 --                     object (general-overview §3.3)
+--   as_of           — the timestamp of the candle price_usd was read from,
+--                     bounded above at now(); toDateTime(0) when there is no
+--                     price, which consumers must read as absent (0216)
+--   price_status    — 'priced' / 'carried' / 'unpriced'; '' only on a row the
+--                     MV has not rewritten since the column was added (0216)
 --
 -- ── Numeric strategy ────────────────────────────────────────────────────────
 -- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
@@ -156,7 +172,8 @@ CREATE MATERIALIZED VIEW prices.mv_current_prices
 REFRESH EVERY 1 MINUTE
 TO prices.current_prices
    (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct,
-    volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at, method) AS
+    volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at, method,
+    as_of, price_status) AS
 WITH
     -- XLM's own USD close, as a scalar. Resolved by natural key exactly the way
     -- the enrichment worker's resolve_reference_ids() does (ch_enrich.rs:447):
@@ -173,6 +190,7 @@ WITH
                   LIMIT 1
               )
           AND timestamp >= now() - INTERVAL 24 HOUR
+          AND timestamp <= now()
     ) AS xlm_usd,
 
     -- ── Task 0178: the canonical-USDC identity and its measured USD rate ─────
@@ -202,9 +220,17 @@ WITH
         LIMIT 1
     ) AS usdc_asset_id,
 
-    -- The rate itself: ASOF at-or-before `now()`, never averaged (task 0167's
-    -- resolution rule), and REFUSED past a staleness window — an unbounded
-    -- forward-fill would present a three-day-old reading as the live price.
+    -- The reading itself, as ONE tuple: `.1` is the rate, `.2` is the time of
+    -- the reading it was taken from (task 0216). ASOF at-or-before `now()`,
+    -- never averaged (task 0167's resolution rule), and REFUSED past a
+    -- staleness window — an unbounded forward-fill would present a three-day-old
+    -- reading as the live price.
+    --
+    -- One subquery, not two: a separate timestamp scalar would need its own
+    -- copy of the WHERE below, and two copies can drift. A set even slightly
+    -- wider or narrower than the rate's would date a rate this MV never
+    -- published — here the rate and its age are aggregates of the same rows by
+    -- construction, so there is nothing to keep in step.
     --
     -- `method = 'oracle'` selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a 0154 'pivot' row cannot
@@ -212,11 +238,12 @@ WITH
     -- chooses measured or nothing.
     --
     -- 24 HOUR matches this MV's own window. If the oracle goes quiet for longer
-    -- the scalar is 0, `usdc_tip` emits NO ROW, and behaviour degrades to
-    -- exactly what it is today (USDC absent from the table) rather than to a
-    -- confident zero. Absent is honest; 0 tagged 'oracle' would not be.
+    -- the tuple is (0, 1970-01-01 00:00:00), `usdc_tip` emits NO ROW on the
+    -- `.1 > 0` guard below, and behaviour degrades to exactly what it is today
+    -- (USDC absent from the table) rather than to a confident zero. Absent is
+    -- honest; 0 tagged 'oracle' would not be, and neither would a 1970 age.
     (
-        SELECT argMax(usd_rate, timestamp)
+        SELECT (argMax(usd_rate, timestamp), max(timestamp))
         FROM prices.usd_rate FINAL
         WHERE asset_kind = 'credit'
           AND asset_code = 'USDC'
@@ -225,7 +252,7 @@ WITH
           AND method = 'oracle'
           AND timestamp <= now()
           AND timestamp >= now() - INTERVAL 24 HOUR
-    ) AS usdc_rate,
+    ) AS usdc_reading,
 
     -- Level 1 — one row per (asset, source) over the trailing 24h.
     --
@@ -275,6 +302,7 @@ WITH
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
+          AND timestamp <= now()
         GROUP BY asset_id, source
     ),
 
@@ -464,9 +492,10 @@ WITH
     -- median, and that is guarded one CTE up.
     --
     -- ⚠️ Honest consequence: this column can be older than it looks, and
-    -- `updated_at` is the refresh time, not the price's age. No column carries
-    -- that age today; publishing it is a follow-up task and is the real answer
-    -- to "how fresh is this?" — not blanking a price we hold.
+    -- `updated_at` is the refresh time, not the price's age. Since task 0216
+    -- that age is published beside it: `as_of` names the candle this close
+    -- came from and `price_status` says whether a newer one is outstanding —
+    -- the real answer to "how fresh is this?", not blanking a price we hold.
     --
     -- ⚠️ Any future guard here must emit a SENTINEL, never filter the row out.
     -- This MV is REPLACE, not APPEND (unlike the six rollup MVs), so
@@ -488,9 +517,40 @@ WITH
             asset_id                          AS asset_id,
             argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
-            toUInt8(0)                        AS is_oracle
+            toUInt8(0)                        AS is_oracle,
+            -- as_of is price_usd's OWN timestamp — the same close_usd > 0
+            -- predicate as the argMaxIf above, over the same candle set, so
+            -- as_of always names the candle price_usd was read from and an
+            -- empty age on the wire is exactly a `0` price, never a priced row
+            -- with a blank age beside it.
+            -- tip_at is the newest candle that HAS a price to wait for:
+            -- pf_trade_count (task 0286), not trade_count, so a dust-only
+            -- minute does not make a real price read `carried`. Pre-0286 rows
+            -- default pf_trade_count to trade_count, so this reads the same on
+            -- either era (task 0216).
+            --
+            -- ⚠️ `timestamp <= now()` IS NOT LOCAL TO THIS CTE. A candle
+            -- stamped after the wall clock is a data defect, and EVERY 24h
+            -- window in this file carries the same upper bound — the xlm_usd
+            -- scalar, the oracle rate scalar, per_source, both legs of vol_all
+            -- and the WHERE below — so all of them read ONE candle set. The
+            -- bound cannot be applied to the tip alone: a future-stamped
+            -- candle would then split the row against itself, price_usd and
+            -- as_of drawn from the last past candle while sources.<v>.price,
+            -- vwap_24h and volume_24h_usd already counted the future one,
+            -- price_xlm stopped being 1 for XLM itself, and src_is_live held a
+            -- venue live forever on the strength of one bad stamp. Before
+            -- task 0216 both sides saw the same candles because NEITHER was
+            -- bounded; they must stay in step now that one of them is. The
+            -- only window deliberately left alone is ref_7d's [7d, 5d] band,
+            -- which is wholly below now() already. as_of is the field a
+            -- consumer subtracts from now(), so it must never run ahead of
+            -- updated_at and publish a negative age.
+            maxIf(timestamp, close_usd > 0)      AS as_of,
+            maxIf(timestamp, pf_trade_count > 0) AS tip_at
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
+          AND timestamp <= now()
         GROUP BY asset_id
     ),
 
@@ -503,7 +563,7 @@ WITH
     -- existing nullIf guard to the documented 0 sentinel, which is the whole
     -- point — a fabricated `change_24h_pct` beside a real price would be a new
     -- instance of the -100% defect task 0138 removed. NEVER set this to
-    -- `usdc_rate` to make the arithmetic "work": that publishes a measured 0%
+    -- the measured rate to make the arithmetic "work": that publishes a 0%
     -- change that was never measured.
     --
     -- The NOT IN guard keeps this arm mutually exclusive with base_tip. USDC
@@ -514,18 +574,24 @@ WITH
     usdc_tip AS (
         SELECT
             usdc_asset_id                     AS asset_id,
-            usdc_rate                         AS price_usd,
+            usdc_reading.1                    AS price_usd,
             toDecimal128(0, 14)               AS open_24h,
-            toUInt8(1)                        AS is_oracle
+            toUInt8(1)                        AS is_oracle,
+            -- as_of = tip_at for this arm (task 0216): the rate reading IS the
+            -- newest thing there is to wait for here, so every oracle row falls
+            -- into the `priced` branch WITHOUT the status expression having to
+            -- key on is_oracle.
+            usdc_reading.2                    AS as_of,
+            usdc_reading.2                    AS tip_at
         WHERE usdc_asset_id > 0
-          AND usdc_rate > 0
+          AND usdc_reading.1 > 0
           AND usdc_asset_id NOT IN (SELECT asset_id FROM base_tip)
     ),
 
     unfiltered AS (
-        SELECT asset_id, price_usd, open_24h, is_oracle FROM base_tip
+        SELECT asset_id, price_usd, open_24h, is_oracle, as_of, tip_at FROM base_tip
         UNION ALL
-        SELECT asset_id, price_usd, open_24h, is_oracle FROM usdc_tip
+        SELECT asset_id, price_usd, open_24h, is_oracle, as_of, tip_at FROM usdc_tip
     ),
 
     -- ── volume_24h_usd counts BOTH legs (task 0178) ──────────────────────────
@@ -566,10 +632,12 @@ WITH
             SELECT asset_id AS asset_id, volume_quote_usd AS volume_quote_usd
             FROM prices.price_ohlcv_1m FINAL
             WHERE timestamp >= now() - INTERVAL 24 HOUR
+              AND timestamp <= now()
             UNION ALL
             SELECT quote_asset_id AS asset_id, volume_quote_usd AS volume_quote_usd
             FROM prices.price_ohlcv_1m FINAL
             WHERE timestamp >= now() - INTERVAL 24 HOUR
+              AND timestamp <= now()
         )
         GROUP BY asset_id
     )
@@ -693,7 +761,36 @@ SELECT
             u.is_oracle = 1, 'oracle',
             u.price_usd > 0, 'traded',
             ''),
-        'LowCardinality(String)')                           AS method
+        'LowCardinality(String)')                           AS method,
+
+    -- as_of / price_status — the price's own age and what kind of price it is
+    -- (task 0216). APPENDED LAST, after method, and they must occupy the same
+    -- positions in the TO(...) list above: this MV inserts POSITIONALLY. The
+    -- dangerous shape here is a SAME-TYPE transposition — as_of with
+    -- updated_at, price_status with method — which ClickHouse accepts without
+    -- an error and publishes the refresh time as the price's age. The order
+    -- test in lib.rs is what stands between that and a published lie.
+    --
+    -- The guard below is load-bearing: maxIf over a window with no priced
+    -- candle returns the DateTime default, not NULL, so an unguarded as_of
+    -- beside a 0 price is a 56-year-old timestamp that looks ordinary. Forcing
+    -- the epoch here makes "no price" a deliberate sentinel the API can map to
+    -- "" rather than a coincidence.
+    if(u.price_usd > 0, u.as_of, toDateTime(0))             AS as_of,
+
+    -- Keys on VALUES, never on is_oracle alone (the 0178 lesson above):
+    -- carried means a priced close exists but a newer PRICE-FORMING candle
+    -- does not have one yet. pf_trade_count (not trade_count) is what makes a
+    -- dust-only minute stop counting as a price the reader is waiting for;
+    -- pre-0286 rows default it to trade_count, so this reads the same on
+    -- either era. '' is unreachable from here — it is the table DEFAULT for a
+    -- row this MV has not rewritten yet.
+    CAST(
+        multiIf(
+            u.price_usd <= 0, 'unpriced',
+            u.as_of < u.tip_at, 'carried',
+            'priced'),
+        'LowCardinality(String)')                           AS price_status
 FROM unfiltered AS u
 LEFT JOIN vol_all AS v  ON v.asset_id   = u.asset_id
 LEFT JOIN kept   AS k   ON k.asset_id   = u.asset_id

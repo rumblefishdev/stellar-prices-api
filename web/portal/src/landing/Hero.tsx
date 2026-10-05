@@ -6,8 +6,8 @@ import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
 import { Link as RouterLink } from 'react-router-dom';
 
-import rumblefishLogo from '../assets/rumblefish-logo.svg';
 import { color, font, radius } from '../theme/tokens';
+import { RumbleFishMark } from './Chrome';
 import { LOGIN_ROUTE, API_REFERENCE } from './links';
 import { ArrowBadge, cardBorder } from './primitives';
 import { Terminal } from './Terminal';
@@ -136,9 +136,8 @@ export function Hero({ canOfferKey }: { canOfferKey: boolean }) {
               variant="body1"
               sx={{ color: color.text.tertiary, maxWidth: 560 }}
             >
-              Token prices, liquidity data and market insights for wallets, DEX
-              aggregators and DeFi applications. Powered by Soroswap
-              infrastructure.
+              Token prices and price history for wallets, DEX aggregators and
+              DeFi applications, across SDEX and four Soroban AMMs.
             </Typography>
 
             <Stack
@@ -327,15 +326,11 @@ export function TrustBand() {
             <Typography variant="body1" sx={{ color: color.text.tertiary }}>
               Built by
             </Typography>
-            {/* The real mark, recovered from the Figma export — see the note
-                in `Chrome.tsx`. It carries "Rumble Fish" as its `alt`, so the
-                line still reads "Built by Rumble Fish" to a screen reader. */}
-            <Box
-              component="img"
-              src={rumblefishLogo}
-              alt="Rumble Fish"
-              sx={{ height: 32, width: 'auto', display: 'block' }}
-            />
+            {/* The footer's mark, link included (task 0308): it was a bare
+                image here while the same mark in the footer led to the
+                company. Its `alt` names Rumble Fish, so the line still reads
+                "Built by Rumble Fish" to a screen reader. */}
+            <RumbleFishMark />
           </Stack>
 
           {/* Wrapped and centred on a desktop; one scrolling row on a phone,

@@ -400,6 +400,29 @@ Five reviewer-style dates on XLM: 2022-01-03 at −0.19 %, 2022-06-15 at −0.42
 dates that fall outside 5 % are a known dislocation on both assets in March 2023,
 tracked as task 0266.
 
+#### Addendum, 2026-09-11 — USDC is now measured, and spot-checked
+
+_Added after submission; the text above is unchanged._ USDC's history before
+2026-03-11 is no longer peg-derived: on 2026-09-11 production loaded the
+measured Chainlink USDC/USD series (Bitstamp fallback) and started serving it
+(tasks 0267 / 0268, rolled out in task 0276). The USDC series can therefore now
+serve the check the criterion names:
+
+| date       | `/ohlcv` USDC close | `method`   | `source`  | `quality` |
+| ---------- | ------------------- | ---------- | --------- | --------- |
+| 2023-03-11 | **0.96812**         | `external` | chainlink | measured  |
+| 2021-02-01 | 0.99998             | `external` | bitstamp  | fallback  |
+| 2023-07-06 | 0.99989217          | `external` | chainlink | measured  |
+| 2026-08-01 | 1.00040494          | `oracle`   | —         | —         |
+
+2023-03-11 is the Silicon Valley Bank depeg, which the API previously returned as
+`1`. At `granularity=1h` the same day shows the trough, **0.8833 at 07:00**.
+Every pre-2026-03-11 value matches the independent composed series (task 0265)
+to the digit.
+
+The March 2023 dislocation on XLM and yBTC above is **not** resolved by this
+change and is a different cause — task 0278.
+
 #### Reproduce it
 
 ```bash

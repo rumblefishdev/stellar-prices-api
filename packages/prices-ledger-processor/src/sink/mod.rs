@@ -11,8 +11,8 @@
 use std::future::Future;
 
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, Registries,
-    retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, PoolRegistryRow,
+    Registries, retry_with_backoff,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -36,14 +36,21 @@ pub trait CandleSink {
         samples: &[OracleSample],
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 
-    /// Persist assets interned on/after the `since` watermark — only the ones
-    /// this run newly discovered, not the whole registry (task 0132). `since` is
-    /// [`AssetRegistry::watermark`] captured before the run. A no-op write when
-    /// no new assets were seen.
+    /// Persist the registry's pending identities ([`AssetRegistry::pending_new`])
+    /// — only the ones not yet written, not the whole registry (task 0132). A
+    /// no-op write when nothing is pending. Does not clear the set: the caller
+    /// does, after `Ok`.
     fn write_new_assets(
         &self,
         registry: &AssetRegistry,
-        since: u32,
+    ) -> impl Future<Output = Result<(), SinkError>> + Send;
+
+    /// Persist AMM pools this run learned from factory events — only the rows
+    /// not yet durably in `prices.pool_registry` (task 0291; see
+    /// [`Registries::pool_rows_unpersisted`]). A no-op write on an empty slice.
+    fn write_pool_rows(
+        &self,
+        rows: &[PoolRegistryRow],
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 }
 
@@ -89,9 +96,9 @@ impl ClickHouseSink {
         self.writer.client()
     }
 
-    /// Load the existing asset registry from `prices.assets` so surrogate ids
-    /// are reused (not reassigned) across cold starts — the load-bearing
-    /// guarantee that live ids match the backfill's.
+    /// Load the identities already in `prices.assets`, so a cold start writes
+    /// only the assets it discovers. Ids are ClickHouse's, derived from the
+    /// identity (task 0139), so live and backfill ids agree by construction.
     pub async fn load_registry(&self) -> Result<AssetRegistry, SinkError> {
         let existing = self.writer.load_assets().await.map_err(redact)?;
         Ok(AssetRegistry::from_existing(existing))
@@ -135,20 +142,22 @@ impl CandleSink for ClickHouseSink {
         .map(|_| ())
     }
 
-    async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), SinkError> {
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), SinkError> {
         retry_with_backoff(
             &DEFAULT_BACKOFF_MS,
             |_| true,
-            || async {
-                self.writer
-                    .write_new_assets(registry, since)
-                    .await
-                    .map_err(redact)
-            },
+            || async { self.writer.write_new_assets(registry).await.map_err(redact) },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn write_pool_rows(&self, rows: &[PoolRegistryRow]) -> Result<(), SinkError> {
+        // Idempotent (RMT on contract_id) → retried like the other writes.
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_pool_rows(rows).await.map_err(redact) },
         )
         .await
         .map(|_| ())
@@ -169,6 +178,7 @@ pub struct CountingSink {
     pub candles: std::sync::atomic::AtomicU64,
     pub oracle: std::sync::atomic::AtomicU64,
     pub assets: std::sync::atomic::AtomicU64,
+    pub pools: std::sync::atomic::AtomicU64,
 }
 
 impl CandleSink for CountingSink {
@@ -184,14 +194,16 @@ impl CandleSink for CountingSink {
         Ok(())
     }
 
-    async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), SinkError> {
-        let n = registry.assets_since(since).count() as u64;
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), SinkError> {
+        let n = registry.pending_new().count() as u64;
         self.assets
             .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn write_pool_rows(&self, rows: &[PoolRegistryRow]) -> Result<(), SinkError> {
+        self.pools
+            .fetch_add(rows.len() as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }

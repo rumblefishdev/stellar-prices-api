@@ -445,7 +445,23 @@ ALTER TABLE prices.<table> ATTACH PARTITION <month>
 > always available until you unfreeze. Automating this as a `--revert` flag is a
 > tracked follow-up.
 
-## Appendix — reset mode, for a _wrong_ value rather than a missing one (task 0182)
+## Appendix A — reset mode, for a _wrong_ value rather than a missing one (task 0182)
+
+> ⚠️ **Since task 0208 (review WR-04), the plain mode this appendix describes
+> runs only on the canonical USDC (peg) leg.** The plain mode is
+> `--reset-quote-asset-id` + `--reset-not-before` with neither
+> `--reset-require-*` flag. On an XLM or USDT (pivot) leg it is refused right
+> after connecting, before the oracle-shadow check and dry run included
+> (`ResetPlainModeOnPivotLeg`): the pivot refills such a row only with a
+> USDC/USD rate and a reference inside `--pivot-window-s`, and the plain mode
+> checks neither. The 0182 USDT campaign this appendix was written for is
+> finished, so read its USDT procedure as history. To re-price an XLM or USDT
+> leg, use Appendix C (`--reset-require-pivot-usdc-rate`). The epoch,
+> damage-check and run-it-once rules below apply to every mode. The oracle
+> rule does too, but its 2026-08 remedy does not: USDT's purge (task 0196)
+> removed mis-attributed rows and is history; for a polled leg, bound the
+> window below its first reading instead (see "Oracle rows in the window"
+> below and Appendix C precondition 5).
 
 Everything above fills zeros and is purely additive. This appendix covers the one
 mode that **discards a stored value**. Read it in full before using the flags.
@@ -458,7 +474,8 @@ idempotent. After a _pricing_ defect that is a problem: task 0172 found that
 USDT-quoted candles had been valued at par by a peg tier, and those 44,657 rows
 are inert. The writer is fixed; nothing will ever revisit what it already wrote.
 
-⚠️ **A plain dry run over this shape reports "no months with enrichable zeros".**
+⚠️ **A dry run without `--reset-*` flags over this shape reports "no months
+with enrichable zeros".**
 Before task 0182 that all-clear was indistinguishable from a genuinely clean
 table. The `--reset-*` flags widen the month enumeration so those rows count.
 
@@ -471,49 +488,173 @@ table. The `--reset-*` flags widen the month enumeration so those rows count.
 
 They require each other. Together they re-insert the matching rows with **both**
 USD columns at 0 and `version + 1`, ahead of the normal tiers, which then
-recompute them.
+recompute them. Without a `--reset-require-*` flag this is the plain mode, for
+the canonical USDC leg only.
+
+For canonical USDC the repair is normally Appendix B
+(`--reset-require-external-rate`). If you do run the plain mode on USDC, it
+needs an explicit upper bound: it is the only mode with none by default, and
+canonical USDC has held live Reflector readings since 2026-03-11, so an
+unbounded plain reset is always refused (`ResetBlockedByOracleRows`, "all
+time"). Pass `--reset-not-after` at or below USDC's first reading: measure it,
+and pass the lower of `first_reading` and `USDC_ORACLE_EPOCH_S` (2026-03-11
+14:00 UTC, the value Appendix B sets as `param_epoch`):
+
+```sql
+SELECT count() AS readings, toUnixTimestamp(min(timestamp)) AS first_reading
+FROM prices.oracle_prices
+WHERE asset_id = <USDC_ID> AND oracle_name = 'reflector'
+```
+
+```bash
+--reset-quote-asset-id <USDC_ID> --reset-not-before <UNIX_TS> \
+  --reset-not-after <the lower of the two>
+```
+
+`<ID>` is the leg's `asset_id`, looked up by identity. Since task 0139 ids are
+derived from the identity (`UInt64`), so never type one from memory. Canonical
+USDT, the leg of this appendix:
+
+```sql
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDT' AND contract_address = ''
+  AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'
+```
 
 ### What reset mode refuses outright
 
-All five are hard errors, not warnings, because each one ends with rows zeroed
+All nine are hard errors, not warnings, because each one ends with rows zeroed
 that nothing can refill:
 
-| Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--skip-snapshot` + `--reset-*` without `--snapshots-verified` | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. On prod `--skip-snapshot` is the _correct_ flag (Step 3b: the admin freezes, `prices_writer` cannot), so it is not refused — but "the admin did it" and "nobody did it" must not look identical. Verify under `shadow/`, then add `--snapshots-verified`. |
-| `--pivot-window-s` below the table's bucket width              | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first.                                                                                                                                                     |
-| A quote leg that is not a peg or pivot reference               | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                        |
-| A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                   |
-| `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                         |
+| Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--skip-snapshot` + `--reset-*` without `--snapshots-verified` | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. On prod `--skip-snapshot` is the _correct_ flag (Step 3b: the admin freezes, `prices_writer` cannot), so it is not refused — but "the admin did it" and "nobody did it" must not look identical. Verify under `shadow/`, then add `--snapshots-verified`.                                                                                          |
+| `--pivot-window-s` below the table's bucket width              | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first.                                                                                                                                                                                                                                              |
+| A quote leg that is not a peg or pivot reference               | A mistyped id (one digit dropped) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                                                                                                              |
+| A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                                                                                                            |
+| `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `ResetPlainModeOnPivotLeg`                                     | The plain mode on an XLM or USDT leg. The pivot refills such a row only with a USDC/USD rate AND a reference inside `--pivot-window-s`, and the plain mode checks neither, so it zeroes rows in the middle of history that nothing can refill. Re-run with `--reset-require-pivot-usdc-rate` (Appendix C).                                                                                                                  |
+| `ResetEpochBelowReference`                                     | `--reset-not-before` is below this table's first priced reference candle. Every row in the gap would be zeroed with nothing to refill it. The message prints the exact value to re-run with.                                                                                                                                                                                                                                |
+| `ResetEpochHasNoReference`                                     | There is no priced reference candle for the leg on this table — no epoch is safe. The message points to the first-reference query below.                                                                                                                                                                                                                                                                                    |
+| `ResetEpochUsdcUnresolved`                                     | A backstop: canonical USDC is missing from `prices.assets`, so the pivot has no USDC market to measure the leg against and never runs — no epoch is safe. Every mode that can reach the epoch check on a pivot leg refuses a missing USDC earlier: the 0228 mode as `ResetPivotRateLegIsNotAPivotReference`, the 0268 mode as `ResetExternalRateLegIsNotUsdc` (`usdc_id: 0`), the plain mode as `ResetPlainModeOnPivotLeg`. |
 
 ### The epoch is not optional tuning
 
-Below the date the pivot's reference market begins there is nothing to recompute
-from, so a reset row stays at `close_usd = 0` **permanently** — an ambiguous zero
-read unguarded by ~130 `argMax(close_usd, …)` sites, which is worse than the
-wrong number it replaced.
+Below the first candle of the pivot's reference market there is nothing to
+recompute from, so a reset row stays at `close_usd = 0` **permanently** — an
+ambiguous zero read unguarded by ~130 `argMax(close_usd, …)` sites, which is worse
+than the wrong number it replaced. The pivot's join matches its reference _at or
+before_ each bucket, so the boundary is the reference's first **candle**, to the
+second, not its first date.
 
-For canonical USDT (`asset_id = 111` on prod) the epoch is **2021-02-07 =
-`1612656000`**, the start of its USDC market. Task 0172 separately measured it at
-genuine par until June 2022, so the `$1` already stored below that date is
-_correct_ — this flag protects real data, it does not merely skip work.
+**Measure the epoch; do not pick one.** Run this on the same table you pass as
+`--table` — its `WHERE` is the tool's own guard predicate, word for word:
 
-### Prerequisite: purge the oracle rows FIRST
+```sql
+SELECT count()                          AS reference_rows,
+       toUnixTimestamp(min(timestamp))  AS first_reference_candle
+FROM prices.<TABLE> FINAL
+WHERE asset_id = <REF_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volume_base > 0 AND pf_trade_count > 0
+```
+
+Pass `first_reference_candle` as `--reset-not-before`. `reference_rows = 0` means
+there is no reference on that table at all, and **no epoch is safe**.
+
+For canonical USDT (`<ID>` from the lookup above) the value is **`1612724400` =
+2021-02-07 19:00 UTC** on `_1h` — for an Appendix C (0228-mode) run, because the
+plain mode no longer runs on USDT. The tool checks per table: it refuses any epoch
+below that table's own first reference candle, before any write and in a dry run
+too (`ResetEpochBelowReference`), and the refusal prints that table's value.
+
+As of 2026-09, `1612724400` should be admitted on all five coarse tables: each
+table's first reference bucket starts at or before it (the 16:00 bucket on `_4h`,
+the day, week and month buckets on `_1d`, `_1w`, `_1M`), and those buckets then
+keep their par value, which task 0172 measured as correct. That is derived from
+the incident's damage pattern, **not measured on every table — always run the
+query above instead of reusing the number.** Task 0286 phase 3 re-derives
+`pf_trade_count` for the history, so the first _price-forming_ reference can move
+later; the guard will then enforce the new value, and a remembered epoch will be
+refused.
+
+Task 0172 separately measured USDT at genuine par until June 2022, so the `$1`
+already stored below the epoch is _correct_ — this flag protects real data, it
+does not merely skip work.
+
+### ⚠️ An admitted epoch bounds only where the reference begins
+
+The epoch guard checks **only** where the reference begins. Above the epoch the
+pivot (since task 0228) writes a row only when **both** hold for its bucket:
+
+- a USDC/USD rate in `prices.usd_rate` — `oracle`, else `external` (the only one
+  before 2026-03-11 14:00 UTC) — within one day (or the grain's width, if wider)
+  before the bucket end;
+- a priced reference candle of the leg against USDC at or before the bucket,
+  within `--pivot-window-s`.
+
+The plain 0182 mode checked neither and is refused on a pivot leg
+(`ResetPlainModeOnPivotLeg`), so the pre-run counts the plain mode needed are
+gone with it.
+
+The 0228 mode (`--reset-require-pivot-usdc-rate`, Appendix C) re-opens only days
+that have both. Its gates are day-granular, so passing them is necessary, not
+sufficient: a bucket earlier in its day than that day's first reference with
+none inside `--pivot-window-s` before it, or a bucket inside a reference gap
+longer than `--pivot-window-s` within a covered day, can still be zeroed and not
+refilled. What catches that residue is the post-run damage check in "Extra
+verification" below, **on every table**.
+
+### Worked example — the 2026-08-19 boundary repair (lore 0182 → 0208)
+
+Task 0182's run passed `--reset-not-before 1612656000` — 2021-02-07 **00:00**
+UTC, 19 hours below the USDT/USDC reference's first candle at 19:00
+(`1612724400`). The pivot's join is at-or-before, so every bucket in
+`[1612656000, 1612724400)` was zeroed with nothing to refill it.
+
+- **157 candles destroyed:** 121 on `_1h` (hourly buckets 00:00-18:00 across 15
+  assets — not every asset traded every hour) and 36 on `_4h` (the 00/04/08/12
+  buckets × 9 assets; the 16:00 bucket contains the 19:00 trade, so it priced).
+  `_1d`, `_1w` and `_1M` had 0.
+- **The shortfall check stayed quiet.** `_1h` and `_4h` reported no shortfall
+  (`_1h`: 357,274 reset against 358,315 enriched; `_4h`: 157,858 against 158,319)
+  — the stranded rows were swamped by legitimately enriched ones. The damage check had been run only on the three
+  tables that warned, which are exactly the three structurally unable to show
+  this defect. A re-check of every table found it the next morning.
+- **Repaired by a versioned par insert** over that window on `_1h` and `_4h`,
+  gated on a count-only dry run returning exactly 121 and 36. A snapshot rollback
+  would have meant a `DROP` + `ATTACH` of partition `202102` on four tables to fix
+  157 rows. The SQL is in the archived task
+  `lore/1-tasks/archive/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md`.
+
+The tool now refuses that invocation twice over. The plain mode on the USDT leg
+is refused (`ResetPlainModeOnPivotLeg`), and the same epoch in the 0228 mode is
+refused too (`ResetEpochBelowReference`).
+
+### Oracle rows in the window
 
 The oracle tier runs **before** the peg-pivot tier and wins where it applies. If
-`prices.oracle_prices` still holds rows for the quote leg, the reset is undone by
+`prices.oracle_prices` holds rows for the quote leg inside the reset's window
+(widened one `--window-s` below `--reset-not-before`), the reset is undone by
 the next statement in the same pass, and the run reports a healthy repair over
 unchanged values — now labelled `method = 'oracle'`, which reads as _more_
 authoritative than what it replaced.
 
-The tool refuses rather than letting that happen:
+The tool refuses rather than letting that happen, in every mode:
 
 ```
-USD reset refused: prices.oracle_prices still holds N row(s) for quote asset_id …
+USD reset refused: prices.oracle_prices holds N row(s) for quote asset_id …
 ```
 
-That is task 0196 (done for USDT on 2026-08-13). If you see this error, purge and
-verify 0 before re-running — do not work around it.
+**Do not purge a polled leg's readings to get past it.** Canonical USDC and XLM
+have held live Reflector readings since 2026-03-11; deleting them cannot be
+undone, and it is never what the refusal needs. The fix is the window: pass
+`--reset-not-after` at or below the leg's first reading, so the reset stays
+below the span the oracle tier prices (the rate-gated modes default it to
+`USDC_ORACLE_EPOCH_S`; Appendix C precondition 5 says when that default is not
+enough). The plain mode has no default upper bound, so on canonical USDC it
+always needs one — see "The flags" above.
+
+The 2026-08-13 purge (task 0196) was a different case: those USDT rows were
+mis-attributed, not live readings. Purge only rows you have shown to be wrong.
 
 ### Extra verification, beyond Step 5
 
@@ -526,6 +667,11 @@ NNN row(s) re-opened by the USD reset, NNN recomputed
 They should match. If `rows_reset` exceeds `rows_enriched` the tool prints a loud
 block on stderr naming the shortfall — that run zeroed values it could not
 recompute. **Stop; do not continue to the next table.**
+
+**Run the damage check on every table, not only the ones that warned.** The
+shortfall guard selects the sample, and it is blind to boundary stranding: the
+157 candles the 2026-08-18 run destroyed (found on 2026-08-19) sat in `_1h` and
+`_4h`, the two tables that never warned (see the worked example above). A quiet table is not a checked one.
 
 > ⚠️ **Triage before you roll back.** The shortfall has a known false positive —
 > see the next section. On the 2026-08-18 `_1d` run it fired for 8 rows and the
@@ -552,15 +698,27 @@ legitimate zero:
 Both are dust — tokens at a price the stored scale cannot represent once
 multiplied by a sub-$1 rate.
 
-**Triage query.** Swap in the table you just ran. It asks the question that
-matters, which is not _how many rows are at zero_ but _did anything with a usable
-price end up at zero_:
+**Triage query.** Run it on every table you reset, one table at a time —
+every table, not only the ones that warned. It asks the question that matters,
+which is not _how many rows are at zero_ but _did anything with a usable price
+end up at zero_.
+
+The three queries in this section take the same three placeholders. Fill them
+in fresh for **each** table; do not paste one filled-in copy five times:
+
+- `<TABLE>` — the table you reset: `price_ohlcv_1h`, `_4h`, `_1d`, `_1w`, `_1M`,
+  **each in turn**. On 2026-08-18 all the damage was in `_1h` and `_4h`, the two
+  tables nobody queried.
+- `<QUOTE_ID>` — the `--reset-quote-asset-id` you passed (for USDT, the id
+  from the lookup above).
+- `<NOT_BEFORE>` — the `--reset-not-before` you passed (`1612724400` for USDT on
+  `_1h`).
 
 ```sql
 SELECT count() AS stranded_with_real_close
-FROM prices.price_ohlcv_1d FINAL
-WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612656000)
+FROM prices.<TABLE> FINAL          -- each of _1h, _4h, _1d, _1w, _1M in turn
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
   AND close_usd = 0
   AND close > 0.00000000000005
 ```
@@ -582,9 +740,9 @@ something you assumed:
 
 ```sql
 SELECT timestamp, asset_id, source, close, volume_base, volume_quote, close_usd
-FROM prices.price_ohlcv_1d FINAL
-WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612656000)
+FROM prices.<TABLE> FINAL          -- the same table as the triage query
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
   AND close_usd = 0
 ORDER BY timestamp
 ```
@@ -608,16 +766,16 @@ reset) and `_4h` (157,858) produced no shortfall at all.
 > means 8 rows in 41,573 — 0.02% — produce a stop-everything message. Read the
 > shortfall as _"look at these rows"_, not as _"the run failed"_.
 
-Then assert the defect cannot still be present. For the USDT case the fingerprint
-is an implied rate of ~1.0:
+Then assert the defect cannot still be present — again on every table you reset.
+For the USDT case the fingerprint is an implied rate of ~1.0:
 
 ```sql
 SELECT toYYYYMM(timestamp) AS m,
        count()                              AS candles,
        round(avg(close_usd / close), 6)     AS implied_rate
-FROM prices.price_ohlcv_1d FINAL
-WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612656000)
+FROM prices.<TABLE> FINAL          -- each of _1h, _4h, _1d, _1w, _1M in turn
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
   AND close > 0 AND close_usd > 0
 GROUP BY m ORDER BY m
 ```
@@ -633,6 +791,1058 @@ correct. It is value-idempotent but it is not free and it bumps `version` each
 time. Run it once per table, verify, and move on. The recurring hourly sweep pins
 the reset off and can never inherit it.
 
+## Appendix B — re-enrich USDC-quoted candles from the measured rate (task 0268)
+
+The appendix above corrects a value that was wrong because a tier used the wrong
+_reference_. This one corrects a value that was wrong because a tier used **no
+reference at all**.
+
+### When this applies
+
+Every USDC-quoted candle stamped before **2026-03-11 14:00 UTC** carries
+`close_usd = close × $1.00`, written by the peg tier, because until task 0268
+nothing in the enrichment could read a measured USDC/USD rate. USDC is not a
+dollar: it closed at **0.9681** on 2023-03-11 and traded as low as ~0.88
+intraday. Task 0247 measured **654,291** such candles on prod with an implied
+rate of exactly 1.0.
+
+This is a wrong value, not a missing one, so — exactly as in Appendix A — the
+normal repair cannot see it: every tier filters on `close_usd = 0`.
+
+The difference from Appendix A, and the whole point of the mode: the reset is
+scoped to buckets the imported series can actually refill. A bucket with no
+imported rate is **not re-opened at all**. See "The dry run is the gate" below
+for why that matters more than it sounds.
+
+### Preconditions
+
+All six, in order. None is optional.
+
+**Set the epoch ONCE, first.** Every query below that mentions the oracle epoch
+reads it as the client parameter `{epoch:UInt32}`, so the value is typed one
+time in this session and nowhere else:
+
+```sql
+SET param_epoch = 1773237600   -- prices_clickhouse::USDC_ORACLE_EPOCH_S, 2026-03-11 14:00 UTC
+```
+
+(`clickhouse-client` keeps it for the session; over HTTP pass `?param_epoch=`
+on each request.) The tool logs the same value at startup as `reset_not_after`;
+if the two differ, stop. The literal above is the only hand-typed copy in this
+runbook, and a unit test
+(`the_runbook_hand_types_the_oracle_epoch_once_and_it_is_the_constant`) pins
+it to the constant — two hand-typed epochs are how a precondition ends up
+measuring the wrong window and reporting 0 over the exact assumption it exists
+to check.
+
+0. **The server — and your session — are in UTC.** Run
+   `SELECT timezone(), serverTimezone()` and stop unless **both** say `UTC`.
+   Every day and hour boundary in this repo — the candle tables' unzoned
+   `toStartOfInterval`, the views' day buckets, the loader's and the tiers'
+   ASOF floors — is computed in an implicit timezone: the server's for every
+   client that does not override it, the session's for the queries you run
+   here. On a non-UTC server imported rows land on the wrong day and every gate
+   below misreads. `timezone()` alone reports only the SESSION's zone, which a
+   profile's `session_timezone` overrides, so it can pass a non-UTC server —
+   ask for `serverTimezone()` too. Task 0267's loader refuses to write unless
+   both are `UTC`; this campaign has no such guard in code, so this line IS the
+   guard.
+
+1. **Task 0267's `external` rows are loaded.** A count of **0 is a hard
+   refusal**, not a no-op — the tool exits with
+   `ResetRequiresExternalRates` and writes nothing. The check runs first thing
+   after connecting, before the month enumeration, and in a dry run too: a
+   dry run that reports `0 month(s)` on an unloaded series is an older build
+   of the tool (task 0228 closed that gap), not a clean rehearsal.
+
+   The procedure that produces those rows is
+   `docs/runbooks/load-external-usdc-rate.md` — run it to completion first.
+   ⚠️ It writes in two steps: a shadow load under
+   `method = 'external-candidate'`, then a promote to `method = 'external'`.
+   **This query counts only the promoted word.** So a count of 0 here alongside
+   rows under `external-candidate` does not mean the load failed — it means the
+   promote has not run, and the fix is that runbook's step 5, not a re-load.
+
+   ```sql
+   SELECT count() AS rows, min(timestamp) AS first, max(timestamp) AS last
+   FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'external'
+   ```
+
+   `first` must reach back at least as far as the earliest month you intend to
+   repair. Rows above that floor are simply not re-opened; rows below it never
+   were.
+
+   **For `price_ohlcv_1h`, the HOURLY file must be loaded and promoted too — not
+   only the daily one.** The tool refuses a sub-daily table otherwise
+   (`ResetRequiresHourlyRates`), and the refusal is not a formality: the reset is
+   **one-shot per row**. It re-opens only rows still carrying the $1 signature
+   (`close_usd = close`). On a daily-only load every hour of a covered day is
+   priced from that day's single row — the day CLOSE — and the row leaves the
+   signature for good, so loading the hourly file later cannot reach it. On
+   2023-03-11 the 12:00 candle would stay at 0.96812 instead of Chainlink's
+   0.90687 (about 7% off). Daily and coarser tables are not gated: at the bucket
+   end the daily row and the 23:00 hourly row carry the same close.
+
+   ```sql
+   SELECT countIf(timestamp != toStartOfDay(timestamp, 'UTC')) AS hourly_rows
+   FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'external'
+   ```
+
+   Expect `hourly_rows > 0` (43 046 on the versioned files) before touching
+   `price_ohlcv_1h`.
+
+2. **Confirm 0267 stamps its rows at the START of their UTC bucket.** The tier
+   resolves the rate at the bucket's END with an ASOF `rts < bend`, so a
+   bucket-start stamp gives every candle in a bucket that bucket's rate. A
+   bucket-END convention resolves every one to the **previous** bucket's rate —
+   an off-by-one error that produces entirely plausible numbers and fails
+   nowhere.
+
+   ⚠️ 0267 loads at **two grains** (`--grain daily|hourly`), so the rows are at
+   full hours, of which the midnights are a subset. Check the hour, and check
+   that the midnights are all still present:
+
+   ```sql
+   SELECT countIf(timestamp != toStartOfHour(timestamp, 'UTC')) AS not_full_hour,
+          countIf(timestamp  = toStartOfDay(timestamp, 'UTC'))  AS midnights,
+          count() AS rows
+   FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'external'
+   ```
+
+   Expect `not_full_hour = 0`, `rows` equal to precondition 1's count, and
+   `midnights` equal to the number of covered days (1 872 on the versioned
+   files, one per day of the daily series). Anything else — stop and settle the
+   convention with whoever owns 0267 before running.
+
+   Two traps in that one expression, both of which this runbook has stepped in.
+   **Not `toTime()`**: it anchors the time-of-day to 1970-01-02, so an
+   expectation written against it halts a correct load. And **name the zone**:
+   `timestamp` is a bare `DateTime` and nothing pins the server's timezone
+   (`docker-compose.yml` sets no `TZ`; `ch-prod-01`'s is undocumented), so an
+   unzoned `toStartOfDay`/`toStartOfHour` resolves locally — on a UTC+2 server
+   the unzoned day form reports every single row as not-midnight and this gate
+   blocks a correct load.
+
+3. **Confirm `oracle_prices` holds no canonical-USDC reading before the epoch.
+   BLOCKING.** Two things rest on "no poll priced USDC before
+   `USDC_ORACLE_EPOCH_S`": the API's read-time label (a scaled USDC-quoted
+   candle below the epoch is reported `method: external`), and the external
+   tier's recomputation of `volume_quote_usd` on every pre-epoch candidate
+   (its "oracle values win" argument is that no oracle reading exists there
+   to win). The epoch was measured on `usd_rate`, but the oracle tier READS
+   `prices.oracle_prices`, and `usd_rate`'s oracle rows are copied out of it
+   behind a watermark — so the table to ask is `oracle_prices`:
+
+   ```sql
+   SELECT count() AS pre_epoch_readings, min(timestamp) AS first
+   FROM prices.oracle_prices
+   WHERE asset_id = ( SELECT asset_id FROM prices.assets FINAL
+                      WHERE asset_code = 'USDC' AND contract_address = ''
+                        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' )
+     AND oracle_name = 'reflector'
+     AND timestamp < toDateTime({epoch:UInt32})
+   ```
+
+   Must be **0**. A non-zero count is a STOP for this mode: the tool refuses
+   the run with `ResetBlockedByPreEpochOracleRows` (it runs this exact count,
+   independent of `--reset-not-before`), and do not work around it — triage
+   the rows first (purge a mis-attribution as task 0196 did, or move the
+   epoch, which is a code change with its own test). Zero here also settles
+   the `usd_rate` premise the label arm rests on, since every `usd_rate`
+   oracle row originates in this table.
+
+4. **The cleanup worker stays DARK.** Its EventBridge rule is disabled on
+   purpose — it shredded the 0182/0201 repair campaign. Confirm it is still
+   disabled before starting, exactly as Appendix A requires.
+
+5. **FREEZE snapshots exist and were verified.** Same rule, same reason, same
+   `--snapshots-verified` assertion as Appendix A. A reset with no rollback
+   point is not a repair.
+
+   Take them with Step 3b's script, but **not as written** — it is task 0114's,
+   and two of its lines are wrong for this campaign:
+   - **The range.** Step 3b freezes `BETWEEN 202402 AND 202607`. This campaign
+     rewrites the months its dry run lists, which on the versioned files run
+     from 2021-01 to 2026-03, so use `BETWEEN 202101 AND 202603` (or the dry
+     run's own first and last month, if they differ). A month outside the
+     frozen range has no rollback point at all.
+   - **The name.** Use `NAME="repair_0268_prices_${TBL}_${p}"`, not
+     `repair_0114_…`. The prefix is not cosmetic: a `repair_0114_…` snapshot
+     left over from the 2026-07 campaign makes the script report
+     `already-frozen … KEPT` and keep the OLD copy — so the "rollback point"
+     for those months would be the state before 0114's repair, and restoring it
+     would undo that campaign too.
+
+   Run it for all five tables, then verify exactly as Step 3b does, with the
+   new prefix: the snapshot count per table is non-zero and `du -sh` of
+   `shadow/` is not near zero.
+
+   ```bash
+   ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+     'docker exec app-clickhouse-1 ls /var/lib/clickhouse/shadow/ | grep -c repair_0268_prices_price_ohlcv_1d_'
+   ```
+
+   The rollback below and Step 7's `SYSTEM UNFREEZE` then take the
+   `repair_0268_…` names.
+
+   **Without host access** (task 0276, 2026-09-11): `FREEZE` is plain SQL, so
+   any mTLS client certificate whose user holds `ALTER` on `prices` can take the
+   snapshots from a laptop — the same loop over `system.parts`, sent with
+   `curl`. Ask for `alter_partition_verbose_result=1` on each request: the
+   statement then returns one row per frozen part, and **frozen parts =
+   active parts of that partition** is the verification, in place of `ls` and
+   `du` on `shadow/`. On that run: 315 partitions (5 tables × 202101–202603),
+   807 parts, all matched, none pre-existing. Only a _restore_ (copying out of
+   `shadow/`) still needs the host.
+
+6. **The NEW `prices-api` binary is already live — deploy it BEFORE this
+   campaign, never after.** The binary on production before this task labels a
+   USDC-quoted candle `peg` when `close_usd = close` and `oracle` otherwise, so
+   every candle this campaign re-prices below the epoch would be published as a
+   Reflector reading — a poll that did not exist before 2026-03-11 14:00 UTC.
+   Measured on the re-priced 2023-03-11 candles: old binary `oracle`, new
+   binary `external`. The new binary labels each row by its CURRENT state
+   (`close_usd = close` -> `assumed-par`, re-priced -> `external`), so it is
+   truthful at every moment of a campaign that runs for hours. Its schema
+   prerequisite (`usd_rate.quality`) is covered by the 0267 runbook.
+
+   Check: a USDC-quoted candle before 2026-03-11 on `/v1/assets/<asset>/ohlcv`
+   reports `assumed-par`, never `peg`. Seeing `peg` means the old binary — STOP.
+
+7. **No scheduled writer can reach the campaign's rows.** Checked, not assumed:
+   the enrichment Lambda and its historical sweep work only
+   `price_ohlcv_1m` (`CLICKHOUSE_TABLE`, 7-day retention — no pre-epoch rows),
+   and the coarse sweep works the trailing `COARSE_SWEEP_LOOKBACK_MONTHS`
+   (default 2). Confirm that value has not been raised far enough to reach
+   2026-02; if it has, disable the `prices-<env>-coarse-sweep` rule for the
+   duration. A sweeper running pre-0268 code on a row this campaign just zeroed
+   would re-peg it at $1.
+
+### The granularities that actually hold deep history
+
+`price_ohlcv_1h`, `_4h`, `_1d`, `_1w`, `_1M`. Do not attempt the others:
+
+- `_15m` has a 30-day retention, so it holds no 2023 rows to repair;
+- `_1m` was largely dropped by the cleanup worker for 2025-02 → 2026-02, and
+  `--table price_ohlcv_1m` is refused by the tool outright — it is the live base
+  table the scheduled Lambda owns.
+
+For `_1w` and `_1M`, end the campaign at `--end-month 202602`, not `202603`:
+the bucket that STARTS in early March 2026 straddles the epoch (its start is
+below it, so it is eligible; ten of its days are above it, where the oracle
+priced things). Inspect that one bucket by hand if it matters — task file,
+Issues 8.
+
+### The flags
+
+```bash
+--reset-quote-asset-id <USDC_ID>    # canonical USDC's asset_id on prod
+--reset-not-before 0                # all of deep history
+--reset-require-external-rate       # the 0268 mode
+```
+
+There is a fourth flag, `--reset-not-after`, and it is deliberately NOT in the
+block above: it defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`
+whenever `--reset-require-external-rate` is passed — the **same constant** the
+API's `external` label arm keys on and the value you set as `param_epoch`
+above. The tool logs the resolved value at startup (`reset_not_after`,
+`defaulted = true`). Pass it explicitly only if you mean something else; two
+hand-typed epochs are how the wire label and the reset window drift apart with
+nothing failing loudly.
+
+The tool refuses a window that can match nothing: `--reset-not-before` at or
+above `--reset-not-after` (a mistyped year, the epoch pasted into the wrong
+flag) exits with `ResetWindowEmpty` before a connection is opened, dry run or
+not. Without that refusal the run would report a clean, empty repair.
+
+Every other refusal that does not depend on the month fires first thing after
+connecting, before any month is enumerated, dry run included: a quote leg that
+is not canonical USDC (`ResetExternalRateLegIsNotUsdc`), zero `external` rows
+loaded (`ResetRequiresExternalRates`), a leg no tier can price
+(`ResetTargetHasNoPricingPath`), an oracle-shadowed span
+(`ResetBlockedByOracleRows`), no hourly rows on a sub-daily table
+(`ResetRequiresHourlyRates`) and a pre-epoch USDC poll
+(`ResetBlockedByPreEpochOracleRows`). Until task 0228 all of them lived only in
+the per-month pass, which a dry run never builds, so a rehearsal over the wrong
+leg or an unloaded series ended green; 0228's second review round found the
+same for the other four and moved the whole list into one method the driver and
+the pass both run (`assert_reset_is_admissible`). What the dry run accepts, the
+real run accepts.
+
+`--reset-require-external-rate` narrows the candidate set to
+`close_usd = close` (the peg tier's exact signature) **on the days the imported
+series covers**. Both halves matter: the first keeps oracle- and external-priced
+candles out, the second is task 0182's lesson as a predicate.
+
+`<USDC_ID>` is canonical USDC's `asset_id` on prod:
+
+```sql
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDC' AND contract_address = ''
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+```
+
+Dry run first, one table at a time:
+
+```bash
+./target/release/coarse-repair --transport hetzner --table price_ohlcv_1d \
+  --start-month 202001 --end-month 202603 \
+  --reset-quote-asset-id <USDC_ID> --reset-not-before 0 \
+  --reset-require-external-rate \
+  --dry-run
+```
+
+⚠️ **`--transport hetzner` is not optional.** `--transport` defaults to
+`local`, i.e. plain HTTP to `CLICKHOUSE_URL`, itself defaulting to
+`http://localhost:8123`. Without the flag this command reads — and, once
+`--dry-run` is dropped, WRITES — whatever ClickHouse answers on the operator
+box's loopback, and reports it as the campaign.
+
+Then the real run, keeping `--transport hetzner`, dropping `--dry-run` and
+adding `--skip-snapshot --snapshots-verified` per Appendix A's rules. Repeat
+for `_1h` and `_4h` with the same months, and for `_1w` and `_1M` with
+`--end-month 202602` (see above) **and `--pivot-window-s 604800` (`_1w`) /
+`--pivot-window-s 2678400` (`_1M`)** — the tool refuses a pivot window shorter
+than the bucket once a reset is on, and exits before connecting.
+
+`--start-month 202101` is the better start than `202001`: the imported series
+begins 2021-01-25, so 2020 holds no reset candidate, and starting there keeps
+every month the run writes inside the `202101–202603` FREEZE range (the 2020
+months would otherwise get additive zero-fills with no snapshot).
+
+### ⚠️ The dry run is the gate — and zero candidates is a STOP
+
+**A dry run reporting ZERO candidate months is not an all-clear.** That exact
+false green is how task 0182 stayed invisible for a month: the driver enumerated
+one predicate while the statement acted on another, so a table with 44,657 wrong
+values reported "no months with enrichable zeros" and looked identical to a
+clean one.
+
+Expected order of magnitude, so you can tell a real result from a silent
+mismatch: task 0247 measured **654,291** pre-oracle USDC-quoted candles at an
+implied rate of exactly 1.0 across all granularities, and 0182's comparable
+campaign touched **567,232** rows in about **4 hours**. If a dry run over
+2020-2026 reports zero months, or a few dozen rows, something is wrong with the
+predicate or with precondition 1 — do not proceed.
+
+⚠️ **But the dry run cannot show the reset population, so it is only half a
+gate.** Its per-month `zeros` is the driver's enumeration predicate —
+`CANDIDATE_PRED` (**every** unpriced candle with volume, any quote) **OR** the
+reset predicate — so a table full of exotic-quote zeros reports millions
+whatever the reset would do (72.7 M on `_1h` in 2026-09). And 654,291 turned
+out to be the `_1d` figure alone. Count the reset candidates yourself, per
+table, with the tool's own predicate (`reset_pending_pred` in `ch_enrich.rs`,
+epoch from the session parameter):
+
+```sql
+SELECT count() AS reset_candidates, uniqExact(toYYYYMM(timestamp)) AS months,
+       min(timestamp), max(timestamp)
+FROM prices.price_ohlcv_1d FINAL
+WHERE quote_asset_id = <USDC asset_id> AND timestamp >= toDateTime(0)
+  AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0
+  AND timestamp < toDateTime({epoch:UInt32}) AND close_usd = close
+  AND toDate(timestamp, 'UTC') IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.usd_rate FINAL
+      WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+        AND contract_address = '' AND method = 'external' AND usd_rate > 0)
+```
+
+Measured on prod on 2026-09-11 (task 0276), and what the real run then took:
+
+| Table | Reset candidates | Months | Run time    |
+| ----- | ---------------- | ------ | ----------- |
+| `_1d` | 654,616          | 63     | 2 min 07 s  |
+| `_4h` | 2,701,406        | 63     | 6 min 10 s  |
+| `_1h` | 6,420,215        | 63     | 12 min 55 s |
+| `_1w` | 120,961          | 62     | 1 min 30 s  |
+| `_1M` | 38,724           | 61     | 1 min 23 s  |
+
+`rows_reset − rows_enriched` came out at 150 / 299 / 445 / 75 / 40: exactly the
+`close = 0` rows with volume, which match the par signature at 0 = 0, get their
+`volume_quote_usd` recomputed and keep `close_usd = 0`. That gap is expected;
+a gap larger than the table's `close = 0` count is the abort signal below.
+
+### The baseline (before)
+
+**Measure it live, per table, immediately before the run, and write the numbers
+down — they are the campaign's reference, not the 654,291 in the task title.**
+That figure is a one-off measurement from tasks 0247/0168; the repo also quotes
+522,321 for the same population, and production has kept changing since. A
+stale reference makes the before/after comparison unable to tell a failed
+repair from ordinary data drift.
+
+Per table, the population about to change:
+
+```sql
+SELECT count() AS pegged
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.close_usd = p.close AND p.close_usd > 0
+  AND p.timestamp < toDateTime({epoch:UInt32})
+```
+
+And the falsifier's own row, per granularity, before the run:
+
+```sql
+SELECT toFloat64(close_usd) / toFloat64(close) AS implied_rate
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'XLM' AND issuer_address = ''
+               AND contract_address = '' ) AS x ON x.asset_id = p.asset_id
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.timestamp >= toDateTime(1678492800) AND p.timestamp < toDateTime(1678579200)
+```
+
+It must read **exactly 1.0** before the run. On `_1h`/`_4h`/`_1d` the
+after-check expects it to have moved to ~0.9681.
+
+On `_1w` and `_1M` it will read ~1.0 AFTER the run too — the tier prices a
+bucket from ONE rate resolved at the bucket's END (decision G), and the week
+containing 03-11 ends on 03-13, the month on 04-01, when USDC was back at par.
+The depeg is invisible at those grains by construction; `_1d` is the coarsest
+grain that can carry it. So for those two the after-check verifies the
+MECHANISM instead, and needs the bucket's `max(version)` from before the run.
+**Record both numbers** — the after-check takes them as input and refuses to
+pass without them:
+
+```sql
+SELECT max(version) AS version_before_1w
+FROM prices.price_ohlcv_1w AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'XLM' AND issuer_address = ''
+               AND contract_address = '' ) AS x ON x.asset_id = p.asset_id
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.timestamp = toDateTime(1678060800);   -- 2023-03-06, the week of the depeg
+
+SELECT max(version) AS version_before_1M
+FROM prices.price_ohlcv_1M AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'XLM' AND issuer_address = ''
+               AND contract_address = '' ) AS x ON x.asset_id = p.asset_id
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.timestamp = toDateTime(1677628800);   -- 2023-03-01, the month of the depeg
+```
+
+### The abort signal
+
+`rows_reset` far exceeding `rows_enriched` means values were discarded and not
+recomputed — the one outcome worse than the defect. The tool prints this itself
+and tells you to stop. **Do not continue to the next table.** Roll the current
+one back from its FREEZE snapshot and work out why the reset re-opened rows the
+external tier could not refill: under this mode the predicates are shared, so a
+large shortfall points at precondition 2 (a day-end stamping convention) rather
+than at the reset.
+
+### After — the falsifier
+
+**First, the check that proves nothing was missed.** A USDC-quoted candle that
+still carries `close_usd = close` after the campaign is correct in exactly two
+cases: no imported rate existed in the tier's window (before 2021-01-25, or a
+gap), or the rate there was exactly 1.0 (it happens — Chainlink read par to the
+last digit on 173 of the 1,872 covered days). Anything else is a candle the
+repair did not reach. This query mirrors the external tier's own lookup — an
+ASOF on the bucket END within `max(bucket_width, 1 day)` — and must return **0**
+per table:
+
+```sql
+-- price_ohlcv_1h: bend = timestamp + 3600, window 86400
+-- price_ohlcv_4h: bend = timestamp + 14400, window 86400
+-- price_ohlcv_1d: bend = addDays(timestamp, 1, 'UTC'), window 86400
+SELECT count() AS unexplained_dollar
+FROM ( SELECT p.timestamp + 3600 AS bend, 1 AS k
+       FROM prices.price_ohlcv_1h AS p FINAL
+       WHERE p.quote_asset_id = <USDC asset_id>
+         AND p.timestamp < toDateTime({epoch:UInt32})
+         AND p.close_usd = p.close AND p.volume_quote > 0 ) AS p
+ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS usd
+                 FROM prices.usd_rate FINAL
+                 WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+                   AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                   AND contract_address = '' AND method = 'external' AND usd_rate > 0 ) AS r
+  ON r.k = p.k AND r.rts < p.bend
+WHERE r.rts != toDateTime(0) AND r.usd != 1
+  AND (toUInt32(p.bend) - toUInt32(r.rts)) <= 86400
+```
+
+Verified against the real series: a par candle from 2020 (no rate) and one at
+2021-01-30 01:00 (rate exactly 1.0) are not counted; an un-repaired 2023-03-11
+09:00 candle (rate 0.90992869) is. A non-zero count means re-run the campaign
+for that table — the rows are still on the $1 signature, so a second pass
+reaches them.
+
+⚠️ **As written, this query is never 0 after a correct run.** On 2026-09-11
+(task 0276) it returned 14,041 / 7,556 / 2,855 on `_1h` / `_4h` / `_1d`, and
+none of them was a missed candle. Two populations match `close_usd = close`
+legitimately:
+
+- **`close = 0` dust** — 0 = 0; the tier cannot give it a non-zero USD close.
+- **Truncation.** The tier writes `CAST(r.usd * p.close AS Decimal(38, 14))`,
+  which truncates. For a sub-micro close and a rate a few 10⁻⁸ off par the
+  product truncates back to exactly `close` (or to 0 at `close = 1e-14`), so
+  the stored value _is_ the repriced value.
+
+Replace the `SELECT count()` line with this breakdown and require `real = 0`:
+
+```sql
+SELECT count() AS unexplained_dollar_raw,
+       countIf(p.close = 0) AS close_zero_dust,
+       countIf(p.close > 0 AND CAST(r.usd * p.close AS Decimal(38, 14)) = p.close) AS tier_expr_equals_close,
+       countIf(p.close > 0 AND CAST(r.usd * p.close AS Decimal(38, 14)) = 0) AS tier_expr_truncates_to_zero,
+       countIf(p.close > 0 AND CAST(r.usd * p.close AS Decimal(38, 14)) NOT IN (p.close, 0)) AS real
+```
+
+(with `p.close AS close` added to the inner `SELECT`). 0276 measured `real = 0`
+on all three tables.
+
+`native` on 2023-03-11 must now read **~3% below** its USDC-denominated close
+on every grain whose bucket ENDS inside the depeg — `_1h`, `_4h`, `_1d`. As SQL,
+per table, it is the baseline query above: the implied rate must have moved
+from `1.0` to **0.9681** (exactly, against a daily series; lower if 0267 ships
+hourly rows for the stress days). The test holds those grains UNDER `0.99` — a
+ceiling par cannot satisfy and a PARTIAL pass (a few bps under par) cannot
+either — rather than inside a band around 0.9681, because a band wide enough
+to be safe contains 1.0.
+
+`_1w` and `_1M` are judged by the MECHANISM, not the rate (see "The baseline"
+above for why the rate cannot show anything there): the bucket's `max(version)`
+must exceed the value you recorded before the run, no row with volume may sit at
+`close_usd = 0`, and the par signature `close_usd = close` may survive only if
+the imported series' own rate at the bucket end is exactly 1.0 — in which case
+the stored value is right and `/ohlcv` will nonetheless label it `assumed-par`
+(task file, Issues 9; a known ambiguity of the read-time label, not a repair
+defect). Hand the two recorded versions to the test as environment variables.
+
+On every grain the test also counts rows at `close_usd = 0` **with volume** over
+the same window: any such row is the 0182 outcome (reset, never refilled) and
+fails the check outright. Rows at zero WITHOUT volume are the permanent
+volume-zero floor no tier prices; they are reported as context, never as a
+failure.
+
+As a test, which also checks the control date:
+
+```bash
+CLICKHOUSE_URL=... CH_DATABASE=prices \
+POST_RUN_0268_VERSION_BEFORE_1W=<version_before_1w> \
+POST_RUN_0268_VERSION_BEFORE_1M=<version_before_1M> \
+  cargo test -p enrichment-worker --test post_run_0268_it -- --ignored
+```
+
+Against prod from an operator laptop, `CLICKHOUSE_URL` cannot reach the
+cluster: drop it, export the same `CH_DOMAIN` / `MTLS_*` variables as the
+campaign, and add `--features aws-mtls` to the `cargo test` (task 0276).
+
+Both tests are expected to FAIL before the pass and pass after it. The second
+one (`usdc_is_back_at_par_a_few_days_later`) exists so the first cannot be
+satisfied by a table priced uniformly low.
+
+Then walk `/ohlcv` for a non-USDC asset over the repaired span and confirm the
+`method` field reads `external` on the scaled pre-epoch buckets and
+`assumed-par` on any bucket the series did not cover. `USDC:<issuer>` itself is
+not this campaign's output: it is USDC's own series, which task 0267 already
+serves from the imported rows — `external` below the epoch (`0.96812` on
+2023-03-11), not `peg` — and which nothing here changes.
+
+### Rollback
+
+Identical to Appendix A: `ALTER TABLE … ATTACH PARTITION … FROM …` out of the
+frozen copies, per month — the `repair_0268_…` ones from precondition 5. The reset is a versioned INSERT, never a mutation, so
+the pre-reset rows are still on disk under their old version.
+
+### Run it once
+
+Reset mode is **not a fixed point across invocations** — the same warning as
+Appendix A, with one addition specific to this mode: a second run re-opens the
+already-corrected rows and rewrites them from the same imported series, so the
+values do not change but `version` climbs and the FREEZE rollback point becomes
+less useful with every pass. Run it once per table, verify, move on.
+
+## Appendix C — re-enrich the PIVOT legs from the measured USDC rate (task 0228)
+
+Appendix B corrected the USDC leg, which was priced from no reference at all.
+This one corrects everything priced **through** that leg: a candle quoted in XLM
+or USDT was valued at `close × vwap(ref/USDC)` — a number denominated in
+**USDC**, stored in a dollar column.
+
+### When this applies
+
+Every XLM- and USDT-quoted candle the pivot tier priced before
+**2026-03-11 14:00 UTC** carries that error. It is the same 3.19% on the depeg
+day as Appendix B, one hop further out: once 0268 rescaled the USDC leg, these
+became the last population of stored USD values still assuming USDC = $1.
+
+Phase 0 measured the pre-epoch population on 2026-09-11:
+
+| Table  | XLM-quoted | USDT-quoted |
+| ------ | ---------- | ----------- |
+| `_15m` | 8.9 M      | 0.57 M      |
+| `_1h`  | 64.8 M     | 0.70 M      |
+| `_4h`  | 29.0 M     | 0.26 M      |
+| `_1d`  | 10.4 M     | 70.7 k      |
+| `_1w`  | 3.3 M      | 11.8 k      |
+| `_1M`  | 1.4 M      | 4.4 k       |
+
+⚠️ **`price_ohlcv_1m` is OUT OF SCOPE, by decision and by refusal.** Its 72.5 M
+XLM-quoted rows are not in the table above: it is the live base table the
+scheduled Lambda owns, and `--table price_ohlcv_1m` exits with an error before
+connecting. The SQL fix itself applies to `_1m` as it does to every table — new
+enrichment there is already scaled — but no reset is run against it. Do not
+"fix" this by reaching for another entrypoint.
+
+Like Appendices A and B this is a wrong value, not a missing one, so the normal
+repair cannot see it: every tier filters on `close_usd = 0`.
+
+### Preconditions
+
+All six, in order. None is optional. The epoch parameter set at the top of
+Appendix B is assumed to be in scope for this session; every query below reads
+it as `{epoch:UInt32}`.
+
+0. **The server — and your session — are in UTC.** Appendix B, precondition 0,
+   verbatim — `SELECT timezone(), serverTimezone()`, both must say `UTC`. The
+   day-set predicate this mode shares with 0268 names the zone at the
+   expression, but the candle tables' own bucket boundaries do not.
+
+1. **Task 0267's `external` rows are loaded and PROMOTED.** Appendix B's
+   precondition 1 query, unchanged. A count of **0 is a hard refusal** — the
+   tool exits with `ResetRequiresExternalRates` and writes nothing, because an
+   empty day-set would report a clean, entirely empty campaign. Checked before
+   the month enumeration, dry run included (`CoarseRepairDriver::run`), so the
+   refusal is the FIRST thing an unloaded series produces, not something the
+   per-month pass may or may not reach.
+
+   ⚠️ Unlike Appendix B, **the hourly file is not required here, at any grain.**
+   0268 needs it because its candidate is the peg tier's par signature
+   `close_usd = close`, which a row priced from the day close stops carrying —
+   one shot, unrepeatable. A pivoted row never carried that signature, so this
+   mode's candidate still matches after a repair and a later hourly load can be
+   picked up simply by re-running. There is no `ResetRequiresHourlyRates` refusal
+   on this path. Load it anyway if you can: it makes the intraday grains more
+   accurate on the stress days.
+
+2. **The cleanup worker is still dark.** It is deployed but disabled, and it
+   must stay that way for the duration: its 13-month policy is what would remove
+   the `oracle_prices` history this campaign's sibling work depends on, and a
+   deletion mid-campaign makes a partial run indistinguishable from a complete
+   one. Confirm with whoever owns the deployment before starting, and again
+   before the falsifier.
+
+3. **The FREEZE snapshots exist and were verified.** Appendix A's rules apply
+   unchanged: `prices_writer` cannot FREEZE, so the CH admin takes the snapshots
+   out of band (Step 3b) and you pass `--skip-snapshot --snapshots-verified`.
+   Verify first — `ls /var/lib/clickhouse/shadow/ | grep repair_` plus a
+   non-trivial `du`. This campaign's population is roughly 19× Appendix B's, so
+   budget the disk before the first partition, not after the tenth.
+
+   **STOP if nobody has taken them.** A reset's only rollback is
+   `ATTACH PARTITION` from the frozen copy.
+
+4. **The leg's identity resolves to exactly one id, and that id to exactly one
+   identity. BLOCKING.** An asset code is not an identity on Stellar; filing a
+   campaign against a shared or duplicated `asset_id` reprices an asset that
+   never had that price (task 0173's defect, task 0139's guard). Both counts
+   must be **1**:
+
+   ```sql
+   SELECT count() AS identities_with_this_code
+   FROM prices.assets FINAL
+   WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '';
+
+   SELECT count() AS identities_sharing_this_id
+   FROM prices.assets FINAL
+   WHERE asset_id = ( SELECT asset_id FROM prices.assets FINAL
+                      WHERE asset_code = 'XLM' AND issuer_address = ''
+                        AND contract_address = '' );
+   ```
+
+   Repeat for the USDT leg with
+   `asset_code = 'USDT' AND contract_address = '' AND issuer_address = '<USDT_ISSUER>'`.
+
+5. **`oracle_prices` holds no reading for the leg below the reset's upper bound.
+   BLOCKING, and this is the one most likely to stop you.** The oracle tier runs
+   before the pivot and wins where it applies, so the tool refuses
+   (`ResetBlockedByOracleRows`) while any reading for the leg sits inside
+   `[--reset-not-before − window_s, --reset-not-after)`. XLM **is** polled — it
+   has held Reflector readings since 2026-03-11 — and `--reset-not-after`
+   defaults to 14:00 that day. **A single XLM reading stamped earlier that day
+   refuses the entire campaign: every table, every month.**
+
+   ```sql
+   SELECT count() AS readings_below_the_bound, min(timestamp) AS first
+   FROM prices.oracle_prices
+   WHERE asset_id = ( SELECT asset_id FROM prices.assets FINAL
+                      WHERE asset_code = 'XLM' AND issuer_address = ''
+                        AND contract_address = '' )
+     AND oracle_name = 'reflector'
+     AND timestamp < toDateTime({epoch:UInt32})
+   ```
+
+   If this is **0**, take the default and move on. If it is non-zero, do **not**
+   purge anything and do **not** widen the window: pass an explicit
+   `--reset-not-after <first>` using the `first` this query returns, so the
+   campaign stops below the leg's earliest poll. Every row above that instant is
+   one the oracle tier priced, which this campaign has no business re-opening.
+
+   Run it again for the USDT leg before the USDT pass, with the USDT identity
+   from precondition 4 in the subquery. The same rule applies to whatever it
+   returns: bound the window, do not purge.
+
+### The granularities
+
+`price_ohlcv_15m`, `_1h`, `_4h`, `_1d`, `_1w`, `_1M` — six tables, and `_1m` is
+refused (see "When this applies").
+
+⚠️ Appendix B says `_15m` has a 30-day retention and holds no 2023 rows. Phase 0
+measured 8.9 M pre-epoch XLM-quoted `_15m` rows on 2026-09-11, so one of the two
+is stale. Settle it with a count before you decide, not by trusting either line:
+
+```sql
+SELECT count() AS rows, min(timestamp) AS first
+FROM prices.price_ohlcv_15m FINAL
+WHERE quote_asset_id = <XLM_ID> AND timestamp < toDateTime({epoch:UInt32})
+```
+
+For `_1w` and `_1M`, end at `--end-month 202602`, not `202603`: the bucket that
+STARTS in early March 2026 straddles the epoch. Same caveat as Appendix B.
+
+### The flags
+
+**One leg per run, one table per run.** The blast radius has to be nameable
+before the statement runs, so the mode takes a single `quote_asset_id` — the
+campaign is two passes per table (XLM, then USDT), twelve in total.
+
+```bash
+--reset-quote-asset-id <XLM_ID>        # the pivot leg, one per run
+--reset-not-before <FIRST_REF_CANDLE>  # measured, see below — NOT a round date
+--reset-require-pivot-usdc-rate        # the 0228 mode
+```
+
+`--reset-not-after` is deliberately not in the block: it defaults to the same
+constant you set as `param_epoch`, and the tool logs the resolved value at
+startup (`reset_not_after`, `defaulted = true`). Pass it explicitly only if
+precondition 5 told you to.
+
+⚠️ **`--reset-not-before` must be the MEASURED first candle of this leg's own
+USDC market.** Task 0182's reset epoch sat 19 hours before its reference
+market's first candle and 157 candles were zeroed with nothing able to refill
+them — see Appendix A's worked example; for USDT on `_1h` the measured value is
+`1612724400` (as of 2026-09 — measure it, do not reuse it). Measure it per leg —
+`<LEG_ID>` is the `--reset-quote-asset-id` of THIS run, XLM's id on the XLM
+pass and USDT's on the USDT pass, never one reused for the other — on the table
+you are about to repair (the same `<TABLE>` as `--table`); the `WHERE` is the
+tool's own guard predicate:
+
+```sql
+SELECT count()                          AS reference_rows,
+       toUnixTimestamp(min(timestamp))  AS first_reference_candle
+FROM prices.<TABLE> FINAL
+WHERE asset_id = <LEG_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volume_base > 0 AND pf_trade_count > 0
+```
+
+`reference_rows = 0` means no epoch is safe for that leg on that table.
+
+The ids — `<LEG_ID>` is the XLM or the USDT one, `<USDC_ID>` is USDC's:
+
+```sql
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '';
+
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDT' AND contract_address = ''
+  AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V';
+
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDC' AND contract_address = ''
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+```
+
+The tool refuses, before opening a connection:
+
+- `--reset-require-pivot-usdc-rate` together with
+  `--reset-require-external-rate` (`ResetModesAreMutuallyExclusive`) — they
+  select different candidate signatures and the intersection is empty;
+- `--reset-not-before` at or above `--reset-not-after` (`ResetWindowEmpty`);
+- `--pivot-window-s` shorter than the table's bucket width, which with a reset
+  in play discards a value and then fails to recompute it.
+
+And first thing after connecting, before any month is enumerated, **dry run
+included** (they need `prices.assets`, `prices.usd_rate` and
+`prices.oracle_prices`, so not before the connection):
+
+- forgetting `--reset-require-pivot-usdc-rate` on an XLM or USDT leg
+  (`ResetPlainModeOnPivotLeg`) — this mode is the only one that re-opens a pivot
+  leg;
+- a quote leg the scaled pivot cannot refill
+  (`ResetPivotRateLegIsNotAPivotReference`) — canonical USDC, which is
+  Appendix B's leg, any non-reference asset, **and any leg at all while
+  canonical USDC is missing from `prices.assets`** (reported as `usdc_id: 0`),
+  because the pivot's reference market is keyed on USDC's `asset_id` and never
+  runs without it;
+- a leg no tier in the pass can price at all (`ResetTargetHasNoPricingPath`);
+- **an oracle-shadowed span (`ResetBlockedByOracleRows`, precondition 5)** —
+  the refusal most likely to stop you, and until 0228's second review round the
+  one a dry run could not reach;
+- zero `external` rows for canonical USDC in `prices.usd_rate`
+  (`ResetRequiresExternalRates`, precondition 1);
+- a `--reset-not-before` below the leg's first priced reference candle on this
+  table (`ResetEpochBelowReference`), or no such candle at all
+  (`ResetEpochHasNoReference`). The comparison is in seconds, so a same-day epoch
+  that is hours early is refused, and the message names the value to re-run with.
+
+An admitted epoch is still not a refill guarantee. See Appendix A,
+"An admitted epoch bounds only where the reference begins", for the
+day-granularity residue the post-run damage check must catch.
+
+Until task 0228's review the leg and rates checks lived only in the per-month
+pass, which a dry run never builds: a rehearsal over the wrong leg listed
+candidate months and ended green, and only the real run refused. The first fix
+hoisted those two and left the other refusals where they were, so a rehearsal
+over an oracle-shadowed span still passed. All of a reset's month-independent
+refusals now live in ONE method (`ChEnrichmentPass::assert_reset_is_admissible`)
+that the driver runs before enumerating months and the per-month pass runs
+again. **What the dry run accepts, the real run accepts.**
+
+⚠️ The only thing that can still fail INSIDE the per-month pass is the
+ClickHouse write itself, and on prod the real run passes `--skip-snapshot`, so
+no `FREEZE` is left behind by the tool. Locally, if an older build refuses
+after freezing, `ALTER TABLE … UNFREEZE PARTITION … WITH NAME` the leftover, or
+drop it from `shadow/`, before re-running.
+
+Dry run first:
+
+```bash
+./target/release/coarse-repair --transport hetzner --table price_ohlcv_1d \
+  --start-month 202101 --end-month 202603 \
+  --reset-quote-asset-id <XLM_ID> --reset-not-before <FIRST_REF_CANDLE> \
+  --reset-require-pivot-usdc-rate \
+  --dry-run
+```
+
+⚠️ **`--transport hetzner` is not optional** — Appendix B's warning applies
+unchanged: without it the tool reads, and once `--dry-run` is dropped WRITES,
+whatever answers on the operator box's loopback.
+
+Then the real run, keeping `--transport hetzner`, dropping `--dry-run`, adding
+`--skip-snapshot --snapshots-verified`, and for the coarse grains
+**`--pivot-window-s 604800` (`_1w`) / `--pivot-window-s 2678400` (`_1M`)**.
+
+### ⚠️ The dry run is the gate — and zero candidate months is a STOP
+
+**A dry run reporting ZERO candidate months is not an all-clear.** It is how
+task 0182 stayed invisible for a month. And as in Appendix B the dry run's
+per-month `zeros` is the driver's OR-ed enumeration predicate, so it cannot show
+the reset population on its own. Count the reset candidates yourself, per table
+and per leg, with the tool's own predicate — note there is **no**
+`close_usd = close` term here, because a pivoted row never carries one:
+
+```sql
+SELECT count() AS reset_candidates, uniqExact(toYYYYMM(timestamp)) AS months,
+       min(timestamp), max(timestamp)
+FROM prices.price_ohlcv_1d FINAL
+WHERE quote_asset_id = <XLM_ID> AND timestamp >= toDateTime(<FIRST_REF_CANDLE>)
+  AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0
+  AND timestamp < toDateTime({epoch:UInt32})
+  AND toDate(timestamp, 'UTC') IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.usd_rate FINAL
+      WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+        AND contract_address = '' AND method = 'external' AND usd_rate > 0)
+```
+
+The tool's own predicate carries one more term, added by 0228's second review
+round: the bucket's UTC day must also hold a **usable reference candle** — the
+leg's own candle against canonical USDC, `close > 0 AND volume_base > 0`, in
+the same table — because that is the other thing the scaled pivot needs to
+refill a row it re-opened. Without it a bucket on a rate-covered day whose
+XLM/USDC (or USDT/USDC) market had gone quiet was zeroed and left at 0 for the
+abort signal to find after the write. Add it to the count above to match the
+tool exactly:
+
+```sql
+  AND toDate(timestamp, 'UTC') IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.price_ohlcv_1d FINAL
+      WHERE asset_id = <XLM_ID> AND quote_asset_id = <USDC_ID>
+        AND close > 0 AND volume_base > 0)
+```
+
+On `_1d`, `_1w` and `_1M` this is exact: a same-day reference at the same grain
+is the bucket's own. On the intraday grains it is conservative in the safe
+direction — a bucket whose only reference sits on the previous day is skipped,
+not stranded — and the residual case (a market silent for a whole
+`--pivot-window-s` before the bucket and trading later that day) is what the
+abort signal below still exists for.
+
+Compare it against the population table above. A count within an order of
+magnitude is a real result; zero months, or a few dozen rows against a 10 M-row
+table, means the predicate or precondition 1 is wrong. Do not proceed.
+
+### The baseline (before)
+
+**Measure it live, per table, immediately before that table's run, and write the
+numbers down.** Three things:
+
+1. **The reset-candidate count** from the query above — the population about to
+   change.
+
+2. **The median implied reference rate on 2023-03-11**, per grain. For a
+   pivot-leg candle `close_usd / close` IS the reference asset's stored USD
+   price, so this is the number that must fall ~3.19% (on the grains whose
+   bucket ends inside the depeg):
+
+   ```sql
+   SELECT median(toFloat64(close_usd) / toFloat64(close)) AS implied_reference_rate,
+          count() AS candles
+   FROM prices.price_ohlcv_1d FINAL
+   WHERE quote_asset_id = <XLM_ID> AND close > 0 AND close_usd > 0
+     AND timestamp >= toDateTime(1678492800)
+     AND timestamp <  toDateTime(1678579200)
+   ```
+
+   Expect it to sit at XLM's USDC-denominated close for the day (~0.0588 on
+   prod) before the run, and ~0.9681 × that (~0.0569) after. It is deliberately
+   uncorrelated — no join against the reference market — so it is cheap to run
+   over any table. The falsifier computes the stricter, self-calibrating form of
+   the same thing (the quotient against the reference market's own bucket vwap,
+   which must read ~1.0 before and ~0.9681 after); this query is the one you can
+   eyeball on the spot.
+
+3. **`max(version)` for `_1w` and `_1M`.** Those two buckets end after USDC had
+   recovered, so their rate cannot show the depeg at all and the after-check
+   verifies the MECHANISM instead. It takes these as input and refuses to pass
+   without them:
+
+   ```sql
+   SELECT max(version) AS version_before_1w
+   FROM prices.price_ohlcv_1w FINAL
+   WHERE quote_asset_id = <XLM_ID> AND timestamp = toDateTime(1678060800);
+   -- 2023-03-06, the week of the depeg
+
+   SELECT max(version) AS version_before_1M
+   FROM prices.price_ohlcv_1M FINAL
+   WHERE quote_asset_id = <XLM_ID> AND timestamp = toDateTime(1677628800);
+   -- 2023-03-01, the month of the depeg
+   ```
+
+   ⚠️ Unlike Appendix B, the version is the ONLY mechanical evidence those two
+   grains can offer. 0268 could also ask whether the par signature survived; a
+   pivoted row has none. Record these before the run or the after-check cannot
+   be run at all.
+
+### Expected runtime
+
+Scaled from task 0276's measured throughput (~7 k rows/s on the same cluster,
+same tool), against the population table above:
+
+| Table  | XLM-quoted rows | Expected  |
+| ------ | --------------- | --------- |
+| `_15m` | 8.9 M           | ~21 min   |
+| `_1h`  | 64.8 M          | ~2 h 35 m |
+| `_4h`  | 29.0 M          | ~1 h 10 m |
+| `_1d`  | 10.4 M          | ~25 min   |
+| `_1w`  | 3.3 M           | ~8 min    |
+| `_1M`  | 1.4 M           | ~3 min    |
+
+≈4 h 40 m for the XLM leg, plus ~4 min for all six USDT passes (1.6 M rows).
+Budget a working day with the checks between tables.
+
+⚠️ That extrapolation is optimistic and the reason is structural:
+`count_candidates` and `count_reset_pending` are `FINAL` scans run **once per
+batch**, and at this population they dominate. 0276's 7 k rows/s was measured
+over 9.94 M rows where the counts were cheap relative to the writes; here they
+are not. Treat the table as a lower bound, watch the first month's wall clock,
+and re-plan from that rather than from this table.
+
+### The abort signal
+
+`rows_reset` far exceeding `rows_enriched` means values were discarded and not
+recomputed — the one outcome worse than the defect. The tool prints it and tells
+you to stop. **Do not continue to the next table.** Roll the current one back
+from its FREEZE snapshot.
+
+Under this mode a shortfall can only come from the intraday grains, and from
+one shape: a bucket whose reference market was silent for a whole
+`--pivot-window-s` before it and traded later the same day. Neither the USDC
+rate nor a reference-less day can be the cause any more: both are terms of the
+candidate predicate, so a row with no rate, or no reference candle on its day,
+was never re-opened. On `_1d`, `_1w` and `_1M` the reference term is exact and
+a shortfall there means the predicate or `--pivot-window-s` (which the tool
+refuses below the bucket width) is wrong — stop and check the build.
+
+### After — the falsifier
+
+An XLM-quoted candle on 2023-03-11 must now carry the measured USDC/USD factor
+rather than a dollar, on every grain whose bucket ENDS inside the depeg —
+`_15m`, `_1h`, `_4h`, `_1d`. Re-run the baseline's query 2 per table: the median
+implied reference rate must have moved ~3.19% down.
+
+The test does the stricter version, measuring the quotient against the reference
+market's own bucket vwap so it needs no hand-typed XLM price, and holds those
+grains UNDER `0.99` — a ceiling par cannot satisfy and a PARTIAL campaign
+cannot either. `_1w` and `_1M` are judged by version movement instead. On every
+grain it also fails outright on any row at `close_usd = 0` **with** volume: that
+is the 0182 outcome. Rows at zero without volume are the permanent volume-zero
+floor, reported as context.
+
+```bash
+CLICKHOUSE_URL=... CH_DATABASE=prices \
+POST_RUN_0228_VERSION_BEFORE_1W=<version_before_1w> \
+POST_RUN_0228_VERSION_BEFORE_1M=<version_before_1M> \
+  cargo test -p enrichment-worker --test post_run_0228_it -- --ignored
+```
+
+Against prod from an operator laptop, `CLICKHOUSE_URL` cannot reach the cluster:
+drop it, export the same `CH_DOMAIN` / `MTLS_*` variables as the campaign, and
+add `--features aws-mtls` to the `cargo test`.
+
+Both tests are expected to FAIL before the campaign and pass after it. The
+second (`the_pivot_leg_carries_no_discount_once_usdc_is_back_at_par`) exists so
+the first cannot be satisfied by a table scaled uniformly low.
+
+Then walk `/ohlcv` for an XLM-quoted asset over the repaired span. The `method`
+field must still read `traded` — task 0228 coins no new word, because the label
+names how the price was reached (through the reference asset's own market), not
+which factors the arithmetic carried. A `method` that changed is a finding.
+
+### Rollback
+
+Identical to Appendices A and B: `ALTER TABLE … ATTACH PARTITION … FROM …` out
+of the frozen copies, per month. The reset is a versioned INSERT, never a
+mutation, so the pre-reset rows are still on disk under their old version.
+
+### Run it once
+
+⚠️ **This mode is value-idempotent, not a fixed point — and unlike Appendix B it
+cannot be made one.** 0268's candidate carries the self-erasing signature
+`close_usd = close`, so a second run there finds nothing. A pivoted row has no
+signature to erase, so a second run here re-opens every already-corrected row
+and rewrites it from the same series: the values do not change, but `version`
+climbs by 2 each pass and the FREEZE rollback point becomes less useful with
+every one. **Run it once per table per leg, verify, move on.**
+
+This is also why the mode is operator-only and is never wired into the recurring
+sweep, which pins `usd_reset: None`.
+
 ## Notes
 
 - The repair reuses the exact enrichment tiers (`ch_enrich.rs`): USDC → ×$1,
@@ -643,3 +1853,6 @@ the reset off and can never inherit it.
   forward-filling from earlier months, so a month's first buckets keep a valid
   anchor even when bounded to one partition.
 - All figures are `FINAL`-collapsed reads; do not compare without `FINAL`.
+- The FREEZE / ATTACH / UNFREEZE idiom above is reused verbatim, with a
+  `reingest_0286_` prefix, by
+  [`0286-reingest-history.md`](0286-reingest-history.md) (task 0286 phase 3).

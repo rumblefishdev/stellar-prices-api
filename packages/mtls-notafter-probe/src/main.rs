@@ -6,6 +6,10 @@
 //! X.509 NotAfter, and publishes days-to-expiry to CloudWatch for the
 //! cert-expiry alarm.
 //!
+//! The same run also carries the daily stuck-alarm digest (task 0214) — a
+//! second, independent job that happens to want exactly this schedule. See
+//! `alarm_digest`.
+//!
 //!     cargo lambda build -p mtls-notafter-probe --release --arm64 --features lambda
 //!
 //! Requires the `lambda` feature (the default build/test exercises the X.509
@@ -16,7 +20,7 @@
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use mtls_notafter_probe::{
-        CertProbe, RoleDays, days_to_not_after, parse_probe_targets, publish,
+        CertProbe, RoleDays, alarm_digest, days_to_not_after, parse_probe_targets, publish,
     };
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,11 +39,28 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     }
     let targets = Arc::new(targets);
 
+    // Where the daily stuck-alarm digest goes (task 0214). Empty means the CDK
+    // wiring is missing: fail Init, exactly as for MTLS_PROBE_SECRETS, rather
+    // than run for months publishing a digest into nothing — which is the same
+    // class of silence this digest exists to end.
+    let topic_arn = prices_clickhouse::env::env_or("OPS_ALARMS_TOPIC_ARN", "");
+    if topic_arn.is_empty() {
+        return Err(lambda_runtime::Error::from(
+            "OPS_ALARMS_TOPIC_ARN is empty — the stuck-alarm digest has nowhere to publish",
+        ));
+    }
+    let topic_arn = Arc::new(topic_arn);
+
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
         .await;
     let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
+    let sns = Arc::new(aws_sdk_sns::Client::new(&aws_cfg));
     let environment = Arc::new(prices_clickhouse::env::env_or("ENV_NAME", "unknown"));
+    // Only used to build console deep links in the digest. Always set by the
+    // Lambda runtime; a wrong value costs a dead link, not a failed run, so it
+    // gets a default rather than the Init guard the topic ARN has.
+    let region = Arc::new(prices_clickhouse::env::env_or("AWS_REGION", "eu-central-1"));
     tracing::info!(
         environment = %environment,
         roles = targets.len(),
@@ -49,7 +70,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
         let targets = targets.clone();
         let cw = cw.clone();
+        let sns = sns.clone();
+        let topic_arn = topic_arn.clone();
         let environment = environment.clone();
+        let region = region.clone();
         async move {
             let now_unix = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -97,20 +121,63 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // them) before surfacing any failure — a partial outage must not
             // stale-out the certs that DID read cleanly. `publish` no-ops on an
             // empty slice, so a total failure just skips straight to the error.
-            if !samples.is_empty() {
-                publish(&cw, &environment, &samples).await?;
+            //
+            // Collected, not `?`: a throttled PutMetricData used to be the only
+            // work in this handler, so early-returning was free. It is not any
+            // more — `?` here would skip the digest below for the whole day and
+            // report it as a cert-probe outage, with nothing saying the digest
+            // never ran.
+            let mut publish_failure: Option<String> = None;
+            if !samples.is_empty()
+                && let Err(err) = publish(&cw, &environment, &samples).await
+            {
+                tracing::error!(error = %err, "cert metric publish failed");
+                publish_failure = Some(format!("cert metric publish failed: {err}"));
             }
+
+            // Second job on the same schedule (task 0214): re-read every
+            // prices-{env}- alarm and name the ones stuck off OK. Deliberately
+            // BEFORE the cert failure check — a cert this probe cannot read must
+            // not also silence the digest, which is the one thing that would
+            // surface such a latch. It collects its own failure the same way.
+            let (stuck, digest_failure) =
+                match alarm_digest::run(&cw, &sns, &topic_arn, &environment, &region, now_unix)
+                    .await
+                {
+                    Ok(n) => {
+                        tracing::info!(stuck_alarms = n, "stuck-alarm digest complete");
+                        (Some(n), None)
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "stuck-alarm digest failed");
+                        (None, Some(err))
+                    }
+                };
 
             // Any cert we could not read/parse is unmonitored until fixed, and
             // its silence is invisible on the days-to-expiry alarm. Fail the run
             // so the error alarm pages instead of a healthy sibling hiding it.
+            // The two jobs are reported separately: a run that failed only the
+            // digest must not read as a cert outage.
+            let mut problems: Vec<String> = Vec::new();
             if !failures.is_empty() {
-                return Err(lambda_runtime::Error::from(format!(
-                    "mtls-notafter-probe: {}/{} cert(s) unreadable — days-to-expiry unmonitored \
-                     for: [{}]",
+                problems.push(format!(
+                    "{}/{} cert(s) unreadable — days-to-expiry unmonitored for: [{}]",
                     failures.len(),
                     targets.len(),
                     failures.join(", "),
+                ));
+            }
+            if let Some(err) = publish_failure {
+                problems.push(err);
+            }
+            if let Some(err) = digest_failure {
+                problems.push(format!("stuck-alarm digest did not run: {err}"));
+            }
+            if !problems.is_empty() {
+                return Err(lambda_runtime::Error::from(format!(
+                    "mtls-notafter-probe: {}",
+                    problems.join("; "),
                 )));
             }
 
@@ -118,9 +185,14 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 .iter()
                 .map(|s| serde_json::json!({ "role": s.role, "days": s.days }))
                 .collect();
-            tracing::info!(roles = samples.len(), "mtls-notafter-probe run complete");
+            tracing::info!(
+                roles = samples.len(),
+                stuck_alarms = stuck.unwrap_or(0),
+                "mtls-notafter-probe run complete"
+            );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "published": published,
+                "stuck_alarms": stuck,
             }))
         }
     }))

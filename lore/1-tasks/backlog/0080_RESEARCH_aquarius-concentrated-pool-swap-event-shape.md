@@ -45,6 +45,18 @@ history:
       RESEARCH: the M2 bar is a decided, documented answer (seed them, or
       record the divergence and scope a variant), not necessarily a shipped
       extractor.
+  - date: 2026-09-17
+    status: backlog
+    who: okarcz
+    note: >
+      Evidence from [[0291]], production: a concentrated pool
+      (CDQ4OYM3…AJE2) emits `trade` in exactly the shape
+      AquariusPoolExtractor reads — topics [trade, sold, bought, trader], data
+      [sold_amt, bought_amt, fee] — and a sample's 12,107,191 / 1,264,886 =
+      9.57 agrees with the pool's own `pool_state` tick −22,580 (≈ 9.56). The
+      registry already holds 31 concentrated pools via learn_factory; 16 more
+      are added by 0291. Steps 1–2 below look answered; the seeder change
+      (step 3) and the router-only gap remain.
 ---
 
 # Verify Aquarius concentrated-pool swap-event shape

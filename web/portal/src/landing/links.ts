@@ -8,9 +8,9 @@
  * landing page went through this file rather than through a literal. Task
  * 0163's curl-by-curl walkthrough is still owed to the quick start's snippets.
  *
- * All root-relative and all under `/api/`, because on the shared host the root
- * belongs to the block explorer (task 0194): a link to `/api-docs-json` there
- * opens the explorer's page, not the document.
+ * All root-relative and all under `/prices-api/`, because on the shared host
+ * the root belongs to the block explorer (task 0194): a link to
+ * `/api-docs-json` there opens the explorer's page, not the document.
  */
 
 import { API_ORIGIN } from '../api-origin';
@@ -72,11 +72,11 @@ export const OPENAPI_JSON = API_ORIGIN
  * through the Vite proxy and IS same-origin — which is why
  * `links.spec.ts` asserts this value does not move when `API_ORIGIN` is set.
  *
- * The file itself is `public/openapi.json`, the committed output of
- * `npm run openapi:extract`; CI diffs the two so the copy cannot drift from
- * what the API serves. It ships as `/api/openapi.json` — a path with an
- * extension, which the explorer's `/api/*` behaviour serves as a file rather
- * than rewriting to `index.html` (it rewrites only extensionless paths).
+ * The file itself is `public/openapi.json`, the committed output of `npm run
+ * openapi:extract`; CI diffs the two so the copy cannot drift from what the API
+ * serves. It ships as `/prices-api/openapi.json` — a path with an extension,
+ * which the explorer's `/prices-api/*` behaviour serves as a file rather than
+ * rewriting to `index.html` (it rewrites only extensionless paths).
  */
 export const OPENAPI_JSON_DOWNLOAD = `${ROUTER_BASENAME}/openapi.json`;
 
@@ -94,11 +94,11 @@ export const OPENAPI_JSON_FILENAME = 'stellar-prices-api-openapi.json';
  * absolute href for the plain `<a>`s on the landing page.
  *
  * On the shared host this URL works BECAUSE it is a route: the explorer's
- * `/api/*` behaviour rewrites every extensionless path to `/api/index.html`,
- * so `/api/docs` boots this bundle and the router renders the reference. A
- * static `docs/` folder in the bundle would have been reachable only as
- * `/api/docs/index.html`, which is why the reference is a page and not a
- * static folder.
+ * `/prices-api/*` behaviour rewrites every extensionless path to
+ * `/prices-api/index.html`, so `/prices-api/docs` boots this bundle and the
+ * router renders the reference. A static `docs/` folder in the bundle would
+ * have been reachable only as `/prices-api/docs/index.html`, which is why the
+ * reference is a page and not a static folder.
  *
  * Until 2026-09-01 `API_REFERENCE` was an alias of {@link OPENAPI_JSON} —
  * the only reference that existed — and every "Swagger UI" affordance
@@ -116,6 +116,15 @@ export const API_REFERENCE = `${ROUTER_BASENAME}${DOCS_ROUTE}`;
  */
 export const QUICKSTART_ROUTE = '/quick-start';
 export const QUICKSTART = `${ROUTER_BASENAME}${QUICKSTART_ROUTE}`;
+
+/**
+ * The privacy policy — a page of this app (task 0303), rendered from
+ * `src/privacy/privacy-policy.md`, at the name the explorer's footer and the
+ * corporate site use for theirs. A ROUTE like the quick start; `PRIVACY_POLICY`
+ * is the same place as an absolute href.
+ */
+export const PRIVACY_POLICY_ROUTE = '/privacy-policy';
+export const PRIVACY_POLICY = `${ROUTER_BASENAME}${PRIVACY_POLICY_ROUTE}`;
 
 /**
  * The official Stellar Discord — **Stellar Developers**, and no other server
@@ -156,11 +165,12 @@ export const STELLAR_DISCORD_SERVER = `https://discord.com/channels/${STELLAR_DI
 export const LOGIN_ANCHOR = 'login';
 
 /**
- * The login route, relative to the router's basename — so `/api/login`
- * once `ROUTER_BASENAME` is applied.
+ * The login route, relative to the router's basename — so
+ * `/prices-api/login` once `ROUTER_BASENAME` is applied.
  *
- * A hard refresh on this path resolves because the host's `/api/*` behaviour
- * rewrites every extensionless path to `/api/index.html` — a rule, not an
+ * A hard refresh on this path resolves because the host's `/prices-api/*`
+ * behaviour rewrites every extensionless path to `/prices-api/index.html` —
+ * a rule, not an
  * allow-list, so adding a route here needs nothing on the hosting side. (Our
  * own distribution kept a per-route allow-list in `DirectoryIndexFn`; it was
  * retired by task 0195 once the page moved to the explorer's host.)
@@ -179,3 +189,22 @@ export const DASHBOARD_ROUTE = '/dashboard';
  * them. Same basename treatment as {@link QUICKSTART}.
  */
 export const LANDING = `${ROUTER_BASENAME}/`;
+
+/**
+ * The block explorer's home — where the SorobanScan wordmark in every bar
+ * leads (task 0301): the portal is one page of SorobanScan, and the mark is
+ * how a visitor gets back to the rest of it. Absolute, not `/`: on the shared
+ * host the root is the explorer's, but under the dev server `/` is nothing.
+ */
+export const EXPLORER = 'https://sorobanscan.rumblefish.dev/';
+
+/** Rumble Fish's own site — where the footer's mark leads. */
+export const RUMBLEFISH_SITE = 'https://rumblefish.dev';
+
+/**
+ * Rumble Fish's contact page — the footer's "Contact" and the refusal card's
+ * "contact support" (task 0301). A sales form rather than a support desk, and
+ * the nearest thing that reaches the company; the card's other word, "status
+ * page", still has nowhere to go.
+ */
+export const RUMBLEFISH_CONTACT = 'https://www.rumblefish.dev/contact/';

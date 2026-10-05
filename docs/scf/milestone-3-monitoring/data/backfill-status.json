@@ -1,0 +1,19 @@
+{
+  "realtime_tip_ledger": 64693715,
+  "sdex": {
+    "status": "completed",
+    "current_ledger": 1,
+    "start_ledger": 1,
+    "target_ledger": 64692735,
+    "progress_pct": 100.0,
+    "ledgers_remaining": 0,
+    "last_push_at": "2026-09-30T07:40:06Z",
+    "earliest_data_available": "2015-11-18T03:47:00Z"
+  },
+  "soroban_amm": {
+    "status": "paused",
+    "last_push_at": "2026-07-14T17:54:24Z",
+    "completed_at": null,
+    "earliest_data_available": "2024-03-08T19:00:00Z"
+  }
+}

@@ -1,6 +1,6 @@
 ---
 id: "0255"
-title: "Narrowing the CORS gateway response to THROTTLED is deployed and has NO EFFECT — every /v1 4xx still carries the portal's origin"
+title: "The THROTTLED 429 still carries the portal's credentialed origin, and why the 4xx leak stopped is still unexplained"
 type: BUG
 status: backlog
 related_adr: []
@@ -57,11 +57,75 @@ history:
       distinguish a bad API key from a dead API - unchanged by the header
       going absent, and NOT fixed by the leak stopping. The mechanism question
       is untouched and this task stays open on it.
+  - date: 2026-09-25
+    status: backlog
+    who: okarcz
+    note: >
+      NARROWED on the operator's 2026-09-25 decision, from the 2026-09-24 read-only
+      check. Now verified on the wire: /v1 403 and 404 responses carry no CORS
+      header, and the OPTIONS preflight answers 204 with
+      Access-Control-Allow-Origin `*`. The original symptom (every /v1 4xx
+      carrying the portal's origin) is gone. Still open: the THROTTLED 429 path,
+      which is still customised with the portal's origin plus credentials
+      (infra/src/lib/stacks/api-gateway-stack.ts:1004-1015); writing down the
+      mechanism; a repeatable probe of the deployed API; and reconciling
+      [[0126]]'s matching AC. Retitled, because the old title described a leak
+      that is no longer measured. Original text kept below.
 ---
 
-# The narrowing is live, correct, and does nothing
+# THROTTLED 429 still carries the portal's credentialed origin; the mechanism is unexplained
 
-## ✅ UPDATE 2026-09-02 — the leak STOPPED, cause unconfirmed
+## Summary (narrowed 2026-09-25)
+
+**Verified 2026-09-24:** keyless `/v1` `403`s and unmapped-route `404`s
+(the `UnknownRoute` gateway response, `infra/src/lib/stacks/api-gateway-stack.ts:1034`)
+carry **no** CORS header. The `/v1` preflight answers **`204` with
+`Access-Control-Allow-Origin: *`**. The symptom this task was filed for is gone.
+
+What is left:
+
+1. **The `THROTTLED` 429 path.** `api-gateway-stack.ts:1004-1015` still
+   customises `THROTTLED` (and `DEFAULT_5XX`) API-wide with
+   `Access-Control-Allow-Origin: <portalWebOrigin>` +
+   `Access-Control-Allow-Credentials: true`. A throttled `/v1` request, including
+   a throttled preflight, therefore goes to a third-party origin with the
+   portal's credentialed origin, not `*`. That makes `/v1` CORS break
+   intermittently under throttle (see "It also breaks the preflight itself" below).
+   It has not been probed.
+2. **The mechanism.** Why the 4xx leak stopped on the 2026-09-02 deploy is still a
+   hypothesis (the gateway responses a stage serves come from its deployment,
+   not from the control plane). It has not been confirmed.
+3. **A repeatable probe** of the deployed API, not a template assertion.
+4. **The [[0126]] link.** 0126 (archived) has a matching AC
+   (`lore/1-tasks/archive/0126_FEATURE_api-edge-cors-custom-domain-waf.md:655-664`)
+   that already cites this task, but it reads "MEASURED CLEAN" and "has NO
+   EFFECT … cannot close until 0255 does" in the same item. When this task
+   closes, that AC needs to be reconciled with the outcome.
+
+## Acceptance Criteria
+
+- [x] ~~`/v1` error responses do not carry the portal's origin~~ **for 403/404:**
+      verified 2026-09-24. No CORS header on a keyless `/v1` 403 or an
+      unmapped-route 404, and the preflight returns 204 with `*`.
+- [ ] The `THROTTLED` 429 path is decided: the portal's credentialed origin is
+      either removed or scoped off `/v1`, or recorded as unavoidable with the
+      reason and the consequence for third-party browser consumers.
+- [ ] The mechanism (why the leak stopped on a new stage deployment) is
+      identified and written down, reproduced in a scratch API if needed. It must
+      not be inferred.
+- [ ] A repeatable probe of the DEPLOYED API is committed somewhere it runs
+      again, e.g.
+      `curl -si -H 'Origin: https://evil.example' https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price`
+      plus the matching `OPTIONS` preflight. It asserts the absent header on
+      403 and `*` on the 204 preflight.
+- [ ] [[0126]]'s matching AC references this task's outcome, and its
+      self-contradictory wording is reconciled.
+
+## Original scope (before 2026-09-25 narrowing)
+
+> Kept verbatim for the record (headings demoted one level). Original title: *The narrowing is live, correct, and does nothing*. The Summary and Acceptance Criteria above supersede it.
+
+### ✅ UPDATE 2026-09-02 — the leak STOPPED, cause unconfirmed
 
 Measured immediately after [[0126]] deployed (Compute, then ApiGateway):
 
@@ -92,7 +156,7 @@ plane, which was correct all along.
 diagnoses on this bug were already wrong, both from explaining a measurement
 instead of extending it. Confirming it needs a deliberate test, not a story.
 
-## 🔎 First-hand browser confirmation — 2026-09-02
+### 🔎 First-hand browser confirmation — 2026-09-02
 
 Every measurement on this task until now was `curl`. [[0126]]'s AC-1 browser run
 put a real client on it, from origin `http://0.0.0.0:8080`:
@@ -120,7 +184,7 @@ when the header carried the portal's origin; the header is gone and the
 third-party failure mode is identical. Whatever this task concludes has to
 address the missing header, not just the wrong one.
 
-## Summary
+### Summary
 
 `api-gateway-stack.ts` customises exactly two gateway responses — `THROTTLED`
 and `DEFAULT_5XX` — to carry the portal's CORS headers. Production agrees. And
@@ -129,9 +193,9 @@ production still stamps those headers onto 4xx types that are **not** customised
 **The fix is deployed and ineffective.** Choosing a narrower `ResponseType`
 does not scope the header, which is what everyone involved assumed it would.
 
-## Evidence — measured 2026-09-02, 09:30Z and re-confirmed 09:59Z
+### Evidence — measured 2026-09-02, 09:30Z and re-confirmed 09:59Z
 
-### The control plane says the narrowing is in place
+#### The control plane says the narrowing is in place
 
 ```
 aws apigateway get-gateway-responses --rest-api-id 02mabge71l
@@ -147,7 +211,7 @@ And each 4xx type that actually serves these requests is untouched:
 | `INVALID_API_KEY` | `{}` | `true` |
 | `MISSING_AUTHENTICATION_TOKEN` | `{}` | `true` |
 
-### The wire says otherwise
+#### The wire says otherwise
 
 Every one of these carries `Access-Control-Allow-Origin: https://sorobanscan.rumblefish.dev`,
 `Access-Control-Allow-Credentials: true` and `Vary: Origin`:
@@ -162,7 +226,7 @@ Every one of these carries `Access-Control-Allow-Origin: https://sorobanscan.rum
 Control: `GET /health` with an `Origin` returns **200 with no CORS headers**, so
 this is specific to the gateway's error path and not a blanket header.
 
-### It is not a missing or partial deploy
+#### It is not a missing or partial deploy
 
 Ruled out explicitly, because that was the first (wrong) diagnosis:
 
@@ -181,7 +245,7 @@ published to the stage". Neither survived contact with `cdk diff` and
 `describe-stacks`. A third mechanism guess is not wanted; the next step is an
 experiment, not more reasoning.
 
-## Why it matters
+### Why it matters
 
 Not security — the header names our own origin on API Gateway's generic
 `{"message":"Forbidden"}`. Nothing leaks.
@@ -202,7 +266,7 @@ Note the preflight case above: `OPTIONS` on `/v1` today returns 403 **with** the
 portal's origin attached. So the misleading header is already on the very
 response a browser consults first.
 
-## ⚠️ It also breaks the preflight itself, not only error responses
+### ⚠️ It also breaks the preflight itself, not only error responses
 
 Added 2026-09-02 from the review of PR #277, because neither that PR nor the
 first draft of this task had it.
@@ -223,7 +287,7 @@ error path to one on the success path's precondition.
 Measured today: `OPTIONS /v1/assets/native/price` already returns 403 **with**
 the portal's origin attached, before any of 0126's work is deployed.
 
-## 🔑 The generalisable lesson
+### 🔑 The generalisable lesson
 
 **A gateway-response change was verified by reading the CDK template, and the
 template was right.** Nothing in the review, the tests or the deploy could have
@@ -235,7 +299,7 @@ direction: there, the file was right and the running artefact was old; here the
 config is right and the runtime behaviour disagrees with it. Same
 countermeasure — **verify the RESPONSE, not the declaration.**
 
-## Implementation
+### Implementation
 
 - **Reproduce in isolation first.** A scratch REST API with one method and one
   customised `THROTTLED` gateway response, then probe a 403. This is the whole
@@ -252,7 +316,7 @@ countermeasure — **verify the RESPONSE, not the declaration.**
 - ⚠️ Whatever ships, **verify by probing the deployed API**, and add that probe
   somewhere it runs again. A template assertion cannot see this class of defect.
 
-## Acceptance Criteria
+### Acceptance Criteria
 
 - [ ] The behaviour is reproduced (or refuted) in a scratch API, away from prod
 - [ ] The mechanism is identified and written down — not inferred

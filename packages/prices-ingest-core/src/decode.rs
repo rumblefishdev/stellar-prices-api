@@ -27,3 +27,19 @@ pub fn ledger_sequence(lcm: &LedgerCloseMeta) -> u32 {
         LedgerCloseMeta::V2(v) => v.ledger_header.header.ledger_seq,
     }
 }
+
+/// The close time of a `LedgerCloseMeta`, unix seconds (all protocol versions).
+///
+/// This is the same field the trade extractor stamps onto every tick as
+/// `closed_at` (`filter.rs::ledger_header`), so bucketing it with
+/// `close_time / 60 * 60` yields exactly the `minute_start` the
+/// [`crate::CandleAccumulator`] keys on. The live reconcile loop uses that to
+/// tell a minute it has seen the END of from one still being filled — see
+/// task 0282.
+pub fn ledger_close_time(lcm: &LedgerCloseMeta) -> i64 {
+    match lcm {
+        LedgerCloseMeta::V0(v) => v.ledger_header.header.scp_value.close_time.0 as i64,
+        LedgerCloseMeta::V1(v) => v.ledger_header.header.scp_value.close_time.0 as i64,
+        LedgerCloseMeta::V2(v) => v.ledger_header.header.scp_value.close_time.0 as i64,
+    }
+}

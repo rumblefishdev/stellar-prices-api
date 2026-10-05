@@ -44,7 +44,7 @@ async fn usage(mock: &MockGateway, sub: &str) -> Reply {
 /// the exact pair of days task 0157's close read off the live plan.
 fn seed_key_with_usage(mock: &MockGateway) -> String {
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage
             .insert(id.clone(), vec![vec![121, 99_879], vec![0, 99_879]]);
         id
@@ -202,13 +202,15 @@ async fn no_session_is_401_not_signed_in() {
 }
 
 /// A key AWS has no rows for yet — the ordinary state minutes after issuance,
-/// because `GetUsage` is not a read-after-write surface. The three counters go
-/// absent **together**; the period and `as_of` are ours and stay.
+/// because `GetUsage` is not a read-after-write surface. `used` and
+/// `remaining` go absent **together**; the period and `as_of` are ours and
+/// stay, and since task 0311 so does `limit` — it is the plan's quota, known
+/// from `GetUsagePlans` whether or not AWS has counted anything yet.
 #[tokio::test]
 async fn a_key_with_no_rows_reports_nothing_recorded_rather_than_zeros() {
     let mock = MockGateway::start().await;
     mock.with(|s| {
-        s.seed(&format!("discord-{USER_ID}-key"), 100);
+        s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
     });
 
     let reply = usage(&mock, USER_ID).await;
@@ -216,7 +218,8 @@ async fn a_key_with_no_rows_reports_nothing_recorded_rather_than_zeros() {
     let body = reply.json();
     assert_eq!(body["used"], Value::Null, "{body}");
     assert_eq!(body["remaining"], Value::Null, "{body}");
-    assert_eq!(body["limit"], Value::Null, "{body}");
+    assert_eq!(body["limit"], 100_000, "{body}");
+    assert_eq!(body["plan"]["tier"], "free", "{body}");
     assert!(body["period_start"].is_string());
     assert!(body["as_of"].is_string());
 }
@@ -228,7 +231,7 @@ async fn a_key_with_no_rows_reports_nothing_recorded_rather_than_zeros() {
 async fn usage_pages_are_summed_to_exhaustion() {
     let mock = MockGateway::start().await;
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage.insert(
             id,
             vec![
@@ -261,14 +264,15 @@ async fn usage_pages_are_summed_to_exhaustion() {
 /// documents neither the reset instant nor its timezone.
 ///
 /// Summing the range blindly would answer `used = 40` beside `remaining = 90`
-/// and reconstruct a **130** limit on a 100 plan: a quota no plan has, rendered
-/// as fact on the panel whose stated theme is honesty. Counting from the reset
-/// is what makes the two figures describe one period.
+/// — a pair no period has, rendered as fact on the panel whose stated theme is
+/// honesty. Counting from the reset is what makes the two figures describe one
+/// period. (`limit` is the plan's quota since task 0311; `used + remaining`
+/// disagreeing with it is logged, not rendered.)
 #[tokio::test]
 async fn a_quota_reset_inside_the_queried_range_does_not_inflate_the_numbers() {
     let mock = MockGateway::start().await;
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage.insert(
             id,
             vec![
@@ -287,7 +291,7 @@ async fn a_quota_reset_inside_the_queried_range_does_not_inflate_the_numbers() {
     let body = reply.json();
     assert_eq!(body["used"], 10, "{body}");
     assert_eq!(body["remaining"], 90, "{body}");
-    assert_eq!(body["limit"], 100, "{body}");
+    assert_eq!(body["limit"], 100_000, "{body}");
 }
 
 /// The other half of that rule, and the one a naive "restart on any change"
@@ -298,7 +302,7 @@ async fn a_quota_reset_inside_the_queried_range_does_not_inflate_the_numbers() {
 async fn an_idle_day_mid_period_still_counts_the_days_before_it() {
     let mock = MockGateway::start().await;
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage
             .insert(id, vec![vec![10, 99_990], vec![0, 99_990], vec![5, 99_985]]);
     });
@@ -321,9 +325,9 @@ async fn an_idle_day_mid_period_still_counts_the_days_before_it() {
 async fn a_prefix_neighbour_is_not_the_callers_key() {
     let mock = MockGateway::start().await;
     let (own, _imposter) = mock.with(|s| {
-        let own = s.seed(&format!("discord-{USER_ID}-key"), 200);
+        let own = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 200);
         // An exact-name EXTENSION — what a console-created copy looks like.
-        let imposter = s.seed(&format!("discord-{USER_ID}-key-old"), 100);
+        let imposter = s.seed_on_free_plan(&format!("discord-{USER_ID}-key-old"), 100);
         s.usage.insert(own.clone(), vec![vec![7, 99_993]]);
         s.usage.insert(imposter.clone(), vec![vec![555, 0]]);
         (own, imposter)
@@ -349,8 +353,8 @@ async fn a_prefix_neighbour_is_not_the_callers_key() {
 async fn duplicates_resolve_to_the_reveals_winner_without_deleting_the_loser() {
     let mock = MockGateway::start().await;
     let (earliest, later) = mock.with(|s| {
-        let later = s.seed(&format!("discord-{USER_ID}-key"), 500);
-        let earliest = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let later = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 500);
+        let earliest = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage.insert(earliest.clone(), vec![vec![11, 99_989]]);
         s.usage.insert(later.clone(), vec![vec![999, 0]]);
         (earliest, later)
@@ -409,7 +413,7 @@ async fn the_cache_is_per_caller() {
     seed_key_with_usage(&mock);
     let other = "999999999999999999";
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{other}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{other}-key"), 100);
         s.usage.insert(id, vec![vec![3, 99_997]]);
     });
     let router = app_against(&mock);
@@ -583,7 +587,7 @@ async fn a_reveal_that_finds_a_key_evicts_a_cached_no_key() {
 
     // The key appears — 0189's callback created it in another request.
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 1_000);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 1_000);
         s.plan_keys.push((PLAN_ID.to_string(), id));
     });
 
@@ -687,7 +691,7 @@ async fn a_stalled_lookup_serves_the_last_good_answer() {
 async fn a_malformed_daily_row_is_skipped_not_defaulted() {
     let mock = MockGateway::start().await;
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage.insert(id, vec![vec![5, 99_995], vec![121]]);
     });
 
@@ -700,19 +704,21 @@ async fn a_malformed_daily_row_is_skipped_not_defaulted() {
 }
 
 /// Every row malformed degrades to "nothing recorded" — the same honest shape
-/// as no rows at all — never to invented zeros or an invented limit.
+/// as no rows at all — never to invented zeros. The limit is the plan's quota
+/// (task 0311), which is known, not invented.
 #[tokio::test]
 async fn all_rows_malformed_degrades_to_nothing_recorded() {
     let mock = MockGateway::start().await;
     mock.with(|s| {
-        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
         s.usage.insert(id, vec![vec![]]);
     });
 
     let reply = usage(&mock, USER_ID).await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.json()["used"], Value::Null);
-    assert_eq!(reply.json()["limit"], Value::Null);
+    assert_eq!(reply.json()["remaining"], Value::Null);
+    assert_eq!(reply.json()["limit"], 100_000);
 }
 
 /// The portal open with no control-plane client wired answers `503` and says
@@ -745,4 +751,362 @@ async fn usage_accepts_only_get() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+// ---------------------------------------------------------------------------
+// The key's own plan (task 0311)
+// ---------------------------------------------------------------------------
+
+/// A plan on another REST API — the partner plan (`q7sd40`, a DAY quota) that
+/// shares the account on production.
+fn other_api_plan() -> StoredPlan {
+    StoredPlan {
+        id: "q7sd40".to_string(),
+        name: "production-partner-plan".to_string(),
+        api_stages: vec![("6l9k06w4pl".to_string(), STAGE.to_string())],
+        throttle: Some((50.0, 100)),
+        quota: Some((10_000, 0, "DAY")),
+    }
+}
+
+/// A free key: every pre-0311 field as before, plus the plan — and the usage
+/// was read ON the free plan, with the key's plans looked up by key.
+#[tokio::test]
+async fn a_free_key_reports_the_free_plan() {
+    let mock = MockGateway::start().await;
+    let key_id = seed_key_with_usage(&mock);
+
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(body["used"], 121, "{body}");
+    assert_eq!(body["remaining"], 99_879, "{body}");
+    assert_eq!(body["limit"], 100_000, "{body}");
+    assert_eq!(body["plan"]["tier"], "free", "{body}");
+    assert_eq!(
+        body["plan"]["name"], "pricing-api-free-production",
+        "{body}"
+    );
+    assert_eq!(body["plan"]["rate_limit_per_second"], 1.0, "{body}");
+    assert_eq!(body["plan"]["burst_limit"], 5, "{body}");
+    assert_eq!(body["plan"]["quota_limit"], 100_000, "{body}");
+    assert_eq!(body["plan"]["quota_period"], "MONTH", "{body}");
+    mock.with(|s| {
+        assert_eq!(s.usage_plan_queries, vec![PLAN_ID.to_string()]);
+        assert_eq!(s.plans_queries, vec![Some(key_id.clone())]);
+    });
+}
+
+/// A key an operator moved to Basic: the usage is read on `basic1`, not on
+/// the free plan, and the answer states Basic's figures.
+#[tokio::test]
+async fn a_paid_key_reads_usage_on_its_own_plan() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        let id = s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, BASIC_PLAN_ID);
+        s.usage.insert(id, vec![vec![40, 999_960]]);
+    });
+
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(body["plan"]["tier"], "basic", "{body}");
+    assert_eq!(body["plan"]["rate_limit_per_second"], 3.0, "{body}");
+    assert_eq!(body["plan"]["burst_limit"], 15, "{body}");
+    assert_eq!(body["limit"], 1_000_000, "{body}");
+    assert_eq!(body["used"], 40, "{body}");
+    assert_eq!(body["remaining"], 999_960, "{body}");
+    assert!(body["resets_at"].is_string(), "{body}");
+    mock.with(|s| assert_eq!(s.usage_plan_queries, vec![BASIC_PLAN_ID.to_string()]));
+}
+
+/// A hand-made plan with neither throttle nor quota: Custom, with its own
+/// name, every counter and period field null, and `GetUsage` not called —
+/// there is nothing to count against, and zeros would be a lie.
+#[tokio::test]
+async fn an_unlimited_custom_plan_states_no_counters_and_reads_no_usage() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(StoredPlan::custom_unlimited());
+        s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, CUSTOM_PLAN_ID);
+    });
+
+    let reply = usage(&mock, USER_ID).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["plan"]["tier"], "custom", "{body}");
+    assert_eq!(
+        body["plan"]["name"], "prices-production-acme-plan",
+        "{body}"
+    );
+    for field in [
+        "rate_limit_per_second",
+        "burst_limit",
+        "quota_limit",
+        "quota_period",
+    ] {
+        assert_eq!(body["plan"][field], Value::Null, "plan.{field}: {body}");
+    }
+    for field in [
+        "used",
+        "remaining",
+        "limit",
+        "period_start",
+        "period_end",
+        "resets_at",
+    ] {
+        assert_eq!(body[field], Value::Null, "{field}: {body}");
+    }
+    assert!(body["as_of"].is_string(), "{body}");
+    mock.with(|s| {
+        assert_eq!(s.usage_calls, 0, "an unlimited plan has nothing to count");
+        assert!(s.usage_plan_queries.is_empty());
+    });
+}
+
+/// A WEEK quota: reported by name with its limit, the period left null —
+/// which weekday AWS rolls on is not documented, so it is not guessed — and
+/// no `GetUsage`, because the window it would need is the guess.
+#[tokio::test]
+async fn a_week_plan_reports_the_period_by_name_not_a_guess() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(StoredPlan::on_our_stage(
+            "weekly1",
+            "prices-production-weekly-plan",
+            Some((2.0, 10)),
+            Some((5_000, 0, "WEEK")),
+        ));
+        s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, "weekly1");
+    });
+
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(body["plan"]["tier"], "custom", "{body}");
+    assert_eq!(body["plan"]["quota_period"], "WEEK", "{body}");
+    assert_eq!(body["plan"]["quota_limit"], 5_000, "{body}");
+    assert_eq!(body["limit"], 5_000, "{body}");
+    for field in [
+        "used",
+        "remaining",
+        "period_start",
+        "period_end",
+        "resets_at",
+    ] {
+        assert_eq!(body[field], Value::Null, "{field}: {body}");
+    }
+    mock.with(|s| assert_eq!(s.usage_calls, 0));
+}
+
+/// A key on no plan for OUR stage — here, only on a plan of another API —
+/// is the "issued but dead" state: `plan: null`, every counter and period
+/// field null, still a `200` with `as_of`. And that answer is cached like any
+/// other: it carries no period, so only the TTL retires it.
+#[tokio::test]
+async fn a_key_on_no_plan_for_our_stage_is_plan_null() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(other_api_plan());
+        let id = s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, "q7sd40");
+        s.usage.insert(id, vec![vec![9, 9_991]]);
+    });
+    let router = app_against(&mock);
+
+    let reply = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["plan"], Value::Null, "{body}");
+    for field in [
+        "used",
+        "remaining",
+        "limit",
+        "period_start",
+        "period_end",
+        "resets_at",
+    ] {
+        assert_eq!(body[field], Value::Null, "{field}: {body}");
+    }
+    assert!(body["as_of"].is_string(), "{body}");
+
+    let again = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(again.json(), body, "served from the cache");
+    mock.with(|s| {
+        assert_eq!(s.usage_calls, 0, "no plan of ours, nothing to read");
+        assert_eq!(s.plans_calls, 1, "the second load was a cache hit");
+    });
+}
+
+/// A key on a plan of ours AND on a plan of another API (a key is one plan per
+/// STAGE, not per account): ours is chosen — found across `GetUsagePlans`
+/// pages, one plan per page, so page one alone would not do.
+#[tokio::test]
+async fn the_plan_on_our_stage_is_found_across_pages() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.insert(0, other_api_plan());
+        let id = s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, "q7sd40");
+        s.plan_keys.push((PLAN_ID.to_string(), id.clone()));
+        s.usage.insert(id, vec![vec![1, 99_999]]);
+        s.plans_page_size = 1;
+    });
+
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(body["plan"]["tier"], "free", "{body}");
+    assert_eq!(body["used"], 1, "{body}");
+    mock.with(|s| {
+        assert!(s.plans_calls >= 2, "two plans at one per page is two pages");
+        assert_eq!(s.usage_plan_queries, vec![PLAN_ID.to_string()]);
+    });
+}
+
+/// A DAY quota is the UTC day: the period is today, the reset tomorrow at
+/// 00:00 UTC, the query today to today — and inside the same day the answer
+/// is served from the cache like a MONTH one.
+#[tokio::test]
+async fn a_day_plan_is_the_utc_day_and_is_served_from_the_cache() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(StoredPlan::on_our_stage(
+            "daily1",
+            "prices-production-daily-plan",
+            Some((5.0, 10)),
+            Some((1_000, 0, "DAY")),
+        ));
+        let id = s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, "daily1");
+        s.usage.insert(id, vec![vec![12, 988]]);
+    });
+    let router = app_against(&mock);
+
+    let first = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    let body = first.json();
+    let today = Utc::now().date_naive();
+    let tomorrow = today.succ_opt().unwrap();
+    assert_eq!(
+        body["period_start"],
+        today.format("%Y-%m-%d").to_string(),
+        "{body}"
+    );
+    assert_eq!(
+        body["period_end"],
+        today.format("%Y-%m-%d").to_string(),
+        "{body}"
+    );
+    assert_eq!(
+        body["resets_at"],
+        format!("{}T00:00:00Z", tomorrow.format("%Y-%m-%d")),
+        "{body}"
+    );
+    assert_eq!(body["limit"], 1_000, "{body}");
+    assert_eq!(body["used"], 12, "{body}");
+
+    let second = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(second.json(), body, "same day, same cached answer");
+    mock.with(|s| {
+        assert_eq!(s.usage_calls, 1, "the second load is a cache hit");
+        let (_, start, end) = s.usage_queries[0].clone();
+        assert_eq!(start, today.format("%Y-%m-%d").to_string());
+        assert_eq!(end, today.format("%Y-%m-%d").to_string());
+    });
+}
+
+/// A MONTH quota with a nonzero `offset` (task 0311, review IN-02): the offset
+/// is "the number of requests subtracted from the given limit in the initial
+/// time period" — a request count, not a start day — so the period is still
+/// the calendar month from the 1st, the `GetUsage` window starts on the 1st,
+/// and `limit` is the quota itself.
+#[tokio::test]
+async fn a_month_quota_offset_never_shifts_the_period() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(StoredPlan::on_our_stage(
+            "offset7",
+            "prices-production-offset-plan",
+            Some((2.0, 10)),
+            Some((50_000, 7, "MONTH")),
+        ));
+        let id = s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, "offset7");
+        s.usage.insert(id, vec![vec![12, 49_981]]);
+    });
+
+    let today = Utc::now().date_naive();
+    let first = today.with_day(1).unwrap();
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(
+        body["period_start"],
+        first.format("%Y-%m-%d").to_string(),
+        "{body}"
+    );
+    assert_eq!(body["limit"], 50_000, "{body}");
+    assert_eq!(body["plan"]["quota_period"], "MONTH", "{body}");
+    mock.with(|s| {
+        let (_, start, _) = s
+            .usage_queries
+            .last()
+            .cloned()
+            .expect("GetUsage was called");
+        assert_eq!(start, first.format("%Y-%m-%d").to_string());
+    });
+}
+
+/// `used + remaining` disagreeing with the plan's quota is a cross-check
+/// failure (logged as a warning), not a figure: the answer states the quota.
+#[tokio::test]
+async fn a_disagreeing_cross_check_still_states_the_plans_quota() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        let id = s.seed_on_free_plan(&format!("discord-{USER_ID}-key"), 100);
+        s.usage.insert(id, vec![vec![10, 5]]);
+    });
+
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(body["used"], 10, "{body}");
+    assert_eq!(body["remaining"], 5, "{body}");
+    assert_eq!(
+        body["limit"], 100_000,
+        "the plan's quota, not used + remaining"
+    );
+}
+
+/// A throttle on the plan lookup lands in the same stale-serve branch as one
+/// on `GetUsage` — `plan_of` raises `GatewayError::Throttled`.
+#[tokio::test]
+async fn a_throttled_plan_lookup_gets_the_last_good_answer() {
+    let mock = MockGateway::start().await;
+    seed_key_with_usage(&mock);
+    let router = usage_router_with(&mock, Duration::ZERO, Duration::from_secs(10));
+
+    let first = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    mock.with(|s| s.throttle_plans = true);
+    let second = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(second.status, StatusCode::OK, "stale beats an error page");
+    assert_eq!(first.json(), second.json(), "same answer, same as_of");
+}
+
+/// And with nothing cached, a throttled plan lookup is the same `503` a
+/// throttled `GetUsage` is.
+#[tokio::test]
+async fn a_throttled_plan_lookup_with_nothing_cached_is_a_503() {
+    let mock = MockGateway::start().await;
+    seed_key_with_usage(&mock);
+    mock.with(|s| s.throttle_plans = true);
+
+    let reply = usage(&mock, USER_ID).await;
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(reply.json()["code"], "usage_unavailable");
 }

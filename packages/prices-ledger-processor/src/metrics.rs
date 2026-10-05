@@ -36,6 +36,33 @@ pub const METRIC_NAMESPACE: &str = "Prices/Ingest";
 /// `write_candles` call, published as raw values so percentiles resolve.
 pub const CH_WRITE_LATENCY: &str = "ClickHouseWriteLatencyMs";
 
+/// Count of reconcile runs that hit the task-0282 forced-progress escape hatch:
+/// the iteration budget was spent entirely inside ONE minute, so the run flushed
+/// a PARTIAL minute to keep the cursor moving.
+///
+/// ⚠️ **This is the one path where the hold-back re-creates the very data loss it
+/// exists to prevent**, and nothing else can see it happen: the doorbell is
+/// consumed successfully, the queue drains, no error is raised and the candle it
+/// writes looks entirely plausible. Without this datapoint the only trace is a
+/// WARN line nobody is watching.
+///
+/// Emitted ONLY when it fires (never as a 0), so the alarm on it is
+/// `>= 1` with `treatMissingData: NOT_BREACHING` and a normal run adds nothing
+/// to the wire. Firing means `maxIterations` is now below the chain's
+/// ledgers-per-minute rate — raise `ledgerProcessor.maxIterations`.
+pub const FORCED_PARTIAL_FLUSH: &str = "ForcedPartialFlushes";
+
+/// Trades a reconcile run dropped because they came from a contract shaped like
+/// a pool we index (Aquarius `trade`, Soroswap pair `swap`, Phoenix swap,
+/// SushiSwap V3 pool `swap`, Comet `POOL/swap` — task 0300) that is missing from
+/// `prices.pool_registry` (task 0291).
+///
+/// Emitted ONLY when non-zero, so the alarm on it is `>= 1` over
+/// `NOT_BREACHING`. With the live processor persisting the pools it learns, a
+/// non-zero value means a pool reached the chain by a path we never saw — a new
+/// factory, or a factory event missed before a cold start.
+pub const UNREGISTERED_POOL_EVENTS: &str = "UnregisteredPoolEvents";
+
 /// `PutMetricData` accepts at most 150 entries in a datum's `Values` array, so
 /// a run with more INSERTs than that spills into further datums of the same
 /// metric rather than being truncated (or, worse, aggregated back into
@@ -50,6 +77,9 @@ pub const MAX_VALUES_PER_DATUM: usize = 150;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     Milliseconds,
+    /// A plain occurrence count — used by [`FORCED_PARTIAL_FLUSH`], which is a
+    /// tally of events, not a duration.
+    Count,
 }
 
 /// Accumulated candle-write latency for one reconcile run.
@@ -107,6 +137,39 @@ pub fn write_latency_metrics(latency: Option<WriteLatency>) -> Vec<Metric> {
     }
 }
 
+/// The forced-progress datapoint for one run, or an empty list when the run did
+/// not force.
+///
+/// Deliberately emits nothing on the healthy path rather than a `0`: a metric
+/// that is absent while healthy lets the alarm be a simple `>= 1` over
+/// `NOT_BREACHING`, and keeps `publish` a no-op on an ordinary run — which,
+/// after task 0282, is most runs (they hold back and write no candles either).
+pub fn forced_partial_flush_metrics(forced: bool) -> Vec<Metric> {
+    if forced {
+        vec![Metric {
+            name: FORCED_PARTIAL_FLUSH,
+            unit: Unit::Count,
+            values: vec![1.0],
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The dropped-trade datapoint for one run (task 0291): the total across
+/// sources, or nothing when the run dropped none. Same absent-while-healthy rule
+/// as [`forced_partial_flush_metrics`].
+pub fn unregistered_pool_event_metrics(total: u64) -> Vec<Metric> {
+    if total == 0 {
+        return Vec::new();
+    }
+    vec![Metric {
+        name: UNREGISTERED_POOL_EVENTS,
+        unit: Unit::Count,
+        values: vec![total as f64],
+    }]
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
 /// `Environment` dimension. One `PutMetricData` call for the whole batch.
 ///
@@ -141,6 +204,7 @@ pub async fn publish(
                 .set_values(Some(m.values.clone()))
                 .unit(match m.unit {
                     Unit::Milliseconds => StandardUnit::Milliseconds,
+                    Unit::Count => StandardUnit::Count,
                 })
                 .dimensions(dimension.clone())
                 .build()
@@ -159,6 +223,46 @@ pub async fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 0282: the alarm on this metric is `>= 1` over `NOT_BREACHING`, which
+    /// is only correct while a healthy run emits NOTHING. A `0` datapoint here
+    /// would make "missing" and "healthy" different states and re-open the gap
+    /// the alarm exists to close.
+    #[test]
+    fn a_run_that_did_not_force_publishes_no_datapoint() {
+        assert!(
+            forced_partial_flush_metrics(false).is_empty(),
+            "the healthy path must put nothing on the wire, not a 0"
+        );
+    }
+
+    /// Task 0291: same absent-while-healthy contract as the forced flush.
+    #[test]
+    fn a_run_that_dropped_no_unregistered_trades_publishes_no_datapoint() {
+        assert!(unregistered_pool_event_metrics(0).is_empty());
+    }
+
+    #[test]
+    fn dropped_unregistered_trades_publish_one_count_of_the_total() {
+        let m = unregistered_pool_event_metrics(7);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].name, UNREGISTERED_POOL_EVENTS);
+        assert_eq!(m[0].unit, Unit::Count);
+        assert_eq!(m[0].values, vec![7.0]);
+    }
+
+    #[test]
+    fn a_forced_run_publishes_exactly_one_count_of_one() {
+        let m = forced_partial_flush_metrics(true);
+        assert_eq!(m.len(), 1, "one run that forced is one datapoint");
+        assert_eq!(m[0].name, FORCED_PARTIAL_FLUSH);
+        assert_eq!(m[0].unit, Unit::Count, "a tally of events, not a duration");
+        assert_eq!(
+            m[0].values,
+            vec![1.0],
+            "Sum over the alarm period counts runs, so each forced run contributes exactly 1"
+        );
+    }
 
     #[test]
     fn a_run_with_no_insert_publishes_no_datapoint() {

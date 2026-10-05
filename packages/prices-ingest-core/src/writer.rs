@@ -19,6 +19,7 @@ use tracing::info;
 use crate::bucket::OhlcvCandle;
 use crate::canonical::{AssetIdentity, AssetRegistry};
 use crate::error::IngestError;
+use crate::price::CANDLE_PRICE_SCALE;
 use crate::registry_io::PoolRegistryRow;
 use crate::soroban::Registries;
 
@@ -33,8 +34,11 @@ pub const ORACLE_EPOCH_FLOOR: u32 = 1_577_836_800; // 2020-01-01T00:00:00Z
 /// amounts/prices are i128-derived and can exceed the 38-digit budget, and an
 /// out-of-range value should clamp, not abort the whole run.
 pub fn decimal_to_i128(d: Decimal) -> i128 {
-    let d = d.round_dp(14);
-    let factor = 10i128.pow(14 - d.scale());
+    // The same rounding `price::price_survives_column_scale` asks its question
+    // with: a price this turns into 0 must never have been price-forming
+    // (task 0286, VERIFY-0286-local discrepancy 4).
+    let d = d.round_dp(CANDLE_PRICE_SCALE);
+    let factor = 10i128.pow(CANDLE_PRICE_SCALE - d.scale());
     d.mantissa().saturating_mul(factor)
 }
 
@@ -68,21 +72,20 @@ impl OhlcvWriter {
         Ok(())
     }
 
-    /// Load the existing `prices.assets` rows as `(asset_id, identity)` so a
-    /// run reuses surrogate ids rather than reassigning them.
-    pub async fn load_assets(&self) -> Result<Vec<(u32, AssetIdentity)>, IngestError> {
+    /// Load the identities already in `prices.assets`, so a run writes only
+    /// the ones it discovers. Ids are not loaded: ClickHouse derives them from
+    /// the identity (task 0139).
+    pub async fn load_assets(&self) -> Result<Vec<AssetIdentity>, IngestError> {
         let rows = self
             .client
-            .query(
-                "SELECT asset_id, asset_code, issuer_address, contract_address FROM prices.assets",
-            )
+            .query("SELECT asset_code, issuer_address, contract_address FROM prices.assets")
             .fetch_all::<ExistingAssetRow>()
             .await?;
 
-        let assets: Vec<(u32, AssetIdentity)> = rows
+        let assets: Vec<AssetIdentity> = rows
             .into_iter()
             .map(|r| {
-                let identity = if !r.contract_address.is_empty() {
+                if !r.contract_address.is_empty() {
                     AssetIdentity::Contract(r.contract_address)
                 } else if r.asset_code == "XLM" && r.issuer_address.is_empty() {
                     AssetIdentity::Native
@@ -91,8 +94,7 @@ impl OhlcvWriter {
                         code: r.asset_code,
                         issuer: r.issuer_address,
                     }
-                };
-                (r.asset_id, identity)
+                }
             })
             .collect();
 
@@ -136,12 +138,20 @@ impl OhlcvWriter {
     /// Shared by the SDEX backfill's end-of-run persist and the periodic
     /// asset-discovery worker's pool-registry maintenance (task 0069).
     pub async fn write_pool_registry(&self, reg: &Registries) -> Result<(), IngestError> {
-        let rows = reg.to_pool_rows();
+        self.write_pool_rows(&reg.to_pool_rows()).await
+    }
+
+    /// Persist the given `prices.pool_registry` rows — the live processor's
+    /// write path, which passes only the pools a run newly learned (task 0291,
+    /// see [`Registries::pool_rows_unpersisted`]). Same table and row shape as
+    /// [`write_pool_registry`](Self::write_pool_registry). A no-op (no INSERT)
+    /// on an empty slice, so an idle reconcile makes no round-trip.
+    pub async fn write_pool_rows(&self, rows: &[PoolRegistryRow]) -> Result<(), IngestError> {
         if rows.is_empty() {
             return Ok(());
         }
         let mut insert = self.client.insert("prices.pool_registry")?;
-        for row in &rows {
+        for row in rows {
             insert.write(row).await?;
         }
         insert.end().await?;
@@ -150,41 +160,47 @@ impl OhlcvWriter {
     }
 
     /// Write a batch of candles for one `source` into `prices.price_ohlcv_1m`.
+    ///
+    /// DEPLOY ORDER (task 0286 §4.9): schema first, then the enrichment worker
+    /// plus the coarse sweep plus prices-api, then the rollup MV re-CREATE, and
+    /// this — the ingest — LAST. A pre-0286 MV takes `min(low)` over a
+    /// dust-only minute and propagates the new zero low into the whole coarse
+    /// bucket; pre-0286 enrichment re-inserts a row without the pf columns, so
+    /// they silently fall back to their column DEFAULTs. Nothing should write a
+    /// zero-priced candle until everything downstream understands one.
     pub async fn write_candles(
         &self,
         candles: &[OhlcvCandle],
         source: &str,
     ) -> Result<(), IngestError> {
+        self.write_candles_into("prices.price_ohlcv_1m", candles, source)
+            .await
+    }
+
+    /// [`write_candles`](Self::write_candles) against an explicit table. The
+    /// production table name is hardcoded one level up, which is why no ingest
+    /// test could own a scratch database; this seam exists so the round-trip
+    /// test can (task 0286). Not part of the supported API — the only caller
+    /// outside this crate's tests should be `write_candles`. The table name is
+    /// validated as a plain (optionally `db.`-qualified) identifier before use,
+    /// so the seam cannot become an injection path into whatever the writer's
+    /// credentials reach.
+    #[doc(hidden)]
+    pub async fn write_candles_into(
+        &self,
+        table: &str,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), IngestError> {
+        validate_table(table)?;
         if candles.is_empty() {
             return Ok(());
         }
 
-        let mut insert = self.client.insert("prices.price_ohlcv_1m")?;
+        let mut insert = self.client.insert(table)?;
 
         for candle in candles {
-            insert
-                .write(&OhlcvRow {
-                    timestamp: candle.minute_start,
-                    asset_id: candle.asset_id,
-                    quote_asset_id: candle.quote_asset_id,
-                    source: source.to_string(),
-                    open: decimal_to_i128(candle.open),
-                    high: decimal_to_i128(candle.high),
-                    low: decimal_to_i128(candle.low),
-                    close: decimal_to_i128(candle.close),
-                    volume_base: decimal_to_i128(candle.volume_base),
-                    volume_quote: decimal_to_i128(candle.volume_quote),
-                    // DEFAULT 0 — the 0026 enrichment Lambda fills this
-                    // (volume_quote_usd = oracle_price * volume_quote).
-                    volume_quote_usd: 0,
-                    // DEFAULT 0 — the enrichment pass fills this (task 0061,
-                    // close_usd = oracle_price * close), same as volume_quote_usd.
-                    close_usd: 0,
-                    vwap: decimal_to_i128(candle.vwap),
-                    trade_count: candle.trade_count,
-                    version: candle.version,
-                })
-                .await?;
+            insert.write(&candle_row(candle, source)).await?;
         }
         insert.end().await?;
         Ok(())
@@ -204,27 +220,46 @@ impl OhlcvWriter {
         self.write_asset_rows(registry, registry.assets()).await
     }
 
-    /// Write only the assets interned on/after the `since` watermark — the
-    /// caller's high-water mark of assets already durably in `prices.assets` (see
-    /// [`AssetRegistry::watermark`]). A run that discovered no new assets writes
-    /// **nothing**. This is the live processor's asset write path: it replaces the
-    /// full-registry re-emit that caused ~$337/mo of redundant egress (task 0132).
-    /// Correctness is unchanged — a new asset's row (including its deterministic
-    /// `sac_address`) is complete when interned.
-    pub async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), IngestError> {
-        // O(1) steady-state fast path (the common case — no new assets). Ids are
-        // handed out monotonically, so once `since` has caught up to the next id
-        // no asset can have `id >= since`; skip without scanning the whole
-        // ~200k-entry registry to conclude the set is empty.
-        if since >= registry.watermark() {
-            return Ok(());
-        }
-        self.write_asset_rows(registry, registry.assets_since(since))
+    /// Write only the registry's pending identities ([`AssetRegistry::pending_new`])
+    /// — those this process interned and has not yet persisted. A run that
+    /// discovered no new assets writes **nothing**. This is the live processor's
+    /// asset write path: it replaces the full-registry re-emit that caused
+    /// ~$337/mo of redundant egress (task 0132). A new asset's row (including its
+    /// deterministic `sac_address`) is complete when interned. The caller clears
+    /// the pending set only after this returns `Ok`.
+    pub async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), IngestError> {
+        self.write_asset_rows(registry, registry.pending_new())
             .await
+    }
+
+    /// Write the `prices.assets` rows of those `identities` the table does not
+    /// hold yet, and return how many that was. For a writer that needs a few
+    /// assets to exist without loading the ~210k-row registry (the oracle
+    /// worker). A row already present is not re-emitted.
+    pub async fn write_absent_assets(
+        &self,
+        identities: &[AssetIdentity],
+    ) -> Result<usize, IngestError> {
+        let mut absent = AssetRegistry::from_existing(Vec::new());
+        for identity in identities {
+            let (code, issuer, contract) = identity_strings(identity);
+            let present: u64 = self
+                .client
+                .query(
+                    "SELECT count() FROM prices.assets \
+                     WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
+                )
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .fetch_one()
+                .await?;
+            if present == 0 {
+                absent.intern(identity);
+            }
+        }
+        self.write_new_assets(&absent).await?;
+        Ok(absent.pending_new().count())
     }
 
     /// Shared row-builder for [`write_assets`] / [`write_new_assets`]. Skips the
@@ -237,7 +272,7 @@ impl OhlcvWriter {
     async fn write_asset_rows<'a>(
         &self,
         registry: &AssetRegistry,
-        rows: impl Iterator<Item = (&'a AssetIdentity, &'a u32)>,
+        rows: impl Iterator<Item = &'a AssetIdentity>,
     ) -> Result<(), IngestError> {
         let mut rows = rows.peekable();
         if rows.peek().is_none() {
@@ -246,7 +281,7 @@ impl OhlcvWriter {
 
         let mut insert = self.client.insert("prices.assets")?;
         let mut written = 0u64;
-        for (identity, &id) in rows {
+        for identity in rows {
             let (asset_code, asset_type, issuer_address, contract_address) = match identity {
                 AssetIdentity::Native => {
                     ("XLM".to_string(), "classic", String::new(), String::new())
@@ -264,7 +299,6 @@ impl OhlcvWriter {
 
             insert
                 .write(&AssetRow {
-                    asset_id: id,
                     asset_code,
                     asset_type: asset_type.to_string(),
                     issuer_address,
@@ -346,15 +380,7 @@ impl OhlcvWriter {
         }
         let mut insert = self.client.insert("prices.oracle_prices")?;
         for s in samples {
-            insert
-                .write(&OracleRow {
-                    timestamp: s.timestamp,
-                    asset_id: s.asset_id,
-                    oracle_name: s.oracle_name.clone(),
-                    price_usd: s.price_usd,
-                    raw_data: s.raw_data.clone(),
-                })
-                .await?;
+            insert.write(&oracle_row(s)).await?;
         }
         insert.end().await?;
         Ok(())
@@ -408,27 +434,31 @@ impl OhlcvWriter {
     /// already written — a partial write, which is the exact failure mode the
     /// guard exists to prevent. All identities are checked first; if any fails,
     /// nothing is written and the error names every offender.
+    ///
+    /// Since 0139 ClickHouse derives the id from the identity, so a shared id
+    /// can no longer be stored. The guard stays as a cheap assertion.
     pub async fn populate_usd_rate_from_oracle(
         &self,
         pegs: &[AssetIdentity],
         oracle_name: &str,
     ) -> Result<UsdRateStats, IngestError> {
         // ---- pre-pass: resolve + guard EVERY identity before writing ----
-        let mut resolved: Vec<(&AssetIdentity, u32)> = Vec::with_capacity(pegs.len());
+        let mut resolved: Vec<(&AssetIdentity, u64)> = Vec::with_capacity(pegs.len());
         let mut problems: Vec<String> = Vec::new();
 
         for identity in pegs {
             let (_, code, issuer, contract) = identity_columns(identity);
-            let ids: Vec<u32> = self
+            // `toUInt64`: reads the id on either schema width (task 0139).
+            let ids: Vec<u64> = self
                 .client
                 .query(
-                    "SELECT asset_id FROM prices.assets FINAL \
+                    "SELECT toUInt64(asset_id) FROM prices.assets FINAL \
                      WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
                 )
                 .bind(code)
                 .bind(issuer)
                 .bind(contract)
-                .fetch_all::<u32>()
+                .fetch_all::<u64>()
                 .await?;
             let [asset_id] = ids[..] else {
                 problems.push(format!(
@@ -565,6 +595,13 @@ fn identity_columns(id: &AssetIdentity) -> (&str, &str, &str, &str) {
     }
 }
 
+/// The `(code, issuer, contract)` an id is derived from (task 0139): the
+/// columns a writer sends in place of an id.
+fn identity_strings(id: &AssetIdentity) -> (&str, &str, &str) {
+    let (_, code, issuer, contract) = identity_columns(id);
+    (code, issuer, contract)
+}
+
 /// Outcome of a [`OhlcvWriter::populate_usd_rate_from_oracle`] pass.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UsdRateStats {
@@ -581,12 +618,94 @@ pub struct UsdRateStats {
     pub newest: Vec<(String, u32)>,
 }
 
+/// Reject anything but a plain table identifier, optionally `db.`-qualified.
+///
+/// [`OhlcvWriter::write_candles_into`] interpolates its argument straight into
+/// the INSERT target, so without this it is an identifier-injection path into
+/// whatever the writer's credentials can reach — and the writer's credentials
+/// are production's (task 0286 WR-10). The seam exists so an integration test
+/// can own a scratch database; a scratch database name is an identifier, so
+/// nothing legitimate is lost by refusing everything else.
+fn validate_table(table: &str) -> Result<(), IngestError> {
+    fn is_identifier(part: &str) -> bool {
+        let mut chars = part.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    let ok = match table.split_once('.') {
+        Some((db, name)) => is_identifier(db) && is_identifier(name),
+        None => is_identifier(table),
+    };
+    if ok {
+        Ok(())
+    } else {
+        // The name itself is an identifier the caller supplied, not row data,
+        // so echoing it is leak-safe and is the only way to debug the refusal.
+        Err(IngestError::Precondition(format!(
+            "refusing to write candles into {table:?}: expected a plain table \
+             identifier, optionally qualified by one database name"
+        )))
+    }
+}
+
+/// Build the row for one candle. Extracted from
+/// [`OhlcvWriter::write_candles_into`] so the field-by-field mapping is
+/// unit-testable without a ClickHouse (task 0286): the clickhouse crate routes
+/// this INSERT by field NAME, so a mis-mapped or missing column is a silent
+/// wrong value, never an error.
+///
+/// The row names the two identities, not their ids: ClickHouse derives the ids
+/// from them (task 0139).
+fn candle_row<'a>(candle: &'a OhlcvCandle, source: &'a str) -> OhlcvRow<'a> {
+    let (base_code, base_issuer, base_contract) = identity_strings(&candle.base);
+    let (quote_code, quote_issuer, quote_contract) = identity_strings(&candle.quote);
+    OhlcvRow {
+        timestamp: candle.minute_start,
+        base_code,
+        base_issuer,
+        base_contract,
+        quote_code,
+        quote_issuer,
+        quote_contract,
+        source,
+        open: decimal_to_i128(candle.open),
+        high: decimal_to_i128(candle.high),
+        low: decimal_to_i128(candle.low),
+        close: decimal_to_i128(candle.close),
+        volume_base: decimal_to_i128(candle.volume_base),
+        volume_quote: decimal_to_i128(candle.volume_quote),
+        // DEFAULT 0 — the 0026 enrichment Lambda fills this
+        // (volume_quote_usd = oracle_price * volume_quote).
+        volume_quote_usd: 0,
+        // DEFAULT 0 — the enrichment pass fills this (task 0061,
+        // close_usd = oracle_price * close), same as volume_quote_usd.
+        close_usd: 0,
+        vwap: decimal_to_i128(candle.vwap),
+        trade_count: candle.trade_count,
+        version: candle.version,
+        // Named, not defaulted: a column the struct omits takes its DDL
+        // DEFAULT (pf_trade_count DEFAULT trade_count), which would report a
+        // dust-only minute as fully price-forming (task 0286 F6b).
+        pf_trade_count: candle.pf_trade_count,
+        pf_volume: decimal_to_i128(candle.pf_volume),
+        pf_price_volume: decimal_to_i128(candle.pf_price_volume),
+    }
+}
+
 #[derive(Debug, Serialize, clickhouse::Row)]
-struct OhlcvRow {
+struct OhlcvRow<'a> {
     timestamp: u32,
-    asset_id: u32,
-    quote_asset_id: u32,
-    source: String,
+    base_code: &'a str,
+    base_issuer: &'a str,
+    base_contract: &'a str,
+    quote_code: &'a str,
+    quote_issuer: &'a str,
+    quote_contract: &'a str,
+    source: &'a str,
     open: i128,
     high: i128,
     low: i128,
@@ -598,11 +717,14 @@ struct OhlcvRow {
     vwap: i128,
     trade_count: u32,
     version: u64,
+    pf_trade_count: u32,
+    pf_volume: i128,
+    pf_price_volume: i128,
 }
 
+/// No `asset_id`: the table computes it, and refuses a writer that names it.
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct AssetRow {
-    asset_id: u32,
     asset_code: String,
     asset_type: String,
     issuer_address: String,
@@ -615,19 +737,18 @@ struct AssetRow {
 /// single-writer counterpart to identity in `prices.assets` (task 0067).
 #[derive(Debug, Clone)]
 pub struct AssetMetadata {
-    pub asset_id: u32,
+    pub asset_id: u64,
     pub home_domain: String,
 }
 
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct AssetMetadataRow {
-    asset_id: u32,
+    asset_id: u64,
     home_domain: String,
 }
 
 #[derive(Debug, Deserialize, clickhouse::Row)]
 struct ExistingAssetRow {
-    asset_id: u32,
     asset_code: String,
     issuer_address: String,
     contract_address: String,
@@ -668,18 +789,170 @@ struct UnresolvedPoolRow {
 #[derive(Debug, Clone)]
 pub struct OracleSample {
     pub timestamp: u32,
-    pub asset_id: u32,
+    /// The sampled asset; `None` for a feed with no asset (REDSTONE). The
+    /// writer sends it and ClickHouse derives the row's id (task 0139).
+    pub identity: Option<AssetIdentity>,
     pub oracle_name: String,
     /// price_usd scaled to 14 decimals (matches Decimal(38,14)).
     pub price_usd: i128,
     pub raw_data: String,
 }
 
+/// A sample with no asset (REDSTONE) sends a blank identity, which the table
+/// stores under the sentinel id 0.
+fn oracle_row(s: &OracleSample) -> OracleRow<'_> {
+    let (asset_code, issuer_address, contract_address) =
+        s.identity.as_ref().map_or(("", "", ""), identity_strings);
+    OracleRow {
+        timestamp: s.timestamp,
+        asset_code,
+        issuer_address,
+        contract_address,
+        oracle_name: &s.oracle_name,
+        price_usd: s.price_usd,
+        raw_data: &s.raw_data,
+    }
+}
+
 #[derive(Debug, Serialize, clickhouse::Row)]
-struct OracleRow {
+struct OracleRow<'a> {
     timestamp: u32,
-    asset_id: u32,
-    oracle_name: String,
+    asset_code: &'a str,
+    issuer_address: &'a str,
+    contract_address: &'a str,
+    oracle_name: &'a str,
     price_usd: i128,
-    raw_data: String,
+    raw_data: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clickhouse::Row;
+
+    /// Task 0286 F5/F6b. `clickhouse` 0.13 emits
+    /// `INSERT INTO t(<struct field names>) FORMAT RowBinary`, so a candle
+    /// column this struct does not name is NOT an error — the server fills it
+    /// from the column DEFAULT. On the pf columns that is catastrophic and
+    /// invisible: `pf_trade_count DEFAULT trade_count` would report a dust-only
+    /// minute as fully price-forming. The DDL side of this contract is pinned
+    /// in `prices-clickhouse`; this is the writer side.
+    #[test]
+    fn the_row_struct_names_every_candle_column() {
+        assert_eq!(
+            OhlcvRow::COLUMN_NAMES.to_vec(),
+            prices_clickhouse::CANDLE_WRITER_COLUMNS.to_vec()
+        );
+    }
+
+    /// WR-10. `write_candles_into` interpolates a caller-supplied table name
+    /// into the INSERT target, so it is an identifier-injection path into
+    /// whatever the writer's credentials can reach. It exists for the
+    /// round-trip test's scratch database and must accept nothing else: a bare
+    /// identifier, or one `db.` prefix, both ASCII identifier characters only.
+    #[test]
+    fn only_a_plain_table_identifier_is_accepted_as_a_write_target() {
+        for ok in [
+            "price_ohlcv_1m",
+            "prices.price_ohlcv_1m",
+            "it_candle_write.price_ohlcv_1m",
+            "_x._y9",
+        ] {
+            assert!(validate_table(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "",
+            "prices.",
+            ".price_ohlcv_1m",
+            "a.b.c",
+            "9prices.t",
+            "prices.price_ohlcv_1m; DROP TABLE prices.assets",
+            "prices.price_ohlcv_1m SELECT",
+            "`prices`.`t`",
+            "prices.t--",
+            "prices .t",
+            "prices.t\u{00e9}",
+        ] {
+            assert!(
+                validate_table(bad).is_err(),
+                "{bad:?} should be rejected as a write target"
+            );
+        }
+    }
+
+    /// Each pf column comes from its OWN candle field. The three values here are
+    /// deliberately distinct, and distinct from `trade_count` / `volume_base` /
+    /// `volume_quote`, so a swapped or defaulted mapping fails instead of
+    /// coincidentally matching the column DEFAULT expressions.
+    #[test]
+    fn the_row_builder_maps_each_pf_column_from_its_own_field() {
+        let candle = OhlcvCandle {
+            minute_start: 1_700_000_000,
+            base: AssetIdentity::Native,
+            quote: AssetIdentity::Contract("CQUOTE".to_string()),
+            open: Decimal::from(3),
+            high: Decimal::from(4),
+            low: Decimal::from(2),
+            close: Decimal::from(3),
+            volume_base: Decimal::from(40),
+            volume_quote: Decimal::from(120),
+            vwap: Decimal::from(3),
+            trade_count: 9,
+            version: 100_000,
+            pf_trade_count: 5,
+            pf_volume: Decimal::from(30),
+            pf_price_volume: Decimal::from(90),
+        };
+        let row = candle_row(&candle, "sdex");
+        assert_eq!(row.pf_trade_count, 5, "not trade_count (9)");
+        assert_eq!(
+            row.pf_volume,
+            decimal_to_i128(Decimal::from(30)),
+            "not volume_base (40)"
+        );
+        assert_eq!(
+            row.pf_price_volume,
+            decimal_to_i128(Decimal::from(90)),
+            "not volume_quote (120)"
+        );
+        assert_eq!(row.trade_count, 9);
+        assert_eq!(row.volume_base, decimal_to_i128(Decimal::from(40)));
+        // Task 0139: the identities, which ClickHouse turns into the ids.
+        assert_eq!(
+            (row.base_code, row.base_issuer, row.base_contract),
+            ("XLM", "", "")
+        );
+        assert_eq!(
+            (row.quote_code, row.quote_issuer, row.quote_contract),
+            ("", "", "CQUOTE")
+        );
+    }
+
+    /// Task 0139: an oracle row names its asset's identity, and a feed with no
+    /// asset names a blank one (the table's sentinel 0).
+    #[test]
+    fn the_oracle_row_names_the_identity_or_a_blank_one() {
+        let sample = |identity| OracleSample {
+            timestamp: 1,
+            identity,
+            oracle_name: "reflector".to_string(),
+            price_usd: 1,
+            raw_data: String::new(),
+        };
+        let usdc = sample(Some(AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: "GISSUER".to_string(),
+        }));
+        let row = oracle_row(&usdc);
+        assert_eq!(
+            (row.asset_code, row.issuer_address, row.contract_address),
+            ("USDC", "GISSUER", "")
+        );
+        let redstone = sample(None);
+        let row = oracle_row(&redstone);
+        assert_eq!(
+            (row.asset_code, row.issuer_address, row.contract_address),
+            ("", "", "")
+        );
+    }
 }

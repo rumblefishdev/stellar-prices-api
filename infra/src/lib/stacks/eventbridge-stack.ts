@@ -1,9 +1,9 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
@@ -75,6 +75,11 @@ const MTLS_NOTAFTER_PROBE_ASSET_DIR =
   process.env['MTLS_NOTAFTER_PROBE_ASSET_DIR'] ??
   '../target/lambda/mtls-notafter-probe';
 
+/** Cargo-lambda build output for the `coverage-sweep-probe` (task 0100). */
+const COVERAGE_SWEEP_PROBE_ASSET_DIR =
+  process.env['COVERAGE_SWEEP_PROBE_ASSET_DIR'] ??
+  '../target/lambda/coverage-sweep-probe';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -102,8 +107,10 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly enrichmentRule: events.Rule;
   public readonly coarseSweepRule: events.Rule;
   public readonly backfillFreshnessProbeRule: events.Rule;
+  public readonly backfillReconcileProbeRule: events.Rule;
   public readonly rollupFreshnessProbeRule: events.Rule;
   public readonly mtlsNotafterProbeRule: events.Rule;
+  public readonly coverageSweepProbeRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
   public readonly supplyFunction: lambda.Function;
@@ -113,6 +120,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly backfillFreshnessProbeFunction: lambda.Function;
   public readonly rollupFreshnessProbeFunction: lambda.Function;
   public readonly mtlsNotafterProbeFunction: lambda.Function;
+  public readonly coverageSweepProbeFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -155,7 +163,7 @@ export class EventBridgeStack extends cdk.Stack {
 
     this.assetDiscoveryRule = new events.Rule(this, 'AssetDiscoveryRule', {
       ruleName: `prices-${env}-asset-discovery`,
-      description: `Periodic asset-registry maintenance (${env})`,
+      description: `Hourly Soroban symbol resolution + asset seed (${env})`,
       schedule: events.Schedule.expression(schedules.assetDiscovery),
     });
 
@@ -217,6 +225,17 @@ export class EventBridgeStack extends cdk.Stack {
       },
     );
 
+    // Weekly claim reconcile (task 0272); target wired below to the freshness probe.
+    this.backfillReconcileProbeRule = new events.Rule(
+      this,
+      'BackfillReconcileProbeRule',
+      {
+        ruleName: `prices-${env}-backfill-reconcile`,
+        description: `Reconciles backfill_progress earliest_data_available claims against price_ohlcv_1h → Prices/Backfill EarliestOverclaimSeconds (${env})`,
+        schedule: events.Schedule.expression(schedules.backfillReconcileProbe),
+      },
+    );
+
     this.rollupFreshnessProbeRule = new events.Rule(
       this,
       'RollupFreshnessProbeRule',
@@ -237,27 +256,30 @@ export class EventBridgeStack extends cdk.Stack {
       },
     );
 
+    this.coverageSweepProbeRule = new events.Rule(
+      this,
+      'CoverageSweepProbeRule',
+      {
+        ruleName: `prices-${env}-coverage-sweep-probe`,
+        description: `Weekly sweep of unregistered swap emitters → Prices/Coverage (${env})`,
+        schedule: events.Schedule.expression(schedules.coverageSweepProbe),
+        // Durable on/off switch (task 0100; see
+        // EnvironmentConfig.coverageSweepEnabled): ON in production since BE's
+        // two SELECT grants to prices_writer were verified live on 2026-09-21.
+        enabled: config.coverageSweepEnabled,
+      },
+    );
+
     // -----------------------------------------------------------------
     // Asset Discovery worker Lambda (task 0054) + its rule target.
-    // No VPC (ADR 0007 §6); mTLS to ClickHouse + S3 read on BE's ledger
-    // bucket, mirroring the ledger processor's conventions.
+    // No VPC (ADR 0007 §6); mTLS to ClickHouse and the public Soroban RPC —
+    // nothing else. It read BE's ledger bucket only for the ledger scan, which
+    // task 0256 removed, so it holds no S3 grant.
     // -----------------------------------------------------------------
     const base = `/platform/${env}`;
     const chDomain = ssm.StringParameter.valueForStringParameter(
       this,
       `${base}/ch-domain`,
-    );
-    const networkPassphrase = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${base}/stellar-network-passphrase`,
-    );
-    const ledgerBucketName = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${base}/stellar-ledger-data-bucket-name`,
-    );
-    const ledgerBucketArn = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${base}/stellar-ledger-data-bucket-arn`,
     );
 
     // Writes prices.assets → the same `ingestion`-class mTLS identity the
@@ -278,39 +300,25 @@ export class EventBridgeStack extends cdk.Stack {
       name: 'asset-discovery',
       errorAlarmActions: [opsAlarmAction],
       assetDir: ASSET_DISCOVERY_ASSET_DIR,
+      // Loads the whole asset registry to seed against it: ~153 MB measured
+      // at 209k assets (2026-09-21), and the registry only grows. That load is
+      // what the worker does today, not what the seed needs (~20 identities) —
+      // task 0140 tracks the targeted read; revisit this number with it.
       memorySize: 512,
-      // Bounded by MAX_LEDGERS in the binary; a catch-up run fetches+decodes
-      // many S3 objects, so allow generous headroom under the 1h cadence.
+      // The symbol stage is the long one, bounded in the binary at
+      // MAX_CONTRACTS_PER_RUN × RPC_TIMEOUT_SECS = 25 × 5 s; a quiet run
+      // takes ~3 s.
       timeout: cdk.Duration.minutes(5),
       secretsExtensionLayer,
       chDomain,
       rule: this.assetDiscoveryRule,
-      environment: {
-        // Source bucket for ledger XDR objects (Galexie key scheme).
-        BUCKET_NAME: ledgerBucketName,
-        STELLAR_NETWORK_PASSPHRASE: networkPassphrase,
-        // NB: INITIAL_DISCOVERY_LEDGER is intentionally NOT set here — the
-        // binary seeds gracefully without it and only scans once a
-        // `prices.discovery_state` cursor exists. Operator activates the
-        // ledger scan as a deploy-prep step (seed the cursor or set the
-        // env), so synth is not gated on an operator value.
-      },
-      // Informational — registry maintenance is non-critical (a failed run
-      // just defers new-asset pickup to the next hour).
+      // Informational — a failed run just defers a new contract's symbol to
+      // the next hour.
       alarmDescription:
-        'Asset Discovery Lambda invocation errors (informational; registry maintenance is non-critical).',
+        'Asset Discovery Lambda invocation errors (informational; symbol resolution and the asset seed are non-critical).',
       alarmPeriod: cdk.Duration.hours(1),
     });
     this.assetDiscoveryFunction = discovery.function;
-
-    // S3 read on BE's ledger bucket (same-account → plain IAM grant, no
-    // bucket policy from BE). Imported by attributes; the bucket is SSE-S3
-    // (BE task 0306/0278), so no kms:Decrypt is needed.
-    const ledgerBucket = s3.Bucket.fromBucketAttributes(this, 'LedgerBucket', {
-      bucketArn: ledgerBucketArn,
-      bucketName: ledgerBucketName,
-    });
-    ledgerBucket.grantRead(discovery.role);
 
     // -----------------------------------------------------------------
     // Cleanup worker Lambda (task 0039) + its cron target. CH-only (no S3,
@@ -427,7 +435,8 @@ export class EventBridgeStack extends cdk.Stack {
 
     // The worker publishes its pass metrics (OracleRuns, OracleFailedRuns,
     // OracleSymbolsQueried, OracleRowsWritten, OracleRowsSkipped,
-    // OracleTimestampRejected, OracleUsdRatesSnapshotted) under the
+    // OracleTimestampRejected, OracleUsdRatesSnapshotted,
+    // OracleMeasuredRatesSnapshotted — task 0228) under the
     // `Prices/Oracle` namespace (task 0231). PutMetricData has no
     // resource-level scoping, so it is `*` constrained to that namespace, as
     // the enrichment role below already is. The ObservabilityStack's
@@ -702,11 +711,18 @@ export class EventBridgeStack extends cdk.Stack {
       chDomain,
       rule: this.backfillFreshnessProbeRule,
       alarmDescription:
-        'Backfill freshness probe invocation errors — the SDEX push-age metric may be stale, blinding the freshness alarm.',
+        'Backfill freshness probe invocation errors — the SDEX push-age metric may be stale, blinding the freshness alarm. Also covers the weekly claim reconcile run (task 0272).',
       alarmPeriod: cdk.Duration.minutes(15),
       errorAlarmActions: [opsAlarmAction],
     });
     this.backfillFreshnessProbeFunction = freshness.function;
+
+    // `createWorkerLambda` wires only one rule; the reconcile is a second one.
+    this.backfillReconcileProbeRule.addTarget(
+      new targets.LambdaFunction(freshness.function, {
+        event: events.RuleTargetInput.fromObject({ check: 'reconcile' }),
+      }),
+    );
 
     freshness.role.addToPolicy(
       new iam.PolicyStatement({
@@ -829,11 +845,24 @@ export class EventBridgeStack extends cdk.Stack {
       rule: this.mtlsNotafterProbeRule,
       environment: {
         MTLS_PROBE_SECRETS: `ingestion=${discoveryMtlsSecretName},api=${apiMtlsSecretName}`,
+        // Second job on the same daily run: the stuck-alarm digest (task 0214).
+        // It publishes here, the topic the alarms themselves use, so the re-read
+        // lands in the channel where the original was scrolled past.
+        OPS_ALARMS_TOPIC_ARN: opsAlarmsTopic.topicArn,
       },
       alarmDescription:
-        'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm.',
+        'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm. Also covers the daily stuck-alarm digest (task 0214): if this fires, latched alarms are no longer being re-surfaced.',
       alarmPeriod: cdk.Duration.days(1),
       errorAlarmActions: [opsAlarmAction],
+      // No async retries. Lambda's default of 2 was harmless while this probe
+      // only did idempotent PutMetricData, but the stuck-alarm digest (task
+      // 0214) sns:Publishes BEFORE the handler can fail on an unreadable cert —
+      // so on a day when both happen, the retries post the identical digest to
+      // the ops channel three times, to the one channel this task exists to
+      // keep readable. Retries bought nothing for alarming either: the error
+      // alarm is threshold 1 over 1 period, so a blip pages whether or not the
+      // retry then succeeds.
+      asyncRetryAttempts: 0,
     });
     this.mtlsNotafterProbeFunction = notafter.function;
 
@@ -858,6 +887,98 @@ export class EventBridgeStack extends cdk.Stack {
         },
       }),
     );
+    // Task 0214's daily digest: read our own alarms' state, and publish the
+    // stuck ones to the ops topic.
+    //
+    // `*` deliberately, though an `alarm:prices-${env}-*` ARN simulates as
+    // allowed: DescribeAlarms is a LIST call, and a resource-scoped grant on a
+    // list call is the kind of thing that authorizes in the IAM simulator and
+    // denies at runtime. A denial here does not fail quietly — it fails the
+    // probe, which pages the ops channel — so the failure mode is worse than
+    // what the scope buys, which is hiding other teams' alarm NAMES from a
+    // read-only Lambda in our own account. The env filter lives in the code
+    // (`alarm_digest::run` passes `prices-{env}-` as the prefix).
+    notafter.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPricesAlarmState',
+        actions: ['cloudwatch:DescribeAlarms'],
+        resources: ['*'],
+      }),
+    );
+    notafter.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishStuckAlarmDigest',
+        actions: ['sns:Publish'],
+        resources: [opsAlarmsTopic.topicArn],
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Coverage sweep probe (task 0100, layer 3 of the coverage model) + its
+    // weekly target. Once a week it reads a trailing 14-day window of BE's
+    // `default.soroban_events` for swap/trade-shaped emitters, drops those in
+    // `prices.pool_registry` (SQL) and on the committed allow-list (Rust), logs
+    // every remaining contract and publishes the residual to Prices/Coverage.
+    // It REPORTS ONLY: it never registers anything (auto-registering a router
+    // double-counts the pool trades it wraps).
+    //
+    // Identity (decision D5, option A): the existing ingestion identity
+    // (`prices_writer`) like every other worker here — no new role, secret,
+    // certificate or CN-map entry. It depends on BE adding
+    // `GRANT SELECT ON default.soroban_events` and
+    // `GRANT SELECT ON default.soroban_contracts` to prices_writer; until then
+    // every run fails with Code 497 ACCESS_DENIED and pages via -errors, by
+    // design (docs/runbooks/0100-coverage-sweep-triage.md §4).
+    // -----------------------------------------------------------------
+    const coverageSweep = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'CoverageSweepProbe',
+      name: 'coverage-sweep-probe',
+      assetDir: COVERAGE_SWEEP_PROBE_ASSET_DIR,
+      memorySize: 256,
+      // Measured on production 2026-09-21: 9.6 s, 218.5 M rows / 46.6 GB read,
+      // 141 MB of server memory. The client bounds each of the run's two
+      // statements at 50 s (SWEEP_MAX_EXECUTION_SECS), so a slow scan ends as
+      // a ClickHouse TIMEOUT_EXCEEDED naming its cause, not as a Lambda kill
+      // with none in the log. 3 min rather than 2: an Init over 10 s is re-run
+      // inside the invocation on this clock, and 2 × 50 s + that re-run must
+      // still fit (PR #332 review). Weekly, so the headroom costs nothing.
+      timeout: cdk.Duration.minutes(3),
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.coverageSweepProbeRule,
+      alarmDescription: `The weekly coverage sweep did not complete, so prices-${env}-coverage-sweep-unclassified cannot fire. Likely causes: Code 497 before BE grants SELECT on default.soroban_events / default.soroban_contracts to prices_writer; TIMEOUT_EXCEEDED at 50 s; an allow-list that fails validation at cold start. See docs/runbooks/0100-coverage-sweep-triage.md.`,
+      alarmPeriod: cdk.Duration.days(1),
+      // 7 × 1 day, 1 datapoint to alarm: a failed Monday run stays in ALARM
+      // until the next Monday run, instead of clearing at the next UTC
+      // midnight a week before anything retries it (review WR-02).
+      alarmEvaluationPeriods: 7,
+      errorAlarmActions: [opsAlarmAction],
+      // A 46 GB scan must not be re-driven by Lambda's async retries: the
+      // -errors alarm pages on the first failure anyway (threshold 1).
+      asyncRetryAttempts: 0,
+    });
+    this.coverageSweepProbeFunction = coverageSweep.function;
+
+    // At most one sweep at a time against BE's shared ClickHouse (the
+    // coarse-sweep pattern). A manual invoke during the Monday run is refused
+    // rather than doubled.
+    const coverageSweepCfn = coverageSweep.function.node
+      .defaultChild as lambda.CfnFunction;
+    coverageSweepCfn.reservedConcurrentExecutions = 1;
+
+    coverageSweep.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishCoverageMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Coverage' },
+        },
+      }),
+    );
 
     new cdk.CfnOutput(this, 'BackfillFreshnessProbeFunctionName', {
       value: this.backfillFreshnessProbeFunction.functionName,
@@ -867,6 +988,9 @@ export class EventBridgeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'MtlsNotafterProbeFunctionName', {
       value: this.mtlsNotafterProbeFunction.functionName,
+    });
+    new cdk.CfnOutput(this, 'CoverageSweepProbeFunctionName', {
+      value: this.coverageSweepProbeFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');

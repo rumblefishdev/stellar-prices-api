@@ -8,15 +8,16 @@
  * its CORS answer.
  *
  * The shared host (task 0194) cannot offer that: its `/api/*` behaviour is a
- * static SPA with no route to any backend. So the bundle built for it carries
- * the API's own hostname (`API_ORIGIN`, from `VITE_PORTAL_API_ORIGIN`) and the
- * same URLs become absolute — cross-origin, but **same-site**, which is what
- * keeps the `SameSite=Lax` cookie flowing: the browser sends it on a
- * same-site `fetch` regardless of method, provided the request asks for
- * credentials. Hence `credentials: 'include'` on every call below; it is a
- * no-op on the relative layout and the whole point on the absolute one. The
- * backend's side of the same arrangement is one allowed origin in its CORS
- * answer and a sign-in that lands back here rather than on the API host.
+ * `301` to `/prices-api/*`, a static SPA with no route to any backend. So the
+ * bundle built for it carries the API's own hostname (`API_ORIGIN`, from
+ * `VITE_PORTAL_API_ORIGIN`) and the same URLs become absolute — cross-origin,
+ * but **same-site**, which is what keeps the `SameSite=Lax` cookie flowing: the
+ * browser sends it on a same-site `fetch` regardless of method, provided the
+ * request asks for credentials. Hence `credentials: 'include'` on every call
+ * below; it is a no-op on the relative layout and the whole point on the
+ * absolute one. The backend's side of the same arrangement is one allowed
+ * origin in its CORS answer and a sign-in that lands back here rather than on
+ * the API host.
  */
 
 import { API_ORIGIN } from '../api-origin';
@@ -159,34 +160,43 @@ function failureMessage(
  * portal is open…" with no end, which is exactly the spinner that never resolves
  * the failure branch exists to avoid.
  *
- * Ten seconds is well past a cold Lambda behind this route (the handler reads a
- * cached SSM parameter and returns a single boolean) and well short of a
- * visitor's patience.
+ * Ten seconds is well past a cold Lambda behind this route and well short of a
+ * visitor's patience. On the first call in an execution environment `/config`
+ * loads the portal's sources, bounded at 4 s by the backend; after that it
+ * returns a cached answer and a single boolean.
  */
 const PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * How long the page waits on the key reveal.
  *
- * Longer than {@link PROBE_TIMEOUT_MS}, because this call is not a probe: a cold
- * Lambda resolves credentials, reads an SSM parameter and then walks a
- * paginated listing plus a read. The api-handler's own Lambda timeout is 15s
- * and API Gateway cuts everything off at 29s, so 20s is inside the window
- * where an answer — including a `502` — is still possible.
+ * Longer than {@link PROBE_TIMEOUT_MS}, because this call is not a probe: it
+ * can be the first portal request in an execution environment, so it may load
+ * the portal's sources first (up to 4s, `LOAD_BUDGET` in
+ * `portal/sources.rs`), and then it walks a paginated listing plus a read
+ * under the reconciliation's 10s (`RECONCILE_DEADLINE`) — 14s at worst. The
+ * api-handler's own Lambda timeout is 15s and API Gateway cuts everything off
+ * at 29s, so 20s is past any answer the backend can still give — including a
+ * `502` from a killed invocation — and inside the gateway's cap.
  */
 const KEY_TIMEOUT_MS = 20_000;
 
 /**
  * How long the page waits on the usage read.
  *
- * Between the other two, because the call is: the backend's own wall-clock
- * deadline on the lookup is 10s (`USAGE_DEADLINE` in `portal/usage/mod.rs`),
- * after which it answers a `503` that names the condition. Waiting only
- * {@link PROBE_TIMEOUT_MS} would tie with that deadline and the page would
- * report its own timeout instead of the backend's more useful answer; 15s
- * leaves the answer time to arrive while staying inside the gateway's 29s cap.
+ * The same as {@link KEY_TIMEOUT_MS}, for the same arithmetic. The backend's
+ * own wall-clock deadline on the lookup is 10s (`USAGE_DEADLINE` in
+ * `portal/usage/mod.rs`), after which it answers a `503` that names the
+ * condition — but `/usage` can be the first portal request in an execution
+ * environment, and then the sources load first (up to 4s, `LOAD_BUDGET`), so
+ * that `503` can arrive at 14s (task 0311; pinned by
+ * `the_load_budget_fits_in_front_of_every_route`). It was 15s, which left the
+ * page one second over a 14s answer before network and gateway latency — a tie
+ * in which the page reports its own timeout instead of the backend's more
+ * useful answer. 20s clears the 15s Lambda timeout, past which nothing can
+ * answer, and stays inside the gateway's 29s cap.
  */
-const USAGE_TIMEOUT_MS = 15_000;
+const USAGE_TIMEOUT_MS = 20_000;
 
 /** Whether a rejection from `fetch` is this timeout firing. See the call site. */
 const isTimeout = (error: unknown): boolean =>
@@ -235,14 +245,14 @@ async function getJson<T>(url: string): Promise<T> {
     return (await response.json()) as T;
   } catch {
     // A `200` that is not JSON is the signature of the most likely routing
-    // regression there is here: a backend call that reached a static host —
-    // a bundle built WITHOUT `VITE_PORTAL_API_ORIGIN` and synced to the shared
-    // host, where `/api/*` is an S3 behaviour that rewrites `/api/config` to
-    // `/api/index.html` and answers it as `200 text/html` (exactly what task
-    // 0194 saw on 2026-08-31). Left unwrapped, that surfaces as a bare
-    // `SyntaxError` about an unexpected `<` — no status, no URL, and no hint
-    // that the cause is where the request went. Carry the status so the page
-    // can say which URL lied.
+    // regression there is here: a backend call that reached a static host — a
+    // bundle built WITHOUT `VITE_PORTAL_API_ORIGIN` and synced to the shared
+    // host, where `/api/config` is redirected to `/prices-api/config`, which
+    // the S3 behaviour rewrites to `/prices-api/index.html` and answers as
+    // `200 text/html` (what task 0194 saw on 2026-08-31, before the redirect).
+    // Left unwrapped, that surfaces as a bare `SyntaxError` about an unexpected
+    // `<` — no status, no URL, and no hint that the cause is where the request
+    // went. Carry the status so the page can say which URL lied.
     throw new PortalApiError(
       `${url} answered ${response.status}, not JSON`,
       response.status,
@@ -493,33 +503,71 @@ export interface PortalKey {
   last_updated_at?: string | null;
 }
 
+/** The tier of a usage plan, as the dashboard labels it (task 0311). */
+export type PortalPlanTier =
+  | 'free'
+  | 'basic'
+  | 'analyst'
+  | 'lite'
+  | 'pro'
+  | 'custom';
+
 /**
- * What `GET /api/usage` answers (task 0188).
+ * The key's usage plan on this API's stage (task 0311) — `PlanWire` in
+ * `packages/prices-api/src/portal/usage/mod.rs`.
+ *
+ * Every figure is `null` when the plan does not set it: a plan with no
+ * throttle or no quota is unlimited in that respect, and the page says
+ * "Unlimited" rather than rendering a zero.
+ */
+export interface PortalPlan {
+  /** `free`…`pro` for the five CDK plans; `custom` for any other plan on our stage. */
+  tier: PortalPlanTier;
+  /** The AWS plan name — what a Custom plan is known by. */
+  name: string;
+  /** Sustained requests per second per key. */
+  rate_limit_per_second: number | null;
+  /** Token-bucket capacity above the rate. */
+  burst_limit: number | null;
+  /** Requests per quota period. */
+  quota_limit: number | null;
+  /** `MONTH`, `DAY`, `WEEK`, or whatever else AWS answers, verbatim. */
+  quota_period: string | null;
+}
+
+/**
+ * What `GET /api/usage` answers (task 0188; the plan since task 0311).
  *
  * Mirrors `UsageResponse` in `packages/prices-api/src/portal/usage/mod.rs`, and
  * hand-written for the same reason every type above is: the portal's routes are
  * deliberately absent from the published OpenAPI document.
  *
- * The three counters are `null` **together** when AWS has recorded nothing for
- * the key yet — the ordinary state minutes after issuance, because `GetUsage`
- * lags. The page renders that as "nothing recorded yet" rather than inventing
- * zeros; the period and `as_of` are always present.
+ * `used` and `remaining` are `null` **together** when AWS has recorded nothing
+ * for the key yet — the ordinary state minutes after issuance, because
+ * `GetUsage` lags — and the page renders that as "nothing recorded yet"
+ * rather than inventing zeros. They are also `null`, with `limit` and the
+ * period fields, when the key is on no plan for this API's stage
+ * (`plan: null`) or on a plan without a quota; `limit` and the period are
+ * `null` too when the plan's quota period is one the backend does not compute
+ * (`WEEK`). `as_of` is always present.
  */
 export interface PortalUsage {
   /** Requests counted against the quota this period, per AWS. */
   used: number | null;
   /** Requests left, as of the latest day AWS has data for. */
   remaining: number | null;
-  /** The monthly quota, reconstructed as `used + remaining`. */
+  /** The plan's quota — `plan.quota_limit`. */
   limit: number | null;
-  /** First day of the current period, `YYYY-MM-DD` (our rule: calendar month, UTC). */
-  period_start: string;
+  /** First day of the current period, `YYYY-MM-DD` (MONTH: the calendar month, UTC; DAY: the UTC day). */
+  period_start: string | null;
   /** Last day of the current period, inclusive. */
-  period_end: string;
+  period_end: string | null;
   /** When the quota resets under our stated rule, RFC 3339. */
-  resets_at: string;
-  /** When the `GetUsage` behind this answer was made, RFC 3339. */
+  resets_at: string | null;
+  /** When the lookup behind this answer was made, RFC 3339. */
   as_of: string;
+  /** The key's plan on this API's stage; `null` when it is on none. */
+  plan: PortalPlan | null;
 }
 
 /**

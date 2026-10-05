@@ -10,8 +10,13 @@ build:
 # CfnOutput — wire it into the GitHub Environment secret as
 # AWS_DEPLOY_ROLE_ARN.
 
+# A bare `cdk bootstrap` synthesizes the app in cdk.json first, and the
+# production app cannot synth on a fresh clone (no dist/, no Lambda assets).
+# Naming the environment and passing a no-op app skips that (task 0297): the
+# account is the active credentials', the region the one production.json pins.
 bootstrap:
-	npx cdk bootstrap
+	npx cdk bootstrap --app "node -e ''" \
+		aws://$$(aws sts get-caller-identity --query Account --output text)/$$(node -p "require('./envs/production.json').awsRegion")
 
 synth-cicd: build
 	npx cdk --app "$(CICD_APP)" synth
@@ -36,10 +41,29 @@ destroy-cicd: build
 # its own.
 build-production: build
 
+# `build` above compiles the CDK TypeScript ONLY. The Lambda code is whatever
+# sits in `../target/lambda/<name>/` when `Code.fromAsset` zips it — so a deploy
+# that did not build the Rust ships the last thing anyone happened to build, and
+# every signal says it worked: a clean S3Key change in `cdk diff`, a green
+# deploy, a passing `/health` (a keyless API Gateway MOCK — it never reaches a
+# Lambda and cannot be used to verify one). Task 0141: 2026-08-03 shipped a
+# stale `prices-api` this way; on 2026-08-12 the same directory held eleven
+# 10-byte `#!/bin/sh` stubs.
+#
+# So every target that can ship a Lambda depends on this. It is cargo that
+# decides freshness — a no-op when the artifacts are current — and the script
+# then refuses anything that is not a distinct aarch64 ELF per asset.
+build-lambdas:
+	../tools/scripts/build-lambda-assets.sh
+
 synth-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" synth
 
-diff-production: build-production
+# Depends on `build-lambdas` for the same reason the deploys do (task 0141): a
+# diff against stale artifacts that happen to match what is live shows no
+# Lambda change, and the deploy that follows then rebuilds and replaces them.
+# What you diff must be what you ship. ~1 s when the artifacts are current.
+diff-production: build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" diff
 
 # The /api-docs-json stage-cache entry has a 3600s TTL, which is only safe
@@ -69,7 +93,7 @@ flush-production-cache:
 # So `make diff-production` before any production deploy, and read it for removals
 # rather than skimming it for additions. This applies to every deploy target below
 # too; it lives here because this is the one that deploys all stacks at once.
-deploy-production: build-production
+deploy-production: build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy --all --require-approval broadening
 	$(MAKE) flush-production-cache
 
@@ -77,21 +101,27 @@ destroy-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy --all --force
 
 deploy-production-secrets: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Secrets --require-approval broadening
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Secrets --exclusively --require-approval broadening
 
 destroy-production-secrets: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Secrets --force
 
 # Ships a new api-handler, so it ships a new OpenAPI document — flush too.
-deploy-production-compute: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --require-approval broadening
+deploy-production-compute: build-production build-lambdas
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --exclusively --require-approval broadening
 	$(MAKE) flush-production-cache
 
 destroy-production-compute: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force
 
+# `--exclusively` matters most here. ApiGateway imports the api-handler from
+# Compute, so without the flag this target deployed Compute too — from whatever
+# was in `target/lambda/` (task 0141, 2026-08-12). The price: a change that
+# spans both stacks (a new route AND its handler) needs
+# `deploy-production-compute` FIRST, then this. Deploy only this and the new
+# route proxies to the old handler behind a green deploy.
 deploy-production-apigateway: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --require-approval broadening
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --exclusively --require-approval broadening
 
 # Nothing imports this stack's exports since task 0195 retired
 # `PortalHostingStack` (which used the RestApi id for its execute-api origin),
@@ -101,11 +131,11 @@ destroy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
 # The portal (task 0194; the only deploy path since task 0195).
-# `https://sorobanscan.rumblefish.dev/api/` is served by the block explorer's
+# `https://sorobanscan.rumblefish.dev/prices-api/` is served by the block explorer's
 # distribution (EA2TLS5SS5M87) from ITS bucket, which nothing in this repo
 # deploys — this sync is the only way a build reaches it. Built with the API's
 # own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
-# `web/portal/src/api-origin.ts`): on that host `/api/*` is a static SPA, so
+# `web/portal/src/api-origin.ts`): on that host `/prices-api/*` is a static SPA, so
 # the bundle must call the backend on `apiDomain.domainName` rather than
 # relatively. `--skip-nx-cache` because the variable is not an Nx input — a
 # cached build would hand back whichever variant ran last, and the relative
@@ -163,22 +193,27 @@ verify-portal-guild:
 	cd .. && node tools/scripts/verify-discord-guild.mjs --ssm --env production
 
 sync-portal-explorer: build-portal-explorer verify-portal-guild
-	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/prices-api/ \
 	  --exclude '*' --include 'assets/*' \
 	  --cache-control 'public, max-age=31536000, immutable'
-	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/prices-api/ \
 	  --exclude 'assets/*' \
 	  --cache-control 'public, max-age=0, must-revalidate'
-	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/*'
+	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/prices-api/*'
 
-deploy-production-eventbridge: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
+deploy-production-eventbridge: build-production build-lambdas
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --exclusively --require-approval broadening
 
 destroy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force
 
+# Needs the api-handler log group to exist: the portal-load-failed metric
+# filter (tasks 0249, 0311) is created on `/aws/lambda/prices-production-api-handler`, which
+# Compute owns and `destroy-production-compute` deletes (the log removal
+# policy is DESTROY). On a fresh environment, or after a Compute destroy,
+# deploy Compute first or this target fails with "log group does not exist".
 deploy-production-observability: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --require-approval broadening
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --exclusively --require-approval broadening
 
 destroy-production-observability: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Observability --force

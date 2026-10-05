@@ -4,7 +4,7 @@
 //!
 //! Every MV in `schema/rollups.sql` is declared `CREATE MATERIALIZED VIEW IF NOT
 //! EXISTS`. `IF NOT EXISTS` does not redefine an object that already exists, so
-//! on a provisioned target (ch-prod-01, which holds all six) **editing an MV body
+//! on a provisioned target (ch-prod-01, which holds all of them) **editing an MV body
 //! and re-applying the file changes nothing and the apply reports success.** Task
 //! 0134 removed exactly this footgun from `views.sql` by converting those to
 //! `CREATE OR REPLACE VIEW`; that escape is not available here, because a
@@ -85,7 +85,9 @@ impl MvFingerprint {
 /// Which part of the definition diverged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriftField {
-    /// The refresh clause — cadence, or the load-bearing `APPEND` mode.
+    /// The refresh clause — cadence, the `DEPENDS ON` list (tasks 0143/0203:
+    /// a missing or wrong dependency is drift here), or the load-bearing
+    /// `APPEND` mode.
     Refresh,
     /// The `TO` target table.
     Target,
@@ -270,10 +272,14 @@ pub async fn check_mv_drift(
 /// `declared_names`.
 ///
 /// Walking only the file cannot find these, and the distinction matters for how
-/// the summary reads: "six MVs in sync" is a statement about the six that were
+/// the summary reads: "twelve MVs in sync" is a statement about the twelve that were
 /// looked for, not about what is writing into the coarse tables. A leftover MV
 /// double-writing into a `ReplacingMergeTree` is a plausible state given how
 /// often these have been dropped and re-created by hand.
+///
+/// Since task 0203 every coarse target has TWO declared writers — its fast MV
+/// and its reconciliation MV. Both are in `declared_names`, so neither is
+/// flagged: two writers are normal as long as the file declares both.
 async fn undeclared_writers(
     client: &Client,
     database: &str,
@@ -390,7 +396,7 @@ async fn fingerprint_via_server(
 /// ⚠️ **`system.tables` is grant-filtered**, so "no row" and "no grant" are the
 /// same answer here and both surface as [`MvStatus::Missing`]. Since this check
 /// is documented as runnable by an unprivileged reader, an account without
-/// grants on the MV objects reports all six as missing — "this tier is not
+/// grants on the MV objects reports all twelve as missing — "this tier is not
 /// rolling up" — against a perfectly healthy cluster. The binary calls that
 /// pattern out when *every* declared MV comes back missing, which is the shape
 /// a grant problem takes and one a real outage almost never does.
@@ -470,10 +476,10 @@ mod tests {
     use super::*;
 
     /// ClickHouse's rendering of the live `mv_ohlcv_1m_to_15m`, captured verbatim
-    /// from `system.tables` on 26.3.10.60. Carries all three server injections
-    /// the parser must skip: no `IF NOT EXISTS`, an injected column list, and a
-    /// `DEFINER` clause.
-    const LIVE: &str = "CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m REFRESH EVERY 1 MINUTE APPEND TO prices.price_ohlcv_15m (`timestamp` DateTime, `asset_id` UInt32, `close_usd` Decimal(38, 14), `vwap` Nullable(Decimal(38, 14)), `version` UInt64) DEFINER = default SQL SECURITY DEFINER AS SELECT toStartOfInterval(t.timestamp, toIntervalMinute(15)) AS timestamp, argMax(close_usd, t.timestamp) AS close_usd, sum(version) AS version FROM prices.price_ohlcv_1m AS t FINAL WHERE t.timestamp >= toStartOfInterval(now() - toIntervalHour(2), toIntervalMinute(15)) GROUP BY timestamp, asset_id";
+    /// from `system.tables` on 26.3.10.60 (the id's type since task 0139).
+    /// Carries all three server injections the parser must skip: no `IF NOT
+    /// EXISTS`, an injected column list, and a `DEFINER` clause.
+    const LIVE: &str = "CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m REFRESH EVERY 1 MINUTE APPEND TO prices.price_ohlcv_15m (`timestamp` DateTime, `asset_id` UInt64, `close_usd` Decimal(38, 14), `vwap` Nullable(Decimal(38, 14)), `version` UInt64) DEFINER = default SQL SECURITY DEFINER AS SELECT toStartOfInterval(t.timestamp, toIntervalMinute(15)) AS timestamp, argMax(close_usd, t.timestamp) AS close_usd, sum(version) AS version FROM prices.price_ohlcv_1m AS t FINAL WHERE t.timestamp >= toStartOfInterval(now() - toIntervalHour(2), toIntervalMinute(15)) GROUP BY timestamp, asset_id";
 
     /// The same statement as the file declares it, after `formatQuerySingleLine`:
     /// `IF NOT EXISTS` survives, and neither injection is present.
@@ -514,7 +520,9 @@ mod tests {
 
     /// Non-vacuity for the comparison itself: an edit to the body — the exact
     /// change `IF NOT EXISTS` swallows on a provisioned target — must register.
-    /// This is the guarded `close_usd` projection task 0146 needs to land.
+    /// The edit is the `argMax → argMaxIf` guard on `close_usd` — the fixtures
+    /// here predate task 0286, which replaced that projection with a rate; any
+    /// one-token body edit makes the point.
     #[test]
     fn an_edited_body_does_not_fingerprint_as_in_sync() {
         let edited = DECLARED.replace(
@@ -586,6 +594,47 @@ mod tests {
             live: parse_fingerprint(LIVE),
         };
         assert!(!healthy.needs_attention());
+    }
+
+    /// A dependent as ClickHouse stores it (tasks 0143/0203): the whole
+    /// `EVERY … DEPENDS ON … APPEND` clause is the `refresh` field, and the
+    /// `APPEND` word is still seen.
+    #[test]
+    fn a_depends_on_clause_stays_in_the_refresh_field_and_is_still_append() {
+        let dependent = LIVE.replace(
+            "REFRESH EVERY 1 MINUTE APPEND TO",
+            "REFRESH EVERY 15 MINUTE DEPENDS ON prices.mv_ohlcv_1m_to_15m APPEND TO",
+        );
+        let f = parse_fingerprint(&dependent).expect("parses");
+        assert_eq!(
+            f.refresh,
+            "EVERY 15 MINUTE DEPENDS ON prices.mv_ohlcv_1m_to_15m APPEND"
+        );
+        assert!(f.is_append());
+        assert_eq!(f.target, "prices.price_ohlcv_15m");
+        assert!(f.body.starts_with("SELECT toStartOfInterval("));
+    }
+
+    /// A declared/live pair that differs ONLY in its dependency — missing, or
+    /// naming the wrong MV — is a refresh-clause difference, and nothing else.
+    #[test]
+    fn a_missing_or_wrong_depends_on_is_a_refresh_difference() {
+        let clause = |c: &str| LIVE.replace("REFRESH EVERY 1 MINUTE APPEND TO", c);
+        let declared = parse_fingerprint(&clause(
+            "REFRESH EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_4h_to_1d APPEND TO",
+        ))
+        .expect("parses");
+
+        for live in [
+            "REFRESH EVERY 1 DAY APPEND TO",
+            "REFRESH EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_1m_to_15m APPEND TO",
+        ] {
+            let live = parse_fingerprint(&clause(live)).expect("parses");
+            assert!(live.is_append(), "the dependency is not the APPEND word");
+            assert_ne!(declared.refresh, live.refresh, "{}", live.refresh);
+            assert_eq!(declared.target, live.target);
+            assert_eq!(declared.body, live.body);
+        }
     }
 
     #[test]
@@ -696,7 +745,7 @@ mod tests {
     #[test]
     fn every_shipped_rollup_statement_declares_a_materialized_view_with_a_target() {
         let stmts = split_statements(ROLLUPS_SQL);
-        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+        assert_eq!(stmts.len(), 12, "guard is vacuous if the file is empty");
         for stmt in &stmts {
             let head: String = stmt.chars().take(80).collect();
             assert!(

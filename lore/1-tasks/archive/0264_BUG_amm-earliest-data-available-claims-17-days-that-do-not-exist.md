@@ -52,6 +52,17 @@ history:
       upheld at exactly 17 days. Both streams now reconcile to 0 days
       overclaimed. Milestone 2 evidence §5 AC 5 updated from "deferred" to
       corrected.
+  - date: "2026-09-29"
+    status: completed
+    who: akot
+    note: >
+      AC 4 closed by reference to [[0272]]: its weekly reconcile of each
+      stream's stored `earliest_data_available` against the first
+      `price_ohlcv_1h` row, alarmed per stream, is built on branch
+      `feat/0272_reconcile-backfill-progress-claims` and goes live with the
+      owner's deploy. The note this task links to,
+      `amm-history-is-not-in-price-ohlcv-1m`, now exists in
+      `lore/3-wiki/project/`.
 ---
 
 # The AMM stream's `earliest_data_available` is 17 days early
@@ -149,9 +160,16 @@ Not established — this is where to start, not a conclusion.
       `merge_min` of that against the corrected stored value is a no-op. The
       pre-fix path — a shared window carrying the earliest SDEX minute — no
       longer exists, so there is nothing left to re-widen it.
-- [ ] ⏸️ **DEFERRED to [[0272]]** — something detects the general case: a stored
-      watermark that precedes the data behind it, on either stream. Deferred
-      rather than met, deliberately: the end-of-run check first proposed is
+- [x] Closed by reference to [[0272]] — something detects the general case: a stored
+      watermark that precedes the data behind it, on either stream. 0272's
+      weekly rule `prices-{env}-backfill-reconcile` runs the
+      backfill-freshness-probe's reconcile of each stored claim against the first
+      `price_ohlcv_1h` row, and the alarms
+      `prices-{env}-backfill-earliest-overclaim-sdex` and
+      `prices-{env}-backfill-earliest-overclaim-amm` fire when a claim precedes
+      the data. Proven locally by 0272's ClickHouse integration test; it goes
+      live with the owner's deploy. Originally deferred rather than met,
+      deliberately: the end-of-run check first proposed is
       **vacuous** after this task's writer fix, because the claim a run writes is
       the earliest minute that run landed, so comparing the two compares a value
       to itself. The useful check is stored-claim vs candle tables on a timer,

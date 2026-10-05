@@ -18,16 +18,23 @@ pub struct AppState {
     /// Resolved reference `asset_id`s for canonical USDC / native XLM /
     /// canonical USDT, memoized for the life of this state.
     ///
-    /// These are compile-time-constant *identities* whose surrogate ids never
-    /// change, but `resolve_asset_id` is a `SELECT … FROM assets FINAL` per
-    /// call. `/ohlcv` needs all three on every USD request, so without this the
-    /// endpoint issued three extra `FINAL` lookups per request — 300/s at task
-    /// 0121's sustained 100 req/s, purely to re-learn values that never move.
+    /// These are compile-time-constant *identities*. `resolve_asset_id` is a
+    /// `SELECT … FROM assets FINAL` per call, and `/ohlcv` needs all three on
+    /// every USD request, so without this the endpoint issued three extra
+    /// `FINAL` lookups per request — 300/s at task 0121's sustained 100 req/s,
+    /// purely to re-learn values that never move.
+    ///
+    /// Since task 0139 the database derives each id from its identity (`xxh3`,
+    /// u64), so an id cannot change while the schema stays put and the memo is
+    /// safe for the container's whole life. The one exception is the 0139
+    /// migration itself, which replaces every old u32 id once: a warm container
+    /// keeps the OLD ids across that swap, so the api-handler needs exactly one
+    /// forced cold start after it, even when this code shipped earlier.
     ///
     /// Scoped to the `AppState`, deliberately **not** a process-wide static: the
     /// integration tests build a fresh state per database, and the same identity
-    /// resolves to a different `asset_id` in each. A global would leak one
-    /// test's ids into another.
+    /// can resolve to a different `asset_id` in each, or to none. A global would
+    /// leak one test's ids into another.
     usd_refs: Arc<OnceCell<crate::assets::queries_ch::UsdRefs>>,
 }
 

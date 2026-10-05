@@ -6,16 +6,17 @@ import { BrowserRouter } from 'react-router-dom';
 
 import App from './app/app';
 // The other half of `base` in `vite.config.mts`, which imports the same module:
-// `base` makes the bundle's ASSETS resolve under `/api/`, this makes its
-// ROUTES do the same. Without it the router reads `/api/` as a route it
-// has never heard of and renders nothing, on the one URL the app is actually
-// served from. See `base-path.ts` for why the two values differ by a slash.
+// `base` makes the bundle's ASSETS resolve under `/prices-api/`, this makes
+// its ROUTES do the same. Without it the router reads `/prices-api/` as a
+// route it has never heard of and renders nothing, on the one URL the app is
+// actually served from. See `base-path.ts` for why the two values differ by a
+// slash.
 import { ROUTER_BASENAME } from './base-path';
 import { bridgeOAuthPopup } from './landing/oauthPopup';
 // The three self-hosted families (task 0193). Imported here rather than linked
 // from `index.html` so Vite fingerprints the `.woff2` files and rewrites their
 // URLs under `base` — a `<link>` in the document would ship the paths verbatim
-// and 403 on every deploy. Nothing is fetched from a third-party host; see the
+// and 403 on every deploy. No font is fetched from a third-party host; see the
 // comment at the top of `theme/fonts.css`.
 import './theme/fonts.css';
 import { theme } from './theme/theme';

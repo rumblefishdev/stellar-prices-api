@@ -329,6 +329,19 @@ No code deploy needed: set `ENRICH_LIVE_PARTITIONS=0` on
       Done 2026-08-31 — 0111's AC 5 ticked and its history carries the soak
       result, so 0111 is now complete on all 6 criteria.
 
+## Re-read for [[0223]] — 2026-09-15
+
+0223 asked whether this soak's "alarm stayed OK all week" could have meant *no
+data* rather than *observed healthy*, since `-duration-near-timeout` uses
+`treatMissingData: NOT_BREACHING` and reads OK on an empty period.
+
+**It meant observed healthy.** The AC above pins `Invocations` at **1/hour** for
+the whole window, so every hourly evaluation period of
+`prices-production-enrichment-duration-near-timeout` contained a real
+`Duration.Maximum` datapoint, and the OK on each daily check was a comparison
+against measured duration, not the absence of one. The soak's evidence stands
+as written.
+
 ## Out of scope
 
 - Everything else in 0111 — already verified and archived.

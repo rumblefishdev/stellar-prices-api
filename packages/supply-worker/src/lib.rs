@@ -120,7 +120,10 @@ pub enum SupplyError {
 /// A classic asset that needs a supply lookup.
 #[derive(Debug, Clone, Row, Deserialize)]
 pub struct CreditAsset {
-    pub asset_id: u32,
+    /// Read back from `prices.assets` and written back verbatim. `toUInt64` in
+    /// the SELECT keeps this u64 field right on the UInt32 schema and the
+    /// UInt64 one (task 0139); this worker never computes an id.
+    pub asset_id: u64,
     pub asset_code: String,
     pub issuer_address: String,
 }
@@ -169,7 +172,7 @@ pub async fn load_stalest_credit_assets(
     // session setting — the ordering must not depend on the CH default.
     let rows = client
         .query(
-            "SELECT a.asset_id, a.asset_code, a.issuer_address \
+            "SELECT toUInt64(a.asset_id) AS asset_id, a.asset_code, a.issuer_address \
              FROM prices.assets AS a FINAL \
              LEFT JOIN ( \
                  SELECT asset_id, max(fetched_at) AS fetched_at \
@@ -273,7 +276,7 @@ pub async fn fetch_supply(
 /// injection surface. Idempotent (ReplacingMergeTree on `asset_id`).
 pub async fn write_supplies(
     client: &Client,
-    supplies: &[(u32, Decimal)],
+    supplies: &[(u64, Decimal)],
 ) -> Result<(), SupplyError> {
     if supplies.is_empty() {
         return Ok(());
@@ -316,7 +319,7 @@ pub async fn run_supply(
     cfg: &SupplyRunConfig,
 ) -> Result<SupplyStats, SupplyError> {
     let assets = load_stalest_credit_assets(ch, cfg.max_assets).await?;
-    let mut batch: Vec<(u32, Decimal)> = Vec::new();
+    let mut batch: Vec<(u64, Decimal)> = Vec::new();
     let mut written = 0usize;
     let mut absent = 0usize;
     let mut skipped = 0usize;

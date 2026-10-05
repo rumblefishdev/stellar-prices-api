@@ -4,8 +4,8 @@ title: "The oracle worker loads all 620,615 assets into memory to write 2 rows, 
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0223", "0222", "0167", "0112", "0132"]
-tags: [layer-infra, priority-low, effort-medium, oracle, lambda, memory, observability, ops]
+related_tasks: ["0223", "0222", "0167", "0112", "0132", "0256", "0241", "0140"]
+tags: [layer-infra, priority-high, effort-medium, oracle, lambda, memory, observability, ops]
 milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/writer.rs"
@@ -47,6 +47,57 @@ history:
       finding; but if it holds, "redundant" becomes "conflicting" and the value
       `usd_rate` snapshots is a coin flip. Settle it with the distribution query
       recorded in 0227 once a few dozen poll rows have survived.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      🔴 PREMISE CORRECTED. "620,615 rows loaded to write 2" is not the size of
+      the registry. The registry holds **~209,196** rows; 620,615 was its THIRD
+      un-merged copy, caught at the moment of measurement. asset-discovery
+      re-inserts the whole registry hourly ([[0256]]) and `prices.assets` is
+      `ReplacingMergeTree(updated_at)`, so a read without `FINAL` sees 1×–4×
+      depending on when ClickHouse last merged. The design question this task
+      asks still stands, but it is ~3× smaller than recorded, and what reaches
+      the 256 MB ceiling is the AMPLIFICATION, not the granularity. This also
+      settles the open question in Implementation: the load is PER-INVOCATION
+      (the log line appears on every run, on warm containers), so option 3 —
+      caching the map across invocations — is dead, because the peak happens
+      during the load itself. A deduplicating read is a fourth option this task
+      does not list.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Priority raised **low → high**. Not because this task grew — today its
+      premise shrank ~3× — but because it sits in the chain that produces 84%
+      of the ops channel's traffic ([[0241]]), and `priority-low` is what left
+      it unowned for 21 days while that noise trained everyone past the
+      channel.
+      ⚠️ Sequencing is an OPEN question, not decided here. [[0256]] plausibly
+      removes the hourly amplification that actually reaches the 256 MB
+      ceiling, it is a config decision rather than a change to shared code, and
+      it would produce the one measurement this task still lacks —
+      `Max Memory Used` on a cold container reading a 1× registry. Until that
+      number exists the size of the problem this task solves is unknown, and
+      narrowing `load_assets()` touches callers this task already warns about
+      (ledger-processor, the backfills).
+  - date: 2026-09-17
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Cross-linked the oracle's own full-registry write (`lib.rs:569`) — owned
+      by [[0140]], but it sits in the same pass this task rewrites, so the two
+      changes have to be made with each other in view. No scope moved.
+  - date: 2026-09-17
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      The measurement the 09-16 entry said this task lacked now exists: a cold
+      container reading the 1× registry starts at 148 MB and peaks at 191 MB
+      (58–75 % of 256). [[0256]]'s fix ended the OOMs ([[0241]] closed). This
+      task is an efficiency task, not an outage fix — but one more un-merged
+      copy of the registry puts the oracle back at the ceiling. Priority left
+      at high for the operator to lower; not lowered here.
 ---
 
 # The oracle worker reads the entire asset registry on every run
@@ -57,6 +108,15 @@ history:
 it pulls **all 620,615 rows** of `prices.assets` into memory. That puts peak
 usage at the function's entire 256 MB allocation, and a few times a day a run
 tips over and dies with `Runtime.OutOfMemory`.
+
+> 🔴 **CORRECTED 2026-09-16 — the 620,615 figure is not the registry size.**
+> `prices.assets` holds **~209,196** rows. 620,615 was the third un-merged copy
+> of it: `asset-discovery` re-inserts the entire registry every hour ([[0256]]),
+> the table is `ReplacingMergeTree(updated_at)`, and `load_assets()` reads
+> without `FINAL`, so the count walks 1×→2×→3×→4× between merges. Both OOMs
+> sampled on 2026-09-12 fired immediately after the 4× read. The granularity
+> problem below is real but ~3× smaller than written; the amplification is what
+> actually hits the ceiling, and it is fixed in [[0256]], not here.
 
 The oracle is non-critical by design — it degrades to last-known value — so the
 data impact is small. The cost is a steady drip of failures and Slack pages for a
@@ -142,6 +202,28 @@ eu-central-1, 8,755 invocations/month at 7.71 s average:
 registry grows monotonically; 512 MB postpones the same failure. The operator's
 call, 2026-08-26: do not spend headroom to hide a design problem.
 
+## Measured at 1× — 2026-09-17, after [[0256]]'s fix
+
+| | before the fix (2026-09-15 00:00 → 09-16 12:42 UTC) | after (24 h, → 2026-09-17 12:47 UTC) |
+|---|---|---|
+| `wrote asset rows` by asset-discovery | 37 of 37 runs, ~209 k rows each | **0 of 24 runs** |
+| `existing_assets` seen by the oracle | 209 k → 418 k → 627 k → **836 k**, merging back every ~4 h | **209,208 → 209,292**, one copy |
+| oracle `Max Memory Used`, hourly peak | 210–**256 MB** (the limit) | **148–191 MB** on every new container |
+| OOM / `signal: killed` lines | 5 in ~37 h | **0** |
+| `AWS/Lambda Errors` | 2–5 a day, every day since at least 09-10 (1.0–1.7 %) | **0 on 289 invocations** |
+| `prices-production-oracle-errors` | 18 firings 09-12 → 09-16, each 3–5 min | none since 09-16 07:23 UTC (29 h) |
+
+Every one of the five OOMs fell in an hour where the oracle read ~836 k rows —
+four un-merged copies. Since the fix it has never read more than one. The one
+post-deploy 250 MB reading is a container born before the deploy carrying its
+old high-water mark; it was gone by 12:47 UTC. Ten cold containers since all
+start at **148 MB** and peak at 191 MB — 58–75 % of the 256 MB limit.
+
+What this settles for this task: the load is **not** what reaches the ceiling
+on its own — ~209 k rows cost ~148 MB cold. What it leaves: the oracle still
+pays that 148 MB and a full-table read every 5 minutes to resolve two ids, and
+the headroom to a second copy of the registry is ~65 MB.
+
 ## Implementation
 
 - Establish first whether the load is **per-invocation** or **per-cold-start**.
@@ -160,6 +242,35 @@ call, 2026-08-26: do not spend headroom to hide a design problem.
 - ⚠️ Whatever ships, the verification is **`Max Memory Used` on real
   invocations**, not a local benchmark. The whole point is behaviour at 620k rows
   and that number is production's.
+
+### The same pass also WRITES the whole registry — `lib.rs:569`, owned by [[0140]]
+
+This task is about the oracle *reading* 209k rows to find two ids. Forty lines
+below the load, the same function can *write* all 209k back:
+
+```rust
+if registry.assets().count() > known_before {
+    writer.write_assets(&registry).await?;   // the whole registry, not the new ids
+}
+```
+
+The guard keeps it silent: it fires only when the pass mints a new `asset_id`,
+and XLM and USDC have had theirs for months ([[0140]]'s AC 4 audit found no
+occurrence in 24 h of logs). But the shape is the one [[0256]] just removed from
+`asset-discovery` — **adding a third tracked symbol would, on its first pass,
+insert one full copy of the registry**, which is exactly the 1×→2× step that
+walked the oracle into its own ceiling.
+
+[[0140]] owns the fix (`write_new_assets` with a watermark, as in
+`ensure_seed`). It is recorded here because the two changes collide:
+
+- **option 1 or 2 above removes `AssetRegistry` from this pass**, and then this
+  call has nothing to write from — it must be replaced in the same change, not
+  left for 0140 to find gone;
+- if [[0140]] lands first, this task inherits a `write_new_assets` call whose
+  watermark comes from the very load it is about to delete.
+
+Whichever task moves first takes this line with it and says so in the other.
 
 ## ⚠️ Deploy hazard — this is the expensive part, not the change
 

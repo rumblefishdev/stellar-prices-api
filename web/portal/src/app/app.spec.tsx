@@ -5,10 +5,11 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
+import { RUMBLEFISH_CONTACT } from '../landing/links';
 import App from './app';
 import { FIXTURE } from '../docs/openapi.fixture';
 
@@ -95,9 +96,10 @@ const ISSUE_HREF = '/api/auth/login?action=issue';
  * The limit is part of every open-portal stub because it is part of every real
  * `/config`: `compute-stack.ts` sets `PORTAL_RATE_LIMIT` from
  * `pricingApiFreePlanRateLimit` unconditionally. `1` is what
- * `infra/envs/production.json` holds today — and the point of the field is that
- * changing that file changes the page, so the tests below assert the rendered
- * figure against THIS value rather than against a literal of their own.
+ * `infra/envs/production.json` holds today. Since task 0311 the signed-in
+ * dashboard states the key's OWN plan from `/api/usage`; `/config`'s figure
+ * feeds only the no-key state and the landing page. While the usage call is
+ * unanswered or failed the dashboard states no figure at all.
  */
 const openConfig = () => ({
   json: async () => ({ enabled: true, rate_limit_per_second: 1 }),
@@ -298,14 +300,34 @@ describe('routes', () => {
     await waitFor(() => expect(lastPath).toBe('/dashboard'));
   });
 
-  it('sends a visitor with no session away from the dashboard', async () => {
+  it('sends a visitor with no session from the dashboard to the sign-in', async () => {
+    // To `/login`, not to the landing page: a key holder in a fresh browser
+    // who clicked the footer's "Dashboard" used to be bounced to the page
+    // they came from with no explanation (task 0301). The sign-in forwards
+    // them back here once it has a session.
     openAndSignedOut();
     renderAt('/dashboard');
 
-    await waitFor(() => expect(lastPath).toBe('/'));
+    await waitFor(() => expect(lastPath).toBe('/login'));
+    expect(await screen.findByTestId('login-card')).toBeTruthy();
     // By heading, not by text: the landing page's Self-Service section says
     // "…your API key is ready immediately", which a loose text match hits.
     expect(screen.queryByRole('heading', { name: /^api key$/i })).toBeNull();
+  });
+
+  it('sends a visitor away from the dashboard while the portal is closed', async () => {
+    // A closed portal has no sign-in to offer either, so this one still
+    // lands on the landing page — which says the portal is closed — and
+    // that page offers no "Sign in" any more than it offers a key.
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: false }) }),
+      [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
+    });
+    renderAt('/dashboard');
+
+    await waitFor(() => expect(lastPath).toBe('/'));
+    await screen.findByText(/not yet available/i);
+    expect(screen.queryByRole('link', { name: /^sign in$/i })).toBeNull();
   });
 
   it('waits for the session before deciding about the dashboard', async () => {
@@ -468,6 +490,40 @@ describe('routes', () => {
     expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
   });
 
+  it('serves the privacy policy under the landing bar, with the footer pointing at it', async () => {
+    openAndSignedOut();
+    renderAt('/privacy-policy');
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /privacy policy/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(
+      footer
+        .getByRole('link', { name: /^privacy policy$/i })
+        .getAttribute('href'),
+    ).toBe('/privacy-policy');
+  });
+
+  it('re-opens the HubSpot consent banner from the footer, the only way to withdraw consent (task 0316)', async () => {
+    openAndSignedOut();
+    renderAt('/privacy-policy');
+    await screen.findByRole('heading', { level: 1, name: /privacy policy/i });
+
+    // `Window._hsp` is declared in `landing/Chrome.tsx`, which the spec's
+    // project reaches only through `app.d.ts`, where the declaration is gone.
+    const w = window as { _hsp?: unknown[] };
+    delete w._hsp;
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    fireEvent.click(footer.getByRole('link', { name: 'Cookie settings' }));
+
+    // The loader never runs in a test, so this is also the no-script case:
+    // `_hsp` is created on demand and the click queues the command, not throws.
+    expect(w._hsp).toEqual([['showBanner']]);
+  });
+
   it('marks the section the quick start opens on in its rail', async () => {
     openAndSignedOut();
     renderAt('/quick-start');
@@ -477,7 +533,8 @@ describe('routes', () => {
       screen.getByRole('navigation', { name: 'On this page' }),
     );
     const entries = rail.getAllByRole('link');
-    expect(entries).toHaveLength(10);
+    // The ten frame sections plus "Example queries" (task 0163).
+    expect(entries).toHaveLength(11);
     // Unscrolled, the rail points at the first section rather than at
     // nothing — the frame underlines `Prerequisites` for the same reason.
     expect(entries[0].getAttribute('aria-current')).toBe('location');
@@ -1848,6 +1905,170 @@ describe('navigation off the landing page', () => {
     expect(
       screen.getByRole('link', { name: /^faq$/i }).getAttribute('href'),
     ).toBe(`${ROUTER_BASENAME}/#faq`);
+    // "Quick Start" is the page, not the `#get-started` anchor it used to be
+    // (task 0301) — a router link, so no basename under this MemoryRouter.
+    expect(
+      screen.getByRole('link', { name: /^quick start$/i }).getAttribute('href'),
+    ).toBe('/quick-start');
+    // And the way in for a visitor who already holds a key.
+    expect(
+      screen.getByRole('link', { name: /^sign in$/i }).getAttribute('href'),
+    ).toBe('/login');
+    // The wordmark leads to the explorer's home and the footer's mark to
+    // Rumble Fish (task 0301) — both were images that led nowhere.
+    expect(
+      screen.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
+    ).toBe('https://sorobanscan.rumblefish.dev/');
+    expect(
+      screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
+    ).toBe('https://rumblefish.dev');
+    // "Contact" reaches the company's contact page (task 0301) and "Privacy
+    // policy" the portal's own page (task 0303). "Status" and the
+    // `rumblefish.dev` text are gone (task 0305): the mark above is the
+    // company's one link.
+    expect(
+      screen.getByRole('link', { name: /^contact$/i }).getAttribute('href'),
+    ).toBe('https://www.rumblefish.dev/contact/');
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(footer.queryByText(/^status$/i)).toBeNull();
+    expect(footer.queryByText(/^rumblefish\.dev$/i)).toBeNull();
+    expect(
+      screen
+        .getByRole('link', { name: /^privacy policy$/i })
+        .getAttribute('href'),
+    ).toBe('/privacy-policy');
+  });
+
+  /**
+   * The logo is how a visitor leaves the portal for the rest of the explorer
+   * (task 0301). Every bar renders the same `Wordmark`, but each route picks
+   * its own bar, so each is checked, signed in and out (task 0305). `/login`
+   * has no bar.
+   */
+  it.each([
+    ['/', 'out', 'Primary'],
+    ['/quick-start', 'out', 'Primary'],
+    ['/docs', 'out', 'Primary'],
+    ['/privacy-policy', 'out', 'Primary'],
+    ['/dashboard', 'in', 'Dashboard'],
+    ['/quick-start', 'in', 'Dashboard'],
+    ['/docs', 'in', 'Dashboard'],
+    ['/privacy-policy', 'in', 'Dashboard'],
+  ] as const)(
+    'links the logo on %s (signed %s) to the explorer',
+    async (path, who, bar) => {
+      (who === 'in' ? openAndSignedIn : openAndSignedOut)();
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <App />
+        </MemoryRouter>,
+      );
+
+      const nav = within(await screen.findByRole('navigation', { name: bar }));
+      expect(
+        nav.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
+      ).toBe('https://sorobanscan.rumblefish.dev/');
+    },
+  );
+
+  // The hero's "Built by" band shows the footer's mark, and was a bare image
+  // while the footer's led to the company (task 0308): two marks, one href.
+  it('links both Rumble Fish marks on the landing to the company', async () => {
+    openAndSignedOut();
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('navigation', { name: 'Primary' });
+    expect(
+      screen
+        .getAllByRole('link', { name: /rumble fish/i })
+        .map((link) => link.getAttribute('href')),
+    ).toEqual(['https://rumblefish.dev', 'https://rumblefish.dev']);
+  });
+
+  /**
+   * The browser jumps to a `#hash` only if the target exists when it looks,
+   * and on a full load it looks before React has rendered: the landing bar's
+   * `/api/#faq` from any other page left the reader at the top (task 0305).
+   */
+  describe('scrolling on navigation', () => {
+    const scrolled: string[] = [];
+    beforeEach(() => {
+      scrolled.length = 0;
+      // jsdom has no `scrollIntoView`.
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push(this.id);
+      };
+    });
+    afterEach(() => {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+      window.history.scrollRestoration = 'auto';
+    });
+
+    function GoBack() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(-1)}>test: back</button>;
+    }
+
+    // The policy renders its ids a lazy chunk later than the landing does.
+    it.each([
+      ['/#faq', 'faq'],
+      ['/privacy-policy#personal-data-we-process', 'personal-data-we-process'],
+    ])('lands a load of %s on its target', async (entry, id) => {
+      openAndSignedOut();
+      render(
+        <MemoryRouter initialEntries={[entry]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(scrolled).toContain(id));
+    });
+
+    it('lands back onto a hash on its target, not on the offset the browser saved', async () => {
+      openAndSignedOut();
+      render(
+        <MemoryRouter
+          initialEntries={['/#faq', '/quick-start']}
+          initialIndex={1}
+        >
+          <App />
+          <GoBack />
+        </MemoryRouter>,
+      );
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      });
+      expect(scrolled).toEqual([]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'test: back' }));
+      await waitFor(() => expect(scrolled).toContain('faq'));
+      expect(window.history.scrollRestoration).toBe('manual');
+    });
+
+    it('opens a pushed page at the top', async () => {
+      const scrollTo = vi.fn();
+      vi.stubGlobal('scrollTo', scrollTo);
+      vi.stubGlobal('scrollY', 6439);
+      openAndSignedOut();
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>,
+      );
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      const bar = within(
+        await screen.findByRole('navigation', { name: 'Primary' }),
+      );
+      fireEvent.click(bar.getByRole('link', { name: /^quick start$/i }));
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      });
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'instant' });
+    });
   });
 
   /**
@@ -2197,6 +2418,7 @@ describe('the API key', () => {
     expect(portalPanel().queryAllByRole('button')).toHaveLength(0);
     expect(portalPanel().queryAllByRole('link')).toHaveLength(0);
     expect(screen.queryByRole('link', { name: /get api key/i })).toBeNull();
+    expect(screen.queryByRole('link', { name: /^sign in$/i })).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -2355,20 +2577,21 @@ describe('the API key', () => {
 
   /**
    * "Issued" is only ever rendered where the round-trip that just ended
-   * created the key, because `GET /key` carries no timestamp — and the rate
-   * limit comes from `/config`, which the stub answers with 1 req/s.
+   * created the key, because `GET /key` carries no timestamp.
    *
-   * The quota column is deliberately NOT asserted here: this stub's `/usage`
-   * says "no key yet", so the page has not been told a limit and the field is
-   * absent rather than invented.
+   * Neither the quota nor the rate is stated here: this stub's `/usage` says
+   * "no key yet", so the page has not been told the key's plan. Before task
+   * 0311's review the rate column showed `/config`'s figure — the FREE plan's,
+   * which a paid key reads as its own (review CR-02); the paid case is in
+   * "usage against quota" below.
    */
-  it('states when the key was issued and at what rate limit', async () => {
+  it('states when the key was issued, and no rate before the plan is known', async () => {
     signedInWithKey();
     renderApp('/?issue=ok');
 
     expect(await screen.findByText('Issued')).toBeTruthy();
     expect(screen.getByText(/just now/i)).toBeTruthy();
-    expect(screen.getByText('Rate limit')).toBeTruthy();
+    expect(screen.queryByText('Rate limit')).toBeNull();
     expect(screen.queryByText('Monthly quota')).toBeNull();
   });
 
@@ -2791,6 +3014,16 @@ describe('usage against quota', () => {
     vi.unstubAllGlobals();
   });
 
+  /** The free plan as `/api/usage` reports it (task 0311). */
+  const FREE_PLAN = {
+    tier: 'free',
+    name: 'pricing-api-free-production',
+    rate_limit_per_second: 1,
+    burst_limit: 5,
+    quota_limit: 100000,
+    quota_period: 'MONTH',
+  };
+
   const USAGE = {
     used: 121,
     remaining: 99879,
@@ -2799,7 +3032,32 @@ describe('usage against quota', () => {
     period_end: '2026-08-31',
     resets_at: '2026-09-01T00:00:00Z',
     as_of: '2026-08-19T10:15:00Z',
+    plan: FREE_PLAN,
   };
+
+  /** A paid plan on our stage, named the way CDK names it (task 0311). */
+  const paidPlan = (
+    tier: string,
+    rate: number,
+    burst: number,
+    quota: number,
+  ) => ({
+    tier,
+    name: `pricing-api-${tier}-production`,
+    rate_limit_per_second: rate,
+    burst_limit: burst,
+    quota_limit: quota,
+    quota_period: 'MONTH',
+  });
+
+  /** A `/api/usage` answer on `plan`, with `overrides` on top (task 0311). */
+  const usageWith =
+    (plan: unknown, overrides: Record<string, unknown> = {}) =>
+    () => ({ json: async () => ({ ...USAGE, plan, ...overrides }) });
+
+  /** The Rate Limit card's `<section>`, once it has rendered. */
+  const rateLimitCard = async () =>
+    (await screen.findByText('Rate Limit')).closest('section') as HTMLElement;
 
   const signedInWithUsage = (
     usage: () => Partial<Response> & { json?: () => unknown } = () => ({
@@ -2974,10 +3232,11 @@ describe('usage against quota', () => {
   });
 
   /**
-   * AWS has no rows for the key yet — `used`/`remaining`/`limit` are `null`
-   * together. Not rendered as zeros: "0 used of 100000" would be an invented
-   * figure, and the honest state for a fresh key is "nothing recorded yet".
-   * The reset rule and rate limit still render — they are ours, not AWS's.
+   * AWS has no rows for the key yet — `used`/`remaining` are `null` together.
+   * Not rendered as zeros: "0 used of 100000" would be an invented figure,
+   * and the honest state for a fresh key is "nothing recorded yet". The reset
+   * rule and rate limit still render — they are ours, not AWS's. (`limit` is
+   * the plan's quota since task 0311, known before AWS records a row.)
    */
   it('says nothing is recorded yet instead of inventing zeros', async () => {
     signedInWithUsage(() => ({
@@ -2985,7 +3244,6 @@ describe('usage against quota', () => {
         ...USAGE,
         used: null,
         remaining: null,
-        limit: null,
       }),
     }));
     renderApp();
@@ -3178,16 +3436,14 @@ describe('usage against quota', () => {
   });
 
   /**
-   * The rate limit is the gateway's, not this bundle's (task 0188).
+   * The rate limit is the gateway's, not this bundle's (task 0188) — and since
+   * task 0311 it is the KEY'S OWN PLAN's, which `/api/usage` reports.
    *
-   * `pricingApiFreePlanRateLimit` is a per-env config value that
-   * `api-gateway-stack.ts` hands to `addUsagePlan` and `compute-stack.ts` hands
-   * to the backend. Raising it and deploying has to change what this panel
-   * says — with a literal here it would not, and the one section whose stated
-   * theme is rendering honestly would be quietly stating a limit nobody
-   * enforces any more.
+   * `/config` still carries the free plan's figure (5 here), but a key an
+   * operator moved to Basic is throttled at Basic's 3 req/s, and that is what
+   * the card must say: the plan's figure beats `/config`'s.
    */
-  it('states the rate limit the backend reports, not a built-in figure', async () => {
+  it("states the key's own plan's rate limit, not /config's", async () => {
     stubRoutes({
       [CONFIG_URL]: () => ({
         json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
@@ -3211,12 +3467,21 @@ describe('usage against quota', () => {
           username: 'adam',
         }),
       }),
-      [USAGE_URL]: () => ({ json: async () => USAGE }),
+      [USAGE_URL]: usageWith(paidPlan('basic', 3, 15, 1000000), {
+        limit: 1000000,
+        remaining: 999879,
+      }),
     });
     renderApp();
 
     await screen.findByTestId('usage-used');
-    expect(screen.getByTestId('rate-limit').textContent).toBe('5');
+    await waitFor(() =>
+      expect(screen.getByTestId('rate-limit').textContent).toBe('3'),
+    );
+    expect(
+      within(await rateLimitCard()).getByText('180'),
+      'per-minute is the plan rate times sixty',
+    ).toBeTruthy();
     // Plural, because the figure is no longer the one the sentence was
     // written around.
     expect(screen.getByText(/requests per second/i)).toBeTruthy();
@@ -3287,11 +3552,18 @@ describe('usage against quota', () => {
   });
 
   /**
-   * A deployment that did not say what the limit is says nothing about it. A
-   * fallback figure would be the same silent staleness one layer down — and
-   * unlike the missing line, it would look authoritative.
+   * The card is never dropped, whatever `/config` and `/usage` say — a
+   * missing panel is a worse answer than a stated one (Adam, 2026-08-25:
+   * the whole Rate Limit card went missing on a local run without a limit in
+   * `/config`).
+   *
+   * ⚠️ What it states changed with task 0311's review (WR-01). `/usage`
+   * failing used to fall back to `/config`'s figure, or to a built-in 1 req/s
+   * — the FREE plan's, stated to whichever key was signed in, paid or not. The
+   * card now says the plan could not be loaded and states no figure; it keeps
+   * the gateway's two HTTP codes, which are true of every key.
    */
-  it('falls back to the plan rate rather than dropping the Rate Limit card', async () => {
+  it('keeps the Rate Limit card, with no figure, when neither source answers', async () => {
     stubRoutes({
       [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
       [KEY_URL]: () => ({
@@ -3309,20 +3581,460 @@ describe('usage against quota', () => {
           username: 'adam',
         }),
       }),
-      [USAGE_URL]: () => ({ json: async () => USAGE }),
+      [USAGE_URL]: () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      }),
     });
     renderApp();
 
-    // ⚠️ The OPPOSITE of what this pinned until 2026-08-25, when Adam found the
-    // whole Rate Limit card missing on a local run. `/config` without a limit
-    // used to drop the panel; it now shows the free plan's documented 1 req/s
-    // (task 0157), the same figure the landing page states to every visitor.
-    // A stated figure beats a third of the dashboard disappearing — and where
-    // the deployment DOES answer, its value still wins (the test above).
-    await screen.findByTestId('usage-used');
-    expect((await screen.findByTestId('rate-limit')).textContent).toBe('1');
-    expect(screen.getByText(/per-minute limit/i)).toBeTruthy();
-    expect(screen.getByText(/request per second/i)).toBeTruthy();
+    await screen.findByText(/Could not load your usage/);
+    const card = await rateLimitCard();
+    expect(within(card).getByTestId('rate-limit-pending').textContent).toBe(
+      'Could not load your plan, so its limits are not shown.',
+    );
+    expect(within(card).queryByTestId('rate-limit')).toBeNull();
+    expect(within(card).getByText('HTTP 429')).toBeTruthy();
+    expect(within(card).getByText('HTTP 403')).toBeTruthy();
+  });
+
+  // -------------------------------------------------------------------------
+  // The key's own plan (task 0311)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The plan pill: a second pill beside "Active" in the Rate Limit card's
+   * header, on every tier — free included — and "Custom" for any other plan
+   * on our stage (decision 5).
+   */
+  it('shows the plan pill beside Active, per tier', async () => {
+    for (const [plan, label] of [
+      [FREE_PLAN, 'Free'],
+      [paidPlan('basic', 3, 15, 1000000), 'Basic'],
+      [paidPlan('analyst', 5, 25, 5000000), 'Analyst'],
+      [paidPlan('lite', 10, 50, 20000000), 'Lite'],
+      [paidPlan('pro', 25, 125, 50000000), 'Pro'],
+      [
+        {
+          ...paidPlan('custom', 150, 300, 1000000),
+          name: 'prices-production-loadtest-plan',
+        },
+        'Custom',
+      ],
+    ] as const) {
+      signedInWithUsage(usageWith(plan));
+      const view = renderApp();
+
+      const card = await rateLimitCard();
+      await waitFor(() => expect(within(card).getByText(label)).toBeTruthy());
+      expect(within(card).getByText('Active'), label).toBeTruthy();
+      expect(within(card).getByTestId('rate-limit').textContent, label).toBe(
+        String(plan.rate_limit_per_second),
+      );
+      view.unmount();
+    }
+  });
+
+  /**
+   * `/api/usage` failed: the card states NO figure, no pill and no tier's
+   * contact copy (task 0311's review, WR-01). `/config` answers 5 req/s here
+   * and it must not appear: it is the free plan's figure, and a Pro customer
+   * whose usage call hit a throttle would read it — and "Contact us about a
+   * paid plan" — as a statement about the plan they already pay for.
+   */
+  it("states no figure and no tier's copy when usage fails", async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({
+        json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'rate-limit-suite-key',
+          name: 'discord-rate-limit-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+        }),
+      }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: () => ({ ok: false, status: 500, json: async () => ({}) }),
+    });
+    renderApp();
+
+    await screen.findByText(/Could not load your usage/);
+    const card = await rateLimitCard();
+    await waitFor(() =>
+      expect(within(card).getByTestId('rate-limit-pending').textContent).toBe(
+        'Could not load your plan, so its limits are not shown.',
+      ),
+    );
+    expect(within(card).queryByTestId('rate-limit')).toBeNull();
+    expect(within(card).queryByText('5')).toBeNull();
+    expect(within(card).queryByText('Active')).toBeNull();
+    for (const label of ['Free', 'Basic', 'Analyst', 'Lite', 'Pro', 'Custom']) {
+      expect(within(card).queryByText(label), label).toBeNull();
+    }
+    expect(within(card).queryByTestId('rate-limit-contact')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/paid plan/i);
+  });
+
+  /**
+   * While `/api/usage` is in flight the card says so and states nothing else
+   * about the plan — the flash of the free plan's "1 req/s" and its paid-plan
+   * pitch that every paid key saw on every load (review WR-01).
+   */
+  it('states no figure while the plan is loading', async () => {
+    // A body that never arrives: `/usage` stays in flight for the test.
+    const pending = new Promise<never>((resolve) => void resolve);
+    signedInWithUsage(() => ({ json: () => pending }));
+    renderApp();
+
+    const card = await rateLimitCard();
+    expect(within(card).getByTestId('rate-limit-pending').textContent).toBe(
+      'Loading your plan…',
+    );
+    expect(within(card).queryByTestId('rate-limit')).toBeNull();
+    expect(within(card).queryByText('Active')).toBeNull();
+    expect(within(card).queryByTestId('rate-limit-contact')).toBeNull();
+  });
+
+  /**
+   * The first-login row on the key card states the key's OWN plan — the
+   * rework flow task 0311 exists for: a Basic user's new key lands on Basic,
+   * and the row said "Rate limit 1 req/s" beside Basic's quota while the Rate
+   * Limit card said 3 req/s (review CR-02). The quota is named by its
+   * period, so a DAY plan's is not "Monthly" (review WR-02).
+   */
+  it("states the key's own plan in the first-login row", async () => {
+    const renderLanded = () =>
+      render(
+        <MemoryRouter initialEntries={['/?issue=ok']}>
+          <App />
+        </MemoryRouter>,
+      );
+
+    signedInWithUsage(
+      usageWith(paidPlan('basic', 3, 15, 1000000), {
+        limit: 1000000,
+        remaining: 999879,
+      }),
+    );
+    const basic = renderLanded();
+    expect(await screen.findByText('3 req/s')).toBeTruthy();
+    expect(screen.getByText('Rate limit')).toBeTruthy();
+    expect(screen.getByText('Monthly quota')).toBeTruthy();
+    expect(screen.getByText('1,000,000 requests')).toBeTruthy();
+    expect(screen.queryByText('1 req/s')).toBeNull();
+    basic.unmount();
+
+    signedInWithUsage(
+      usageWith(
+        {
+          tier: 'custom',
+          name: 'prices-production-daily-plan',
+          rate_limit_per_second: 2,
+          burst_limit: 10,
+          quota_limit: 5000,
+          quota_period: 'DAY',
+        },
+        { used: 10, remaining: 4990, limit: 5000 },
+      ),
+    );
+    renderLanded();
+    expect(await screen.findByText('Daily quota')).toBeTruthy();
+    expect(screen.getByText('5,000 requests')).toBeTruthy();
+    expect(screen.getByText('2 req/s')).toBeTruthy();
+    expect(screen.queryByText('Monthly quota')).toBeNull();
+  });
+
+  /**
+   * A DAY quota (a hand-made Custom plan) is not "Monthly", and its reset —
+   * tomorrow — is not when the next key can be issued: the rework cap is the
+   * calendar month on every plan (task 0191), so the strip names the 1st of
+   * next month whatever `resets_at` says (task 0311's review, WR-02).
+   */
+  it("keeps a DAY plan's reset out of the rework strip and titles it daily", async () => {
+    signedInWithUsage(
+      usageWith(
+        {
+          tier: 'custom',
+          name: 'prices-production-daily-plan',
+          rate_limit_per_second: 2,
+          burst_limit: 10,
+          quota_limit: 5000,
+          quota_period: 'DAY',
+        },
+        {
+          used: 10,
+          remaining: 4990,
+          limit: 5000,
+          period_start: '2020-01-01',
+          period_end: '2020-01-01',
+          resets_at: '2020-01-02T00:00:00Z',
+        },
+      ),
+    );
+    renderApp();
+
+    expect(
+      await screen.findByRole('heading', { name: 'Daily Usage' }),
+    ).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Monthly Usage' })).toBeNull();
+    const note = await screen.findByRole('note');
+    const nextMonth = new Date(
+      Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1),
+    );
+    await waitFor(() =>
+      expect(note.textContent).toContain(
+        nextMonth.toLocaleDateString('en-GB', {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+          timeZone: 'UTC',
+        }),
+      ),
+    );
+    expect(note.textContent).not.toMatch(/2 January 2020/);
+  });
+
+  /**
+   * A Custom plan's fractional rate is printed as a rate, not as a floating
+   * point artefact: 0.1 req/s is 6 req/min, not 6.000000000000001 (review
+   * IN-03).
+   */
+  it('prints a fractional rate without floating-point noise', async () => {
+    signedInWithUsage(
+      usageWith({ ...paidPlan('custom', 0.1, 1, 1000000), name: 'slow' }),
+    );
+    renderApp();
+
+    const card = await rateLimitCard();
+    await waitFor(() =>
+      expect(within(card).getByTestId('rate-limit').textContent).toBe('0.1'),
+    );
+    expect(within(card).getByText('6')).toBeTruthy();
+    expect(card.textContent).not.toMatch(/0000000/);
+  });
+
+  /**
+   * A tier this bundle does not know — a newer backend, deployed apart from
+   * the bundle — is labelled Custom and gets Custom's copy, instead of a
+   * lookup that throws and unmounts the dashboard (review IN-04).
+   */
+  it('treats an unknown tier as Custom rather than crashing', async () => {
+    signedInWithUsage(
+      usageWith({ ...paidPlan('gold', 40, 200, 90000000), tier: 'gold' }),
+    );
+    renderApp();
+
+    const card = await rateLimitCard();
+    await waitFor(() => expect(within(card).getByText('Custom')).toBeTruthy());
+    expect(within(card).getByTestId('rate-limit').textContent).toBe('40');
+    expect(within(card).getByTestId('rate-limit-contact').textContent).toBe(
+      'Need custom limits? Contact us.',
+    );
+  });
+
+  /**
+   * A key on no usage plan for this API (`plan: null`): stated in both cards,
+   * no "Active", no plan pill, and nothing that reads as a zero or as
+   * "nothing recorded yet" (decision 7a).
+   */
+  it('states the no-plan state in both cards, with no pill', async () => {
+    signedInWithUsage(
+      usageWith(null, {
+        used: null,
+        remaining: null,
+        limit: null,
+        period_start: null,
+        period_end: null,
+        resets_at: null,
+      }),
+    );
+    renderApp();
+
+    expect((await screen.findByTestId('rate-limit-no-plan')).textContent).toBe(
+      'This key is not on a usage plan for this API, so the API answers 403 to it.',
+    );
+    expect(screen.getByTestId('usage-no-plan').textContent).toBe(
+      'No usage plan, so there is no quota to count against.',
+    );
+    const card = await rateLimitCard();
+    expect(within(card).queryByText('Active')).toBeNull();
+    expect(within(card).queryByTestId('rate-limit')).toBeNull();
+    for (const label of ['Free', 'Basic', 'Analyst', 'Lite', 'Pro', 'Custom']) {
+      expect(within(card).queryByText(label), label).toBeNull();
+    }
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/not recorded any usage/i);
+    expect(document.body.textContent).not.toMatch(/nothing recorded/i);
+    // Its own contact line, not Custom's "Need custom limits?" — a key on no
+    // plan is broken, and a sign-in is what re-attaches it (review IN-05).
+    expect(within(card).getByTestId('rate-limit-contact').textContent).toBe(
+      'Signing out and in again puts it back on a plan. If that does not fix it, contact us.',
+    );
+    expect(
+      within(card)
+        .getByRole('link', { name: /contact us/i })
+        .getAttribute('href'),
+    ).toBe(RUMBLEFISH_CONTACT);
+    expect(card.textContent).not.toMatch(/custom limits/i);
+  });
+
+  /**
+   * A plan without a throttle or a quota: both Rate Limit figures read
+   * "Unlimited", Monthly Usage says so with no meter, and the pill is
+   * "Custom" (decision 7b). Never a zero.
+   */
+  it('states Unlimited for a plan without limits', async () => {
+    signedInWithUsage(
+      usageWith(
+        {
+          tier: 'custom',
+          name: 'prices-production-acme-plan',
+          rate_limit_per_second: null,
+          burst_limit: null,
+          quota_limit: null,
+          quota_period: null,
+        },
+        {
+          used: null,
+          remaining: null,
+          limit: null,
+          period_start: null,
+          period_end: null,
+          resets_at: null,
+        },
+      ),
+    );
+    renderApp();
+
+    expect((await screen.findByTestId('usage-unlimited')).textContent).toMatch(
+      /Unlimited/,
+    );
+    const card = await rateLimitCard();
+    await waitFor(() => expect(within(card).getByText('Custom')).toBeTruthy());
+    expect(within(card).getByTestId('rate-limit').textContent).toBe(
+      'Unlimited',
+    );
+    expect(within(card).getAllByText('Unlimited')).toHaveLength(2);
+    expect(within(card).queryByText('0')).toBeNull();
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+    expect(screen.queryByTestId('usage-limit')).toBeNull();
+  });
+
+  /**
+   * Monthly Usage takes its limit and its reset from the plan: a Basic key's
+   * meter is out of 1,000,000 and resets on the date the backend computed.
+   */
+  it("takes Monthly Usage's limit and reset from the plan", async () => {
+    signedInWithUsage(
+      usageWith(paidPlan('basic', 3, 15, 1000000), {
+        used: 5000,
+        remaining: 995000,
+        limit: 1000000,
+        period_start: '2026-09-01',
+        period_end: '2026-09-30',
+        resets_at: '2026-10-01T00:00:00Z',
+      }),
+    );
+    renderApp();
+
+    expect((await screen.findByTestId('usage-limit')).textContent).toBe(
+      '1000000',
+    );
+    expect(screen.getByTestId('usage-used').textContent).toBe('5000');
+    expect(screen.getByText('Resets 1 October')).toBeTruthy();
+  });
+
+  /** A quota period the backend does not compute is named, not guessed. */
+  it('names an unsupported quota period instead of guessing it', async () => {
+    signedInWithUsage(
+      usageWith(
+        {
+          tier: 'custom',
+          name: 'prices-production-weekly-plan',
+          rate_limit_per_second: 2,
+          burst_limit: 10,
+          quota_limit: 5000,
+          quota_period: 'WEEK',
+        },
+        {
+          used: null,
+          remaining: null,
+          limit: 5000,
+          period_start: null,
+          period_end: null,
+          resets_at: null,
+        },
+      ),
+    );
+    renderApp();
+
+    expect(
+      (await screen.findByTestId('usage-unsupported-period')).textContent,
+    ).toBe('Quota per week; usage for this period is not shown.');
+    expect(screen.getByTestId('usage-period-quota').textContent).toBe('5,000');
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+  });
+
+  /**
+   * The contact line is a link to `RUMBLEFISH_CONTACT`, worded for the tier
+   * (decision 6): contacting us is the only way to change plan, so it is on
+   * every tier, paid ones included.
+   */
+  it('links the contact line to RUMBLEFISH_CONTACT with copy per tier', async () => {
+    for (const [plan, lead, linkText] of [
+      [FREE_PLAN, 'Need higher limits?', 'Contact us about a paid plan.'],
+      [
+        paidPlan('basic', 3, 15, 1000000),
+        'Need more?',
+        'Contact us to change your plan.',
+      ],
+      [
+        paidPlan('analyst', 5, 25, 5000000),
+        'Need more?',
+        'Contact us to change your plan.',
+      ],
+      [
+        paidPlan('lite', 10, 50, 20000000),
+        'Need more?',
+        'Contact us to change your plan.',
+      ],
+      [
+        paidPlan('pro', 25, 125, 50000000),
+        'Need custom limits?',
+        'Contact us.',
+      ],
+      [
+        { ...paidPlan('custom', 150, 300, 1000000), name: 'acme' },
+        'Need custom limits?',
+        'Contact us.',
+      ],
+    ] as const) {
+      signedInWithUsage(usageWith(plan));
+      const view = renderApp();
+
+      const card = await rateLimitCard();
+      await waitFor(() =>
+        expect(
+          within(card).getByRole('link', { name: /contact us/i }).textContent,
+          plan.tier,
+        ).toBe(linkText),
+      );
+      const link = within(card).getByRole('link', { name: /contact us/i });
+      expect(link.getAttribute('href'), plan.tier).toBe(RUMBLEFISH_CONTACT);
+      expect(
+        within(card).getByTestId('rate-limit-contact').textContent,
+        plan.tier,
+      ).toBe(`${lead} ${linkText}`);
+      view.unmount();
+    }
   });
 
   /**

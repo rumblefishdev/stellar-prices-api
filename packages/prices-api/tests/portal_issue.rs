@@ -32,7 +32,6 @@ use harness::*;
 use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord};
 use prices_api::portal::auth::discord::Endpoints;
 use prices_api::portal::auth::{cookies, session::Session, state_token};
-use prices_api::portal::keys::gateway::Gateway;
 use prices_api::portal::usage::USAGE_PATH;
 
 /// Milliseconds since the Discord epoch, shifted into snowflake position —
@@ -58,7 +57,7 @@ fn issue_app_with(
 ) -> Router {
     build_app_with(
         true,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -86,7 +85,7 @@ async fn everything_including_issue_is_an_empty_404_while_the_portal_is_closed()
     let gateway = MockGateway::start().await;
     let closed = build_app_with(
         false,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -127,7 +126,7 @@ async fn a_member_in_good_standing_gets_a_key_and_lands_on_issue_ok() {
     let reply = issue_round_trip(&app).await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     assert!(
         reply.cookie(cookies::SESSION_COOKIE).is_some(),
         "the round-trip proves identity, so it signs the visitor in"
@@ -170,8 +169,14 @@ async fn a_second_round_trip_returns_the_same_key() {
     let gateway = MockGateway::start().await;
     let app = issue_app(&discord, &gateway);
 
-    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
-    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/prices-api/?issue=ok"
+    );
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/prices-api/?issue=ok"
+    );
 
     assert_eq!(
         gateway.with(|s| s.create_calls),
@@ -200,13 +205,13 @@ async fn two_users_get_two_different_keys() {
         issue_round_trip(&issue_app(&mine, &gateway))
             .await
             .location(),
-        "/api/?issue=ok"
+        "/prices-api/?issue=ok"
     );
     assert_eq!(
         issue_round_trip(&issue_app(&theirs, &gateway))
             .await
             .location(),
-        "/api/?issue=ok"
+        "/prices-api/?issue=ok"
     );
 
     let names: Vec<String> = gateway.with(|s| s.keys.iter().map(|k| k.name.clone()).collect());
@@ -224,8 +229,8 @@ async fn two_simultaneous_round_trips_leave_exactly_one_key() {
     let app = issue_app(&discord, &gateway);
 
     let (a, b) = tokio::join!(issue_round_trip(&app), issue_round_trip(&app));
-    assert_eq!(a.location(), "/api/?issue=ok");
-    assert_eq!(b.location(), "/api/?issue=ok");
+    assert_eq!(a.location(), "/prices-api/?issue=ok");
+    assert_eq!(b.location(), "/prices-api/?issue=ok");
 
     assert_eq!(
         gateway.with(|s| s.named(&key_name()).len()),
@@ -260,7 +265,7 @@ async fn a_non_member_is_refused_and_no_key_is_created() {
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?issue=not_member");
+    assert_eq!(reply.location(), "/prices-api/?issue=not_member");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
 
     assert_eq!(
@@ -290,7 +295,7 @@ async fn an_unknown_guild_code_is_also_refused_as_not_a_member() {
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=not_member");
+    assert_eq!(reply.location(), "/prices-api/?issue=not_member");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 
@@ -308,7 +313,7 @@ async fn a_404_with_an_unrecognised_code_is_unknown_not_an_accusation() {
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=unknown");
+    assert_eq!(reply.location(), "/prices-api/?issue=unknown");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 
@@ -336,7 +341,7 @@ async fn a_429_or_5xx_from_discord_refuses_without_claiming_non_membership() {
         let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
         assert_eq!(
             reply.location(),
-            "/api/?issue=unknown",
+            "/prices-api/?issue=unknown",
             "a {status} must be 'could not verify', never 'not a member'"
         );
         assert_eq!(gateway.with(|s| s.create_calls), 0, "{status}");
@@ -361,7 +366,7 @@ async fn a_pending_member_is_refused_as_pending_rules() {
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=pending_rules");
+    assert_eq!(reply.location(), "/prices-api/?issue=pending_rules");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 
@@ -381,7 +386,7 @@ async fn an_absent_pending_field_does_not_silently_pass() {
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=unknown");
+    assert_eq!(reply.location(), "/prices-api/?issue=unknown");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 
@@ -398,7 +403,7 @@ async fn a_malformed_member_body_is_unknown() {
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=unknown");
+    assert_eq!(reply.location(), "/prices-api/?issue=unknown");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 
@@ -441,7 +446,7 @@ async fn a_grant_missing_the_member_scope_lands_on_denied_before_any_member_call
 
         let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
         assert_eq!(reply.status, StatusCode::SEE_OTHER, "scope={drifted}");
-        assert_eq!(reply.location(), "/api/?issue=denied", "{drifted}");
+        assert_eq!(reply.location(), "/prices-api/?issue=denied", "{drifted}");
         // Not the sign-in arm's error page: nothing renderable, no way back.
         assert!(reply.body.is_empty(), "{drifted}");
         assert_eq!(discord.member_calls(), 0, "{drifted}");
@@ -462,7 +467,7 @@ async fn a_failed_token_exchange_on_an_issue_lands_on_unknown() {
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?issue=unknown");
+    assert_eq!(reply.location(), "/prices-api/?issue=unknown");
     assert!(!String::from_utf8_lossy(&reply.body).contains("upstream said no"));
     assert_eq!(discord.member_calls(), 0);
     assert_eq!(gateway.with(|s| s.create_calls), 0);
@@ -490,7 +495,7 @@ async fn a_failed_identity_read_on_an_issue_lands_on_unknown() {
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api/?issue=unknown");
+    assert_eq!(reply.location(), "/prices-api/?issue=unknown");
     assert_eq!(discord.member_calls(), 1, "the membership call did happen");
     // No identity means no key: the reconciler needs a `sub` to name one.
     assert_eq!(gateway.with(|s| s.create_calls), 0);
@@ -552,7 +557,7 @@ async fn an_account_below_the_threshold_is_refused_with_the_time_remaining() {
     let (base, wait) = location
         .split_once("&wait_secs=")
         .unwrap_or_else(|| panic!("no wait_secs in {location}"));
-    assert_eq!(base, "/api/?issue=too_young");
+    assert_eq!(base, "/prices-api/?issue=too_young");
     let wait: u64 = wait.parse().expect("wait_secs must be digits");
     // ~180s remain; generous bounds absorb test-runner latency.
     assert!((150..=181).contains(&wait), "wait_secs={wait}");
@@ -581,7 +586,9 @@ async fn the_threshold_value_decides_the_verdict_at_action_time() {
     let gateway = MockGateway::start().await;
     let strict = issue_round_trip(&issue_app_with(&strict_discord, &gateway, GUILD_ID, "5")).await;
     assert!(
-        strict.location().starts_with("/api/?issue=too_young"),
+        strict
+            .location()
+            .starts_with("/prices-api/?issue=too_young"),
         "{}",
         strict.location()
     );
@@ -596,7 +603,7 @@ async fn the_threshold_value_decides_the_verdict_at_action_time() {
     )
     .await;
     let lax = issue_round_trip(&issue_app_with(&lax_discord, &gateway, GUILD_ID, "0")).await;
-    assert_eq!(lax.location(), "/api/?issue=ok");
+    assert_eq!(lax.location(), "/prices-api/?issue=ok");
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +639,7 @@ async fn a_session_for_someone_else_is_replaced_by_the_re_auth_identity() {
     )
     .await;
 
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     let cookie = reply.cookie(cookies::SESSION_COOKIE).unwrap();
     let session = Session::decode(SIGNING_KEY.as_bytes(), &cookie, state_token::now_secs())
         .expect("the fresh session must verify");
@@ -674,7 +681,7 @@ async fn a_successful_issue_evicts_the_cached_no_key() {
     assert_eq!(before.json()["code"], "no_key");
 
     let issued = issue_round_trip(&app).await;
-    assert_eq!(issued.location(), "/api/?issue=ok");
+    assert_eq!(issued.location(), "/prices-api/?issue=ok");
 
     // Well inside the 60s TTL, so only the eviction can explain this.
     let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
@@ -682,6 +689,44 @@ async fn a_successful_issue_evicts_the_cached_no_key() {
         after.status,
         StatusCode::OK,
         "a cached `no_key` survived the issue that falsified it: {}",
+        String::from_utf8_lossy(&after.body)
+    );
+}
+
+/// A successful issue also evicts a cached "no plan" answer (task 0311).
+///
+/// A key on no usage plan of our stage is cached like any usage answer, and
+/// the page's copy for it tells the user that signing out and in again puts
+/// the key back on a plan. The sign-in does attach it — so without the
+/// eviction the dashboard it lands on would keep saying "not on a usage plan"
+/// for the rest of the TTL, and the advice would look like it failed.
+#[tokio::test]
+async fn a_successful_issue_evicts_the_cached_no_plan() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    // A live key on no plan at all — the "issued but dead" state.
+    gateway.with(|s| {
+        s.seed(&key_name(), 100);
+    });
+    let app = issue_app(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    let before = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(before.status, StatusCode::OK);
+    assert_eq!(before.json()["plan"], serde_json::Value::Null);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/prices-api/?issue=ok"
+    );
+    gateway.with(|s| assert_eq!(s.attach_calls, 1, "the sign-in attached the key"));
+
+    // Well inside the 60s TTL, so only the eviction can explain this.
+    let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(
+        after.json()["plan"]["tier"],
+        "free",
+        "a cached 'no plan' survived the issue that attached the key: {}",
         String::from_utf8_lossy(&after.body)
     );
 }
@@ -750,7 +795,7 @@ async fn an_unreadable_eligibility_parameter_is_unknown() {
         let reply = issue_round_trip(&app).await;
         assert_eq!(
             reply.location(),
-            "/api/?issue=unknown",
+            "/prices-api/?issue=unknown",
             "guild={guild:?} age={age:?}"
         );
         assert_eq!(gateway.with(|s| s.create_calls), 0);
@@ -776,7 +821,7 @@ async fn a_control_plane_failure_after_eligibility_lands_on_issue_failed_not_unk
     gateway.with(|s| s.fail_list = true);
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=failed");
+    assert_eq!(reply.location(), "/prices-api/?issue=failed");
     assert_eq!(discord.member_calls(), 1, "eligibility ran and passed");
     // Still signed in: identity and membership both proved.
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
@@ -791,7 +836,7 @@ async fn a_missing_usage_plan_is_issue_failed_without_minting_more_keys() {
     gateway.with(|s| s.attach_always_404 = true);
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=failed");
+    assert_eq!(reply.location(), "/prices-api/?issue=failed");
     assert_eq!(gateway.with(|s| s.create_calls), 1);
 }
 
@@ -807,7 +852,7 @@ async fn a_stale_listing_bounds_the_attempts_and_lands_on_failed() {
     });
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=failed");
+    assert_eq!(reply.location(), "/prices-api/?issue=failed");
     assert_eq!(
         gateway.with(|s| s.list_calls),
         2,
@@ -829,7 +874,7 @@ async fn an_adopted_key_is_put_on_the_free_plan() {
     let orphan = gateway.with(|s| s.seed(&key_name(), 1_000));
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     assert_eq!(
         gateway.with(|s| s.plan_keys.clone()),
         vec![(PLAN_ID.to_string(), orphan.clone())],
@@ -858,7 +903,7 @@ async fn duplicates_converge_on_the_earliest_and_the_losers_are_deleted() {
     });
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
 
     let mut deleted = gateway.with(|s| s.deleted.clone());
     deleted.sort();
@@ -889,7 +934,7 @@ async fn the_reconciler_pages_get_api_keys_to_exhaustion_before_ranking() {
     });
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     assert_eq!(
         gateway.with(|s| s.list_calls),
         3,
@@ -916,7 +961,7 @@ async fn a_key_that_vanishes_before_the_attach_is_not_a_dead_end() {
     });
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
 
     let survivors: Vec<String> =
         gateway.with(|s| s.named(&key_name()).iter().map(|k| k.id.clone()).collect());
@@ -946,7 +991,7 @@ async fn a_key_the_listing_has_not_caught_up_with_is_not_orphaned() {
     });
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     assert_eq!(
         gateway.with(|s| s.keys.len()),
         1,
@@ -972,7 +1017,7 @@ async fn a_duplicate_that_will_not_delete_does_not_withhold_the_key() {
     });
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=ok");
+    assert_eq!(reply.location(), "/prices-api/?issue=ok");
     assert_eq!(
         gateway.with(|s| s.keys.len()),
         2,
@@ -984,4 +1029,106 @@ async fn a_duplicate_that_will_not_delete_does_not_withhold_the_key() {
         earliest,
         "the winner is still the earliest, and it is what the reveal hands out"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Attaching to a plan other than free (task 0311)
+// ---------------------------------------------------------------------------
+
+/// A plan the control plane does not know is `PlanNotFound` NAMING that plan
+/// — a paid or custom plan id comes from the previous key's `GetUsagePlans`
+/// answer, not from the SSM parameter, so a message that only pointed at
+/// `PORTAL_FREE_PLAN_PARAM` would send the operator to the wrong place.
+#[tokio::test]
+async fn attaching_to_an_unknown_plan_names_that_plan() {
+    use prices_api::portal::keys::gateway::GatewayError;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| s.seed(&key_name(), 100));
+
+    let error = test_gateway(&gateway.base)
+        .attach_to_plan(&key, "vanishedplan9")
+        .await
+        .expect_err("the mock knows no plan `vanishedplan9`");
+    assert!(
+        matches!(&error, GatewayError::PlanNotFound { plan_id } if plan_id == "vanishedplan9"),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("vanishedplan9"), "{message}");
+    assert!(message.contains("GetUsagePlans"), "{message}");
+    assert!(message.contains("PORTAL_FREE_PLAN_PARAM"), "{message}");
+    assert!(gateway.with(|s| s.plan_keys.is_empty()));
+}
+
+/// And a known paid plan is attached to like the free one.
+#[tokio::test]
+async fn attaching_to_a_paid_plan_puts_the_key_on_it() {
+    use prices_api::portal::keys::gateway::Attachment;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.seed(&key_name(), 100)
+    });
+
+    let attached = test_gateway(&gateway.base)
+        .attach_to_plan(&key, BASIC_PLAN_ID)
+        .await
+        .expect("basic1 exists");
+    assert_eq!(attached, Attachment::OnPlan);
+    assert_eq!(
+        gateway.with(|s| s.plan_keys.clone()),
+        vec![(BASIC_PLAN_ID.to_string(), key)]
+    );
+}
+
+/// AWS's two "already on a plan" refusals (task 0311, review WR-05; PR #351
+/// review): `409` means the key is already on THE plan asked for, so it is
+/// `OnPlan` — the refusal names the plan and needs no read-back — while `400`
+/// "cannot reference multiple Usage Plans with the same API Stage" means
+/// ANOTHER plan on the stage, `AlreadyOnAPlan`. Neither moves the key, and
+/// neither is an error.
+#[tokio::test]
+async fn both_already_on_a_plan_refusals_are_reported_as_such() {
+    use prices_api::portal::keys::gateway::Attachment;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.seed_on_plan(&key_name(), 100, BASIC_PLAN_ID)
+    });
+    let client = test_gateway(&gateway.base);
+
+    for (plan, expected) in [
+        (BASIC_PLAN_ID, Attachment::OnPlan),
+        (PLAN_ID, Attachment::AlreadyOnAPlan),
+    ] {
+        assert_eq!(
+            client.attach_to_plan(&key, plan).await.expect(plan),
+            expected,
+            "{plan}"
+        );
+    }
+    assert_eq!(
+        gateway.with(|s| s.plan_keys.clone()),
+        vec![(BASIC_PLAN_ID.to_string(), key)]
+    );
+}
+
+/// Any OTHER `400` from the attach stays an error — only AWS's same-stage
+/// wording means "already on a plan".
+#[tokio::test]
+async fn any_other_bad_request_from_the_attach_is_an_error() {
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.fail_next_attach = true;
+        s.seed(&key_name(), 100)
+    });
+
+    let error = test_gateway(&gateway.base)
+        .attach_to_plan(&key, PLAN_ID)
+        .await
+        .expect_err("a plain 400 is not a success");
+    assert!(error.to_string().contains("CreateUsagePlanKey"), "{error}");
 }

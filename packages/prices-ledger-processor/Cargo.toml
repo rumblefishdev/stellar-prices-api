@@ -54,3 +54,7 @@ aws-sdk-cloudwatch = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 extractors-core = { path = "../extractors-core" }
+# `tests/reconcile_drain.rs` re-encodes a fixture ledger under new sequence
+# numbers and close times. Both are already in the lock via xdr-parser.
+stellar-xdr = { workspace = true }
+zstd = "0.13"

@@ -15,6 +15,9 @@ the API surface, or the cost / budget framing.
 
 | Date       | Sections touched                                                                                                                                                          | Driver                                                                                                                                                                                                                                                                                    | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-01 | §3.1, §3.2, §3.3, §3.4                                                                                                                                                    | [Task 0139](../lore/1-tasks/active/0139_BUG_current-price-usd-fans-out-on-duplicate-asset-id.md)                                                                                                                                                                                          | **`asset_id` is derived by ClickHouse from the identity**, `xxh3` of `code:issuer:contract` as `UInt64`, instead of a `UInt32` counter in each writer. Two writers' counters had handed one id to two assets 3,315 times, so every join on `asset_id` fanned out.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 2026-09-24 | §4 (intro, §4.1, §4.2, §4.3)                                                                                                                                              | [Task 0306](../lore/1-tasks/active/0306_DOCS_published-docs-drift-from-production.md) · [Task 0178](../lore/1-tasks/archive/0178_BUG_current-prices-cannot-publish-the-quote-asset.md)                                                                                                    | **§4 brought to what production answers**, next to the published API reference. The base URL is the production host, and a new note separates the two error bodies: the API's `{code, message}` and API Gateway's `{message}` for `403` and `429`, with the handler's own `401` not armed in production. The `/assets` and `/price` examples are the 2026-09-23 production snapshot (AQUA; XLM with its five venues) and carry `method`; `GET /assets/{asset_identifier}` and `POST /prices/batch` gain their response bodies. `volume_24h_usd` is defined as both sides of each trade (task 0178) against the base side in `sources` — the old example's venues summed exactly to the total, which production never shows. Recorded as not populated yet: `home_domain`, a classic asset's SAC in `contract_address`, and a Soroban token's `asset_code`.                                                                                                                                                                                                                                                                                                                                                                 |
+| 2026-09-16 | §3.2, §4.2 (`GET /ohlcv`)                                                                                                                                                 | [Task 0286](../lore/1-tasks/active/0286_BUG_candles-are-built-from-dust-fills-in-the-wrong-order.md) · [ADR 0287](../lore/2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md)                                                                                | **A candle's prices come only from the price-forming trades of its own bucket** — `open`/`close` the first and last of them, `high`/`low` their extremes, nothing carried from a neighbouring bucket. A fill's price is the ratio of two integer stroop amounts, so a few-stroop fill prints an exact small fraction that is arithmetically right and can sit hundreds of percent off the market; such fills no longer set a price. The task-0116 guidance to filter dust **on the client** is replaced by the rule and by three new `/ohlcv` fields — `pf_trade_count` (`0` means the bucket has no price and every price field is `null`), `pf_vwap` (the price-forming mean) and `close_divergent` (`close` more than 1% from it). Added the three `pf_*` columns to the §3.2 DDL and re-cut the rollup sketch to the shipped generator's pf-gated form, with the month rolled from the day.                                                                                                                                                                                                                                                                                                                            |
 | 2026-09-02 | §5.7 (new)                                                                                                                                                                | [Task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md)                                                                                                                                                                                      | **Venue coverage recorded against the RFP's named markets.** The RFP's Price Aggregation bullet names four markets (Soroswap, Aquarius, SDEX, Blend); we ingest three of them plus Phoenix, which it does not name. New §5.7 states the count plainly and records why **Blend cannot be a price source**: it is a lending protocol with no swap, and a price is a property of a trade. The decisive point is that Blend pool creators choose an _oracle_ to price collateral, which places Blend downstream of a service like this one — a consumer of price data, not a producer. Its 80/20 BLND:USDC backstop AMM is the only part that trades and its volume is **unmeasured**, stated rather than implied. No extractor, no `Venue` arm, no registry seeding: pricing BLND from the backstop pool would be a feature of its own. Deliberately **not** generalised into a rule about lending protocols.                                                                                                                                                                                                                                                                                                                 |
 | 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh)                                                                       | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
 | 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md)                                                                                                                         | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md).                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -159,14 +162,14 @@ to their own infrastructure at any time if needed.
 | **Lambda — Prices Ledger Processor** | Primary ingestion           | SNS-triggered (one message per S3 PutObject on BE's `stellar-ledger-data/` bucket). Rust binary, no VPC. Parses XDR via `stellar-xdr` crate, extracts SDEX trades and Soroban swap events, INSERTs per-source 1-min OHLCV rows to ClickHouse `prices.price_ohlcv_1m` over HTTPS-mTLS to Caddy:443 |
 | **Lambda — Current Price Updater**   | Price aggregation           | EventBridge rate(1 min). Reads latest candles from `prices.price_ohlcv_1m`, computes cross-source VWAP per §5.5, writes to `prices.current_prices` (`ReplacingMergeTree(updated_at)`)                                                                                                             |
 | **Lambda — Oracle Fetcher**          | Oracle cross-reference      | EventBridge rate(5 min). Reads Reflector via Soroban RPC `simulateTransaction`. Writes to `prices.oracle_prices`. Failures do not block primary ingestion                                                                                                                                         |
-| **Lambda — Asset Discovery**         | Asset registry              | EventBridge rate(1 hour). Detects new SEP-41 contract deployments and classic asset issuances; UPSERTs into `prices.assets`                                                                                                                                                                       |
+| **Lambda — Asset Discovery**         | Asset registry              | EventBridge rate(1 hour). Resolves Soroban token `symbol()`s over Soroban RPC into `prices.asset_symbol`; keeps the seed assets present in `prices.assets`. Reads no ledgers — new assets are registered by the Prices Ledger Processor (task 0256)                                               |
 | **Lambda — Cleanup Worker**          | Data retention              | EventBridge cron(02:00 UTC daily). `ALTER TABLE … DROP PARTITION` on old monthly partitions of each per-granularity OHLCV table                                                                                                                                                                   |
 | **Lambda — API handlers**            | Public API                  | Individual functions per route group. Rust / axum via `lambda_runtime`, 256–512 MB, 15s timeout. No VPC; outbound HTTPS-mTLS to Caddy:443                                                                                                                                                         |
 | **API Gateway**                      | Public API entry point      | REST API, usage plans, API key auth, rate limiting (1 req/s sustained, burst 5, 100 000 req/month per self-service key — task 0157), request validation. Built-in response cache (0.5 GB) with per-endpoint TTLs                                                                                  |
 | **EventBridge Scheduler**            | Scheduled triggers          | Cron/rate rules for all periodic Lambda workers                                                                                                                                                                                                                                                   |
 | **Secrets Manager**                  | Credentials & mTLS material | Per-env client `{cert,key,ca}` for Caddy:443 mTLS (single JSON bundle secret per identity, named by `MTLS_SECRET_NAME`); Soroswap/Aquarius API keys; oracle contract address                                                                                                                      |
 | **CloudWatch + X-Ray**               | Observability               | API latency, error rates, ingestion lag, Lambda duration/concurrency, backfill progress; mTLS cert NotAfter alarm                                                                                                                                                                                 |
-| **S3** (API docs)                    | Documentation hosting       | self-service onboarding portal + API reference, served from the block explorer's bucket and CloudFront distribution at `sorobanscan.rumblefish.dev/api/`; the OpenAPI document is served by the API itself                                                                                        |
+| **S3** (API docs)                    | Documentation hosting       | self-service onboarding portal + API reference, served from the block explorer's bucket and CloudFront distribution at `sorobanscan.rumblefish.dev/prices-api/`; the OpenAPI document is served by the API itself                                                                                 |
 
 **Components no longer in the Prices API budget** (eliminated by ADR 0007):
 
@@ -253,7 +256,7 @@ GROUP BY` to handle eventual consistency.
 
 ```sql
 CREATE TABLE prices.assets (
-    asset_id         UInt32,            -- application-assigned surrogate id
+    asset_id         UInt64 MATERIALIZED xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)),
     asset_code       FixedString(12),
     asset_type       Enum8('classic' = 1, 'soroban' = 2),
     issuer_address   FixedString(56),   -- G-address; empty string for XLM
@@ -269,9 +272,9 @@ ORDER BY (asset_code, issuer_address, contract_address)
 SETTINGS index_granularity = 8192;
 ```
 
-Surrogate `asset_id` is application-assigned (small `UInt32` counter inside the prices-api
-write path), not the asset's on-chain identity — same idea as the prior SERIAL but materialised
-outside the DB. The natural-key tuple `(asset_code, issuer_address, contract_address)` is the
+`asset_id` is derived by ClickHouse from the identity (task 0139): the `xxh3` hash of
+`code:issuer:contract`, `UInt64`. No writer assigns or sends it, so two identities can never
+share an id and every writer derives the same id for the same asset. The natural-key tuple `(asset_code, issuer_address, contract_address)` is the
 sort key so reads by identity are O(log N).
 
 ### 3.2 Price Snapshots (OHLCV) — Per-Source, Per-Granularity Tables
@@ -282,8 +285,8 @@ merge happens at read time (§4.2 / ADR 0007 §3.3), not at write time.
 ```sql
 CREATE TABLE prices.price_ohlcv_1m (
     timestamp        DateTime CODEC(DoubleDelta),
-    asset_id         UInt32,
-    quote_asset_id   UInt32,            -- ADR 0003: PK includes the quote leg
+    asset_id         UInt64,            -- DEFAULT xxh3 of the base identity, sent in EPHEMERAL columns
+    quote_asset_id   UInt64,            -- same for the quote leg; ADR 0003: PK includes the quote leg
     source           LowCardinality(String),  -- 'sdex', 'soroswap', 'aquarius', 'phoenix', ...
     open             Decimal(38, 14),
     high             Decimal(38, 14),
@@ -300,8 +303,15 @@ CREATE TABLE prices.price_ohlcv_1m (
                                          -- (volume_quote / volume_base);
                                          -- see §5.5 layering for cross-source weighting
     trade_count      UInt32 DEFAULT 0,
-    version          UInt64             -- monotonic per-row version for ReplacingMergeTree
+    version          UInt64,            -- monotonic per-row version for ReplacingMergeTree
                                          -- (ledger sequence × 1000 + intra-ledger order)
+    -- ADR 0287: how much of the bucket formed its price. A fill of a few
+    -- stroops prints an exact small fraction that can sit hundreds of percent
+    -- off the market, so open/high/low/close come only from the fills whose
+    -- own rounding cannot move their price by more than 0.1%.
+    pf_trade_count   UInt32          DEFAULT trade_count,  -- 0 = no price
+    pf_volume        Decimal(38, 14) DEFAULT volume_base,
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -317,29 +327,44 @@ CREATE TABLE prices.price_ohlcv_1w  AS prices.price_ohlcv_1m;
 CREATE TABLE prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
 ```
 
-**Rollup MV chain** (sketch — one MV per step; full DDL lives in
-`docs/database-schema/clickhouse-prod-schema.sql` once landed):
+**Rollup MV chain** (sketch — one MV per step; the shipped DDL is rendered by
+`packages/prices-clickhouse/src/rollup_sql.rs` into `schema/rollups.sql`, and
+[the database-schema overview §3.2](database-schema/database-schema-overview.md)
+carries the full form):
 
 ```sql
 CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m
+REFRESH EVERY 1 MINUTE APPEND
 TO prices.price_ohlcv_15m AS
 SELECT
-    toStartOfInterval(timestamp, INTERVAL 15 MINUTE) AS timestamp,
+    toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
     asset_id,
     quote_asset_id,
     source,
-    argMin(open,  timestamp) AS open,
-    max(high)                 AS high,
-    min(low)                  AS low,
-    argMax(close, timestamp)  AS close,
-    sum(volume_base)          AS volume_base,
-    sum(volume_quote_usd)     AS volume_quote_usd,
-    sum(volume_quote_usd) / nullIf(sum(volume_base), 0) AS vwap,
-    sum(trade_count)          AS trade_count,
-    max(version)              AS version
-FROM prices.price_ohlcv_1m
+    -- Every price aggregate is conditional: a coarse candle's prices come from
+    -- its price-forming children only, so a dust-only child reaches none of
+    -- them (ADR 0287). A bucket with no such child gets no price.
+    -- ⚠️ BOTH terms: a row written before task 0286 reads pf_trade_count from
+    -- its DEFAULT (trade_count), so it can claim to be price-forming with a
+    -- stored price of 0. `close > 0` is what keeps such a row out until the
+    -- phase-3 re-ingest replaces it.
+    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0)                  AS high,
+    minIf(t.low,  t.pf_trade_count > 0 AND t.close > 0)                  AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
+    sum(t.volume_base)      AS volume_base,   -- volume and counts cover EVERY
+    sum(t.volume_quote_usd) AS volume_quote_usd,  -- child, dust included
+    sum(t.volume_quote) / nullIf(sum(t.volume_base), 0) AS vwap,
+    sum(t.trade_count)     AS trade_count,
+    sum(t.version)         AS version,
+    sum(t.pf_trade_count)  AS pf_trade_count,
+    sum(t.pf_volume)       AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1m AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
--- ... repeat for 15m→1h, 1h→4h, 4h→1d, 1d→1w, 1w→1M.
+-- ... repeat for 15m→1h, 1h→4h, 4h→1d, 1d→1w — and 1d→1M, because a week
+-- straddling a month would otherwise hand the month's close and extremes to
+-- whichever month owned that week.
 ```
 
 **Why per-granularity tables + MV chain (ADR 0007 §3.4):**
@@ -363,7 +388,7 @@ re-aggregation (ADR 0007 §3.3). Both patterns are verified workable in task 004
 
 ```sql
 CREATE TABLE prices.current_prices (
-    asset_id         UInt32,
+    asset_id         UInt64,
     price_usd        Decimal(38, 14),
     price_xlm        Decimal(38, 14),
     change_24h_pct   Decimal(10, 4),
@@ -399,7 +424,7 @@ become hot, a per-sort-column materialised view can be added.
 ```sql
 CREATE TABLE prices.oracle_prices (
     timestamp     DateTime CODEC(DoubleDelta),
-    asset_id      UInt32,
+    asset_id      UInt64,               -- DEFAULT xxh3 of the identity, sent in EPHEMERAL columns
     oracle_name   LowCardinality(String),  -- 'reflector', 'chainlink', 'redstone', 'band'
     price_usd     Decimal(38, 14),
     raw_data      String                   -- JSON blob, unparsed for forensic value
@@ -497,7 +522,23 @@ PARTITION` statements over HTTPS-mTLS to Caddy:443.
 
 ## 4. API Endpoints Design
 
-**Base URL:** `https://api.prices.stellar.example.com/v1`
+**Base URL:** `https://prices-api.sorobanscan.rumblefish.dev/v1`
+
+**Authentication and errors.** Every `/v1` request carries an `x-api-key` header, which API Gateway
+checks before the request reaches the handler (§1.1, §7). An error therefore has one of two bodies,
+depending on who answered it:
+
+| Answered by | Status                     | Body                                                                                                                                                                                         |
+| ----------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the API     | `400`, `404`, `500`, `503` | `{"code": …, "message": …}` — `code` is stable and meant for programs (`invalid_id`, `invalid_query`, `invalid_body`, `not_found`, `db_error`, `quote_unavailable`); `message` is for people |
+| API Gateway | `403`                      | `{"message": "Forbidden"}` — the key is missing, unknown or not enabled for this API                                                                                                         |
+| API Gateway | `429`                      | `{"message": …}` — the key's rate limit or monthly quota is spent; no `Retry-After`                                                                                                          |
+
+The handler's own key check (`401 unauthorized`) is not armed in production, where the gateway
+rejects the request first. A path or method the API does not have is also the gateway's answer:
+`403 {"message": "Missing Authentication Token"}`, until task 0309 turns it into a `404`. The
+`/assets`, `/assets/{asset_identifier}` and `/price` examples below are production responses
+(2026-09-23 08:08 UTC), the snapshot the published API reference shows; the others are illustrative.
 
 ### 4.1 Assets
 
@@ -517,12 +558,13 @@ List all tracked assets with metadata and current price.
 
 **Cursor pagination mechanism:**
 
-The cursor is a Base64-encoded JSON object containing the sort column value and the asset ID of the
-last returned row (ID breaks ties when sort values are equal):
+The cursor is an unpadded Base64url-encoded JSON object holding the last returned row's sort
+column value, as a string (a decimal one for the numeric sorts), and its asset ID (ID breaks ties
+when sort values are equal):
 
 ```
-cursor = base64({ "volume_24h": 1523400.50, "id": 42 })
-       → "eyJ2b2x1bWVfMjRoIjoxNTIzNDAwLjUwLCJpZCI6NDJ9"
+cursor = base64url({ "v": "1570.90285200017593", "id": 87 })
+       → "eyJ2IjoiMTU3MC45MDI4NTIwMDAxNzU5MyIsImlkIjo4N30"
 ```
 
 On the first request (no cursor), the query is:
@@ -537,7 +579,7 @@ On subsequent requests, the server decodes the cursor and uses a **keyset condit
 
 ```sql
 SELECT * FROM current_prices JOIN assets ON assets.id = current_prices.asset_id
-WHERE (volume_24h, id) < (1523400.50, 42)  -- decoded from cursor
+WHERE (volume_24h, id) < (1570.90285200017593, 87)  -- decoded from cursor
 ORDER BY volume_24h DESC, id DESC
 LIMIT 51;
 ```
@@ -550,28 +592,39 @@ LIMIT 51;
 {
   "data": [
     {
-      "asset_code": "USDC",
+      "asset_code": "AQUA",
       "asset_type": "classic",
-      "issuer_address": "GA5ZSE...XYZ",
-      "contract_address": "CABC...DEF",
-      "home_domain": "centre.io",
-      "price_usd": "1.0001",
-      "change_24h_pct": "-0.02",
-      "change_7d_pct": "0.01",
-      "volume_24h_usd": "1523400.50",
-      "vwap_24h": "1.0002",
+      "issuer_address": "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+      "contract_address": "",
+      "home_domain": "",
+      "price_usd": "0.00037300596178",
+      "change_24h_pct": "2.124",
+      "change_7d_pct": "11.997",
+      "volume_24h_usd": "479235.22108659319489",
+      "vwap_24h": "0.00037306538294",
       "sources": {
-        "sdex": { "price": "1.0001", "volume_24h": "800000" },
-        "soroswap": { "price": "1.0002", "volume_24h": "500000" },
-        "aquarius": { "price": "1.0001", "volume_24h": "223400" }
+        "aquarius": {
+          "price": "0.00037307545161",
+          "volume_24h": "409795.80206351425926"
+        },
+        "sdex": {
+          "price": "0.00037300596178",
+          "volume_24h": "69438.16887823331656"
+        }
       },
-      "updated_at": "2026-02-10T12:00:00Z"
+      "updated_at": "2026-09-23T08:08:00Z",
+      "method": "traded"
     }
   ],
-  "cursor": "eyJpZCI6NTB9",
+  "cursor": "eyJ2IjoiMTU3MC45MDI4NTIwMDAxNzU5MyIsImlkIjo4N30",
   "has_more": true
 }
 ```
+
+A classic asset's `home_domain` and `contract_address` (its Stellar Asset Contract) are in the
+schema (§3.1) but not populated yet: both are `""` on every asset in production, and populating
+`home_domain` is part of task 0252. A Soroban token's `asset_code` is empty as well, so `search`
+cannot find it by its symbol and `sort=code` orders it as `""`.
 
 #### `GET /assets/{asset_identifier}`
 
@@ -580,6 +633,22 @@ Get single asset details. `asset_identifier` can be:
 - `{code}:{issuer}` for classic assets (e.g. `USDC:GA5ZSE...XYZ`)
 - `{contract_address}` for Soroban tokens (e.g. `CABC...DEF`)
 - `native` for XLM
+
+A classic asset's SAC address is not an identifier yet: it answers `404`.
+
+**Response:** `code` is the token's symbol for a Soroban token and `XLM` for `native`.
+
+```json
+{
+  "asset": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  "asset_kind": "credit",
+  "code": "USDC",
+  "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  "contract": "",
+  "home_domain": "",
+  "is_active": true
+}
+```
 
 ### 4.2 Prices / OHLCV
 
@@ -636,11 +705,82 @@ date, the response includes a `backfill_note` field indicating how far back data
       "volume_base": "125000.00",
       "volume_quote_usd": "125037.50",
       "vwap": "1.0003",
-      "trade_count": 47
+      "trade_count": 47,
+      "pf_trade_count": 45,
+      "pf_vwap": "1.0003",
+      "close_divergent": false
     }
   ]
 }
 ```
+
+**Where a candle's prices come from (ADR 0287, task 0286).**
+
+A candle's prices come only from the **price-forming trades of its own bucket**:
+
+- `open` — the first price-forming trade of the bucket,
+- `close` — the last one,
+- `high` / `low` — the extremes among them,
+- `pf_vwap` — their volume-weighted mean.
+
+Nothing is averaged across buckets and nothing is carried over from a
+neighbouring one. A bucket that held no price-forming trade therefore has **no
+price at all**: `open`, `high`, `low`, `close`, `vwap` and `pf_vwap` come back
+`null`, while `volume_base`, `volume_quote_usd` and `trade_count` are still
+present — it traded, and saying otherwise would turn "nothing here could set a
+price" into "did not trade".
+
+**Why a trade may not form a price.** A fill's price is the ratio of the two
+integer amounts exchanged, both in **stroops** (`1e-7`, the smallest amount
+Stellar can represent). A fill of a few stroops therefore prints an exact small
+fraction — `1/17`, `5/34` — that is arithmetically correct and can sit hundreds
+of percent off the market. Someone sells a millionth of a token for two XLM and
+the implied unit price is millions of dollars; it costs a fraction of a cent to
+mint one. A fill counts as price-forming only when the rounding of its own
+amounts cannot move its price by more than 0.1%.
+
+Measured on production `price_ohlcv_1h` **before** this rule:
+
+| month                     | one-stroop buckets over $1,000 | worst `close`                 |
+| ------------------------- | ------------------------------ | ----------------------------- |
+| 202502 (repaired history) | **85.0%**                      | $29,606,748 on ~$3 of volume  |
+| 202608 (live-written)     | 22.3%                          | $3,517,649 on $0.35 of volume |
+
+**What the response tells you about it.** Two fields describe the bucket's
+price quality directly, so a consumer no longer has to infer it from size:
+
+| field             | meaning                                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pf_trade_count`  | How many of the bucket's trades formed its price. Always `<= trade_count`. **`0` means the bucket has no price** and every price field is `null`. |
+| `pf_vwap`         | The volume-weighted mean of those trades — `vwap` with the dust left out, denominated like `close` and bounded by the published `low`/`high`.     |
+| `close_divergent` | `true` when `close` is more than 1% away from `pf_vwap`.                                                                                          |
+
+`vwap` still weights **every** trade in the bucket, dust included, because a
+volume-weighted mean is a volume question; `pf_vwap` is the price-quality one.
+Where the two disagree, prefer `pf_vwap` for ranking and valuation.
+
+`close_divergent` is not an error flag. The close is a single trade — the last
+one that formed a price — while `pf_vwap` is the whole bucket's mean, so a wide
+gap marks a thin or one-sided bucket: the close remains the right answer to
+"what did it last trade at" and a poor answer to "what is it worth". Both
+fields are `null` on the synthesized USDC self-series, which is built from rate
+observations and has no trades to count.
+
+`volume_quote_usd` is **not** affected by dust: those buckets carry a few
+dollars at most, so volume aggregates were never distorted. Only the price
+fields needed the rule.
+
+> **Historical caveat.** Rows written before this change carry
+> `pf_trade_count = trade_count` — the old assertion that every fill formed a
+> price. Candles from that era therefore still publish a dust close and report
+> no divergence. The history is re-ingested under the new definition in a later
+> phase of task 0286; until then, `pf_trade_count` is authoritative only for
+> buckets the current ingest wrote.
+
+Separately, 93% of dust buckets belong to assets with **no** non-dust trading
+anywhere in the month — there is no reference price to check them against, and
+the honest description is an asset with no meaningful market rather than a bad
+candle. That is tracked as task 0274, not here.
 
 #### `GET /assets/{asset_identifier}/price`
 
@@ -665,22 +805,46 @@ planning for: an asset can legitimately return a `price_usd` alongside an
 empty `sources` and a `vwap_24h` of `0` — we hold a price, but no venue is
 currently quoting. (Task 0135.)
 
+`volume_24h_usd` counts every trade the asset took part in, on either side of the pair, while a
+`sources` entry's `volume_24h` counts only the trades in which the asset is the base (task 0178).
+The venues therefore add up to less than the total — $7.32 M across five venues against $9.23 M in
+the example below — and USDC, which is only ever the quote, has all of its volume in
+`volume_24h_usd` and `{}` in `sources`.
+
 **Response:**
 
 ```json
 {
-  "asset": "USDC:GA5ZSE...XYZ",
-  "price_usd": "1.0001",
-  "price_xlm": "8.33",
-  "vwap_24h": "1.0002",
-  "volume_24h_usd": "1523400.50",
-  "change_24h_pct": "-0.02",
+  "asset": "native",
+  "price_usd": "0.22086251378147",
+  "price_xlm": "1",
+  "vwap_24h": "0.220818422853",
+  "volume_24h_usd": "9232178.49610106508283",
+  "change_24h_pct": "4.2307",
   "sources": {
-    "sdex": { "price": "1.0001", "volume_24h": "800000" },
-    "soroswap": { "price": "1.0002", "volume_24h": "500000" },
-    "aquarius": { "price": "1.0001", "volume_24h": "223400" }
+    "aquarius": {
+      "price": "0.22086251378147",
+      "volume_24h": "3496887.57491671686026"
+    },
+    "phoenix": {
+      "price": "0.21951246345991",
+      "volume_24h": "143.33960639826163"
+    },
+    "sdex": {
+      "price": "0.22080609088657",
+      "volume_24h": "3706994.74575814385738"
+    },
+    "soroswap": {
+      "price": "0.22083791103349",
+      "volume_24h": "12137.72993461573015"
+    },
+    "sushiswap": {
+      "price": "0.21972140395799",
+      "volume_24h": "98918.83560484752044"
+    }
   },
-  "updated_at": "2026-02-10T12:00:30Z"
+  "updated_at": "2026-09-23T08:08:00Z",
+  "method": "traded"
 }
 ```
 
@@ -695,6 +859,21 @@ Fetch current prices for multiple assets in one call.
 ```json
 {
   "assets": ["native", "USDC:GA5ZSE...XYZ", "CABC...DEF"]
+}
+```
+
+**Response:** `prices` holds the `GET /assets/{asset_identifier}/price` object of every identifier
+that has a current price, in the order of the request; `not_found` lists the rest, in canonical
+form. A request names 1 to 100 identifiers, a repeated one is answered each time, and a malformed
+body, an empty or over-long list or a single invalid identifier fails the whole request with `400`.
+
+```json
+{
+  "prices": [
+    { "asset": "native", ... },
+    { "asset": "USDC:GA5ZSE...XYZ", ... }
+  ],
+  "not_found": ["CABC...DEF"]
 }
 ```
 
@@ -859,7 +1038,7 @@ INSERT opens a fresh connection.
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Prices Ledger Processor**                                     | SNS message (per S3 PutObject; ~every 5–6 s)                                             | `LedgerCloseMeta` from BE's S3                                                                                                                  | SDEX trades + all Soroban AMM swap events → per-source 1-min OHLCV rows in `prices.price_ohlcv_1m`                                                                                                                                 |
 | **Oracle Fetcher**                                              | EventBridge rate(5 min)                                                                  | Reflector Oracle (Soroban RPC `simulateTransaction`)                                                                                            | Oracle reported prices → `prices.oracle_prices`                                                                                                                                                                                    |
-| **Asset Discovery**                                             | EventBridge rate(1 hour)                                                                 | Ledger account entries in `LedgerCloseMeta`                                                                                                     | New classic asset issuances; new SEP-41 contract deployments → `prices.assets`                                                                                                                                                     |
+| **Asset Discovery**                                             | EventBridge rate(1 hour)                                                                 | Soroban RPC `simulateTransaction` (`symbol()` of each contract asset); embedded seed list                                                       | Token display symbols → `prices.asset_symbol`; seed assets kept present in `prices.assets`. New assets arrive via the Prices Ledger Processor, not this worker (task 0256)                                                         |
 | **Current Price Updater**                                       | EventBridge rate(1 min)                                                                  | `prices.price_ohlcv_1m` (after ingestion)                                                                                                       | Cross-source VWAP per §5.5 → `prices.current_prices`                                                                                                                                                                               |
 | **Cleanup Worker**                                              | EventBridge cron(02:00 UTC)                                                              | `prices.*`                                                                                                                                      | `ALTER TABLE … DROP PARTITION` for expired month-partitions of `price_ohlcv_1m`, `_15m`, `oracle_prices`                                                                                                                           |
 | **SDEX Backfill CLI** (`sdex-backfill`, ADR 0005)               | Local Rust CLI on operator workstation, run in tip-backward chunks during the project    | `s3://aws-public-blockchain` (anonymous `--no-sign-request`)                                                                                    | Historical SDEX trades → per-source 1-min rows in **local ClickHouse** on the workstation                                                                                                                                          |

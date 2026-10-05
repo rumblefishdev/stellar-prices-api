@@ -60,9 +60,10 @@ whole stage update if it cannot resolve one — and `ANY` is never a resolvable
 path parameter is fine, depth is fine; `ANY` is not. So a route mapped as `ANY`
 can carry neither a cache setting nor a throttle, and these routes need both.
 
-The cost is that **a verb not in the list** — `PATCH`, say — gets the gateway's
-`403 Missing Authentication Token` instead of the gated `404`. Paths stay free;
-verbs do not. Adding one is a line in `PORTAL_API_METHODS` and a deploy.
+The cost is that **a verb not in the list** — `PATCH`, say — never reaches the
+handler: it gets the gateway's own `404 {"code": "not_found", "message": "no
+such route"}` instead of the gated empty `404`. Paths stay free; verbs do not.
+Adding one is a line in `PORTAL_API_METHODS` and a deploy.
 
 They also carry their own method-level throttle — **10 req/s, burst 40** — which
 is not decoration. Being keyless puts them outside the usage plan, so they
@@ -82,17 +83,31 @@ and the extracted spec) plus the faster in-process check in
 `packages/prices-api/tests/openapi.rs`. If this table drifts from either, fix
 the table.
 
+**A route not in this table** — any path, or any verb on a listed path, that
+the gateway does not map, `/v1` included — answers `404 {"code": "not_found",
+"message": "no such route"}`, the handler's own error shape (task 0309). API
+Gateway's default there is `403 {"message": "Missing Authentication Token"}`,
+which reads as a key problem; one gateway response replaces it API-wide. A
+missing or wrong `x-api-key` is a different answer and stays `403 {"message":
+"Forbidden"}`.
+
 ## Portal hosting — two hosts, no distribution of ours (tasks 0194, 0195)
 
-**Portal:** `https://sorobanscan.rumblefish.dev/api/`
-**API reference:** `https://sorobanscan.rumblefish.dev/api/docs`
+**Portal:** `https://sorobanscan.rumblefish.dev/prices-api/`
+**API reference:** `https://sorobanscan.rumblefish.dev/prices-api/docs`
+
+Until task 0326 (2026-10) the portal lived at `/api/`, and for a few hours
+on 2026-10-02 at `/pricing-api/` before the name settled; the explorer
+answers every `/api…` and `/pricing-api…` URL with a `301` to the same path
+under `/prices-api`, query string kept, so links shared before the move still
+land on it.
 
 The portal is a page on one host that calls an API on another:
 
-| What               | Where                                                                                                                                                         | Owned by                                                                                                     |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| the page (bundle)  | `s3://production-soroban-explorer-api-spa/api/`, behaviour `/api/*` of the block explorer's distribution `EA2TLS5SS5M87` (alias `sorobanscan.rumblefish.dev`) | `soroban-block-explorer` (their stack); this repo syncs the bundle with `make -C infra sync-portal-explorer` |
-| the backend + spec | `https://prices-api.sorobanscan.rumblefish.dev` — the custom domain above, no CloudFront in front of it                                                       | `ApiGatewayStack` here                                                                                       |
+| What               | Where                                                                                                                                                                       | Owned by                                                                                                     |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| the page (bundle)  | `s3://production-soroban-explorer-api-spa/prices-api/`, behaviour `/prices-api/*` of the block explorer's distribution `EA2TLS5SS5M87` (alias `sorobanscan.rumblefish.dev`) | `soroban-block-explorer` (their stack); this repo syncs the bundle with `make -C infra sync-portal-explorer` |
+| the backend + spec | `https://prices-api.sorobanscan.rumblefish.dev` — the custom domain above, no CloudFront in front of it                                                                     | `ApiGatewayStack` here                                                                                       |
 
 Decided 2026-08-31 (task 0194, "decision A"). The bundle is built with
 `VITE_PORTAL_API_ORIGIN` set to the API hostname, so every backend call is
@@ -114,19 +129,23 @@ now answers `403`.
 
 ### The path convention
 
-Everything of ours on the shared host lives under **one prefix, `/api/`**, with
-no sub-prefix for the bundle or the backend: `/api/login` is a page,
-`/api/docs` is a page, `/api/auth/login` is the backend, `/api/api-docs-json`
-is the OpenAPI document. On that host the root belongs to the block explorer,
-so nothing of ours may assume it.
+The bundle lives under **`/prices-api/`** on the explorer's host
+(`/prices-api/login`, `/prices-api/docs` are pages); the backend under
+**`/api/`** on the API's own host (`/api/auth/login`, `/api/api-docs-json`).
+On the explorer's host the root belongs to the block explorer, so nothing of
+ours may assume it.
 
-This replaced task 0161's `<app>/*` + `<app>/api/*` convention on 2026-08-31,
+From 2026-08-31 to task 0326 both shared one prefix, `/api/`, which read on
+the explorer's host as the explorer's own API; the move gave the bundle a
+name of its own and left the backend where it was. The shared prefix
+replaced task 0161's `<app>/*` + `<app>/api/*` convention on 2026-08-31,
 which for an app called "api" produced `/api/api/…` (task 0235's record of the
 three days that layout lived). The rule that decides which side of the split
 is enumerated:
 
-- **the bundle's paths are a short, fixed list** — `/api/`, `/api/index.html`,
-  `/api/favicon.ico`, `/api/assets/*` and the app's routes — and
+- **the bundle's paths are a short, fixed list** — `/prices-api/`,
+  `/prices-api/index.html`, `/prices-api/favicon.ico`,
+  `/prices-api/assets/*` and the app's routes — and
 - **the backend is the open-ended side** (five slices added routes; none
   touched infrastructure), so it gets the catch-all.
 
@@ -136,21 +155,28 @@ a static host gets a `200` full of HTML that only surfaces as a JSON parse
 error in a browser (`web/portal/src/api/portal.ts` names the URL when it
 happens).
 
-On the explorer's host the split needs no routing table at all: their `/api/*`
-behaviour is S3, and their viewer-request function rewrites **every path whose
-last segment has no `.`** to `/api/index.html`. That is what makes a hard
-refresh on `/api/dashboard` — or on `/api/docs` — boot the portal, and it is
-also why the API reference is a **route of the portal** rather than a static
-`docs/` folder in the bundle: a folder would have been reachable only as
-`/api/docs/index.html`. Adding a page to the app therefore needs nothing on
-the hosting side; adding a backend route needs nothing either, because the
-gateway maps `/api/{proxy+}` and the bundle calls the API host directly.
+On the explorer's host the split needs no routing table at all: their
+`/prices-api/*` behaviour is S3, and their viewer-request function rewrites
+**every path whose last segment has no `.`** to `/prices-api/index.html`.
+That is what makes a hard refresh on `/prices-api/dashboard` — or on
+`/prices-api/docs` — boot the portal, and it is also why the API reference is
+a **route of the portal** rather than a static `docs/` folder in the bundle: a
+folder would have been reachable only as `/prices-api/docs/index.html`.
+Adding a page to the app therefore needs nothing on the hosting side; adding a
+backend route needs nothing either, because the gateway maps `/api/{proxy+}`
+and the bundle calls the API host directly.
 
-What the shared host does NOT give us, and what still gates the portal's
-public availability: the same function answers `401` to anyone without the
-explorer's staging credentials while `enableApiSpaBasicAuth` is on in their
-`production.json`. Turning it off is the explorer team's call, not this
-repo's.
+The portal is public since 2026-09-23. Until then the same function answered
+`401` to anyone without the explorer's staging credentials, because
+`enableApiSpaBasicAuth` was on in their `production.json`; task 0305 had it
+turned off for `/api/*` (`568d0a29` on the explorer's `develop`). Measured
+2026-09-23 09:02 UTC, without credentials: `/api/`, `/api/dashboard` and
+`/api/docs` answer `200` with the portal's `index.html`.
+
+⚠️ The explorer's `master` still reads `true`, and their production releases
+tag `origin/master`. The flag lives in their `Delivery` stack, which the
+default release set (Compute + SPA) does not deploy, but a `-all` or
+`-Delivery` tag cut before `develop` reaches `master` puts the gate back.
 
 ## OpenAPI specification (task 0124)
 
@@ -167,7 +193,7 @@ curl -sS https://prices-api.sorobanscan.rumblefish.dev/api-docs-json \
 
 The same bytes are served at `/api/api-docs-json` (the portal's alias, task
 0194), and rendered as the portal's API reference at
-`https://sorobanscan.rumblefish.dev/api/docs` (task 0195) — Swagger UI's
+`https://sorobanscan.rumblefish.dev/prices-api/docs` (task 0195) — Swagger UI's
 shape (tags, collapsible operations, parameters, responses, schemas) in the
 portal's own design system, reading the live document on every visit.
 
@@ -222,11 +248,12 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
   reference, `https://sorobanscan.rumblefish.dev/api/docs`, rendering the
   live `/api-docs-json` in the portal's own design system. Nothing on it
   sends a request until the data routes answer CORS (task 0126).
-- **Onboarding portal** — open (`PORTAL_ENABLED=true` since task 0194) at
-  `https://sorobanscan.rumblefish.dev/api/`, behind the block explorer's
-  basic auth until their `enableApiSpaBasicAuth` is turned off; that switch
-  and the move from the test guild to the Stellar guild (task 0179) both
-  precede advertising the URL.
+- **Onboarding portal** — open (`PORTAL_ENABLED=true` since task 0194) and
+  public since 2026-09-23 (task 0305) at
+  `https://sorobanscan.rumblefish.dev/prices-api/` (`/api/` until task
+  0326): the block explorer's basic auth is off for it. The move from the
+  test guild to the Stellar guild (task 0179) still precedes advertising the
+  URL.
 - **CORS on `/v1`** (task 0126) — no browser can call the data routes yet;
   the portal's API reference sends no requests for exactly this reason.
 - **`info.license`** (task 0155) — currently emitted empty; the licensing
