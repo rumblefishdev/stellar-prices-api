@@ -49,7 +49,7 @@ history:
       prod has no Keeper, and a 32-bit hash id would already collide 5-8
       times. Options for allocation, repair and view joins are compared in
       the spike summary; see "Re-measured on prod, 2026-09-30".
-  - date: 2026-09-17
+  - date: "2026-09-17"
     status: backlog
     who: okarcz
     note: >
@@ -60,7 +60,7 @@ history:
       The hourly full re-seed stopped on 2026-09-16 ([[0256]]), so a plain
       count() is now stable — but every row carries that last re-seed's
       updated_at, so the table cannot date when a collision appeared.
-  - date: 2026-09-02
+  - date: "2026-09-02"
     status: backlog
     who: stkrolikiewicz
     note: >
@@ -70,7 +70,7 @@ history:
       covering 20 identities — the measurement that made 0210 key its symbol
       table on contract_address instead of asset_id, so that work sits beside
       this defect rather than adding to it.
-  - date: 2026-08-03
+  - date: "2026-08-03"
     status: backlog
     who: okarcz
     note: >
@@ -78,7 +78,7 @@ history:
       **4,442 rows for 4,068 `current_prices` rows** — 374 duplicates. Cause:
       `prices.assets` is `ReplacingMergeTree(updated_at) ORDER BY (asset_code,
       issuer_address, contract_address)`, so `FINAL` dedups on natural identity
-  - date: 2026-08-06
+  - date: "2026-08-06"
     status: backlog
     who: okarcz
     note: >

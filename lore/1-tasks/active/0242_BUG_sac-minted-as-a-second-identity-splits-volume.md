@@ -20,7 +20,7 @@ history:
       pairs, 23 whose classic we never held) plus 6 latent. Decisions D1–D7
       recorded below. The heal rides 0286 phase 3: a 29-row classic seed
       goes in between stage B and C, and stage C runs to 202609.
-  - date: 2026-09-02
+  - date: "2026-09-02"
     status: backlog
     who: stkrolikiewicz
     note: >
@@ -32,7 +32,7 @@ history:
       invisible, which argues for raising priority. Also separated these from
       the impersonation set: `USD`/`EUR`/`USDP` are SACs and belong here, while
       [[0252]]'s five are non-SAC contracts.
-  - date: 2026-08-28
+  - date: "2026-08-28"
     status: backlog
     who: stkrolikiewicz
     note: >
