@@ -188,22 +188,9 @@ function getPriority(task) {
 
 function getAssignee(task) {
   if (task._dir !== 'active' && task._dir !== 'archive') return null;
-  if (task.assignee) return task.assignee;
-  // An agent is never the assignee; its entries stand for whoever ran it.
-  const history = (Array.isArray(task.history) ? task.history : []).filter(
-    (e) => e.who && e.who !== 'claude',
-  );
-  if (history.length === 0) return null;
-  // Files keep history newest-first or oldest-first, so position alone names
-  // the creator in half of them. Take the latest date; on a tie, the entry
-  // nearest the file's newest end.
-  const newestFirst =
-    (history[0].date || '') > (history[history.length - 1].date || '');
-  const ordered = newestFirst ? history : [...history].reverse();
-  const latest = ordered.reduce((best, e) =>
-    (e.date || '') > (best.date || '') ? e : best,
-  );
-  return latest.who || null;
+  const history = Array.isArray(task.history) ? task.history : [];
+  const lastEntry = history[history.length - 1];
+  return lastEntry?.who || null;
 }
 
 function extractDescription(content) {
