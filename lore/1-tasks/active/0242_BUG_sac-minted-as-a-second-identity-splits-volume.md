@@ -2,14 +2,24 @@
 id: "0242"
 title: "A SAC is minted as a second identity for an asset we already hold — same token under two asset_ids, with volume split across both"
 type: BUG
-status: backlog
+status: active
 related_adr: []
-related_tasks: ["0210", "0139", "0120"]
+related_tasks: ["0210", "0139", "0120", "0286", "0252"]
 tags: [layer-backend, layer-database, priority-high, effort-medium, milestone-M2, ingest, identity, defect]
 milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/canonical.rs"
 history:
+  - date: "2026-10-05"
+    status: active
+    who: akot
+    note: >
+      Activated for implementation via GSD (quick 261005-htu, research done),
+      one PR with ordered commit slices, worked in .claude/worktrees/0242.
+      Re-measured: 36 SAC contracts held as a Contract identity (13 split
+      pairs, 23 whose classic we never held) plus 6 latent. Decisions D1–D7
+      recorded below. The heal rides 0286 phase 3: a 29-row classic seed
+      goes in between stage B and C, and stage C runs to 202609.
   - date: 2026-09-02
     status: backlog
     who: stkrolikiewicz
@@ -142,6 +152,57 @@ unrelated, and neither blocks the other.
   `contract_id`, `sac_contract_id`, `sac_deployed` — an explicit *link* between
   a classic asset and its SAC rather than a second identity. If their shape
   avoids the defect by construction, that is the design to copy.
+
+## Re-measured on prod, 2026-10-05
+
+Measured as `dev_read` (read-only). The queries and outputs are kept with GSD quick `261005-htu`, outside the repo.
+
+- `prices.assets` holds 59 contract rows:
+  - **13 split pairs:** the 11 above plus SODA and USDT0.
+  - **23 SACs whose classic asset is not in `assets` at all**, e.g. nBTC, nETH, BURNMKR. BE `soroban_contracts.is_sac` identifies them, and sha256 of the underlying reproduces all 36 addresses.
+  - 23 genuine Soroban tokens.
+
+  Another **6** pool-leg SACs (SUSHI, HYPE, STELLA, TESTTTT, TEST77, TEST12) have no identity yet and would mint one on their first priced trade. The newest mint is BURNMKR, on 2026-09-30.
+- **The split pairs are mostly double counts, not splits.** 145 of 151 SAC-keyed 1m rows are byte-identical to a classic-keyed row at the same key. Only 4 trades exist solely under a split SAC id (USDT0 ×3, SODA ×1, all 202609). The 23 have no classic row, so their candles are the only copy and must never be deleted.
+- **In-band proof is reliable.** Every sampled SAC swap leg had a SAC `transfer`/`mint`/`burn`/`clawback` event in the same transaction, with the SEP-11 asset as the last topic: 0 misses in 338,601 legs on Aquarius, Soroswap, Phoenix, Comet and Sushiswap.
+- **`events-backfill` reads only pool events, so it never sees that proof.** One start-of-run query (one proof event per SAC that `prices.assets` cannot resolve) returns 1,137 contracts in 2.6 s, and all 1,137 verify.
+- **Two causes.**
+  - A race: the SAC traded before anything interned its classic. USDT0's SAC traded at 16:30 and its classic first appeared on SDEX in the 17:00 hour.
+  - The classic was never seen at all.
+- After 0139 the id is `xxh3(identity)`, so emitting the classic identity is enough. No id needs coordinating.
+
+Prior art: soroban-block-explorer ADR 0051 (a SAC is a facet of the classic asset).
+
+- Reverse detection uses the same crypto gate (`crates/xdr-parser/src/sac.rs`).
+- Explorer 0374 fixed the same defect for pool legs with a DB-backed map.
+- Explorer 0571 shows that map drifting: 138 deployed SACs are flagged `sac_deployed = 0` and silently fall back to a contract id.
+
+## Decisions (2026-10-05, Adam)
+
+- **D1 Resolver.** `AssetRegistry::learn_sac(contract, sep11)` accepts a mapping only when `sac_address(sep11) == contract`.
+  - Live path: fed from the SAC events of the same transaction, before the swap events are classified.
+  - `events-backfill`: one proof preload at run start.
+  - Rejected:
+    - BE `asset_sac`: needs a new grant and carries the 138 drifted flags.
+    - RPC `name()`: a network call in the write path.
+    - Our own table: it would duplicate `assets.sac_address`.
+- **D2 Unprovable SAC.** When BE says `is_sac` but there is no proof, the tick is skipped and counted, and alarms. It never becomes a `Contract` identity. The phase-3 orchestrator STOPs on the counter. The live path loads the `is_sac` set once per cold start.
+- **D3 Heal.** Through the 0286 phase-3 re-ingest, which drops and rebuilds every month. No SQL rekey: that would mean 4 kinds of row operation, base/quote flips for Z/Q and XLD/SODA, merges and re-enrichment. Afterwards, DELETE the residual SAC-keyed rows, then 36 `assets` rows, then 36 `asset_symbol` rows.
+- **D4 Sequencing.**
+  - Phase 3 is not held for the code.
+  - A 29-row classic seed (the 23 + the 6, each `sac_address` hash-verified) goes into `prices.assets` after stage B and before stage C. With it, the deployed binary resolves every pool-leg SAC.
+  - Stage C runs `--to-month 202609`, not 202608. 202609 holds the only copies of the USDT0/SODA trades and part of 0139's hole.
+  - The single Z/Q row of 202404 joins the residual cleanup.
+- **D5 API.** `GET /v1/assets/{SAC C…}` aliases to the classic asset through `sac_address`.
+- **D6 Guard.**
+  - A `SacContractIdentities` metric in `rollup-freshness-probe`. Baseline is 36. Alarm at ≥ 1, enabled only after the cleanup.
+  - Plus an ingest-side skip counter.
+- **D7 Shape.**
+  - **One PR** with ordered commit slices: resolver + live, then `events-backfill`, then probe + alarm, then API alias. This overrides the ~400-line norm for this task.
+  - The heal is a runbook section, with no window.
+  - The new `events-backfill` binary is swapped on ch-prod-01 only between phase-3 stages, never during an `amm` step.
+
+Open: **U3**. About 75.6k Soroswap swaps on BLTA/BLTB/BLTC/PPRIME/LumenJoule produce no candle under any id, and the cause is not established. It must be settled before AC3 promises numbers for those assets.
 
 ## Acceptance Criteria
 
