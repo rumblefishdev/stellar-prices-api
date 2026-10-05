@@ -188,6 +188,12 @@ wasm = "76e60d025ee6c0322cb19f4846b9587ab172870802251de903e93545371678b6"
 reason = "lending protocol (borrow, liquidate, flash_loan); its swap_exact event is a liquidation step, not a market"
 task = "0100"
 
+[[contract]]
+id = "CAE54B6CIQ3XB3VT7T4ZQ4FN6BNQZ3FZX3EPIKXVXAZZTZP63F5U4HKN"
+wasm = "91d5ab7e075d533a9404373453a548bc21c3d2893d78f9782785985f396b4454"
+reason = "bonding-curve token launchpad (pad_created, launched, buy, bump_curve); its trade events price a launched token on its own curve, not a pool; first seen 2026-10-04 as a test launch (ANYCHAIN Test, CCRIN5F5…), 3 trades by its creator"
+task = "0323"
+
 # --- unindexed venue families (temporary, keyed by wasm) ----------------------
 
 [[wasm]]
