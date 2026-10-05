@@ -3,6 +3,7 @@ id: "0242"
 title: "A SAC is minted as a second identity for an asset we already hold — same token under two asset_ids, with volume split across both"
 type: BUG
 status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0210", "0139", "0120", "0286", "0252"]
 tags: [layer-backend, layer-database, priority-high, effort-medium, milestone-M2, ingest, identity, defect]

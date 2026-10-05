@@ -3,6 +3,7 @@ id: "0139"
 title: "current_price_usd returns duplicate rows — assets is keyed on natural identity, not asset_id"
 type: BUG
 status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0072", "0061", "0067", "0144", "0150", "0129"]
 tags:
