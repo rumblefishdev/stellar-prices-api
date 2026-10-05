@@ -1,7 +1,8 @@
 -- The 12 asset-id tables as they stood before task 0139 (UInt32 ids),
 -- verbatim from schema/init.sql at efcd9254. Test data for the rekey ITs,
 -- which rewrite `prices.` to a scratch database. Omitted from the original:
--- CREATE DATABASE and the asset_symbol table (no asset id).
+-- CREATE DATABASE and the asset_symbol table (no asset id). Added since:
+-- task 0274's price_basis ALTER (see current_prices).
 
 ----------------------------------------------------------------------
 -- Asset registry (ReplacingMergeTree, last-write-wins on updated_at)
@@ -265,6 +266,12 @@ ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality
 -- the method ALTER is its own statement: each is independently re-runnable.
 ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS as_of DateTime DEFAULT toDateTime(0) AFTER method;
 ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_status LowCardinality(String) DEFAULT '' AFTER as_of;
+
+-- Not in efcd9254: task 0274's ALTER, from today's init.sql. The rekey ITs
+-- apply today's current.sql, whose MV writes price_basis, and `create` gates
+-- current_prices against an init.sql-built __new that has it. A live database
+-- runs this ALTER before that MV exists (0274 rollout step 1).
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_basis LowCardinality(String) DEFAULT '' AFTER price_status;
 
 ----------------------------------------------------------------------
 -- Per-asset circulating supply (task 0039 supply worker). Its OWN

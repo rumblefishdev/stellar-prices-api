@@ -24,6 +24,13 @@
 -- init.sql does on a fresh apply; on prod that is rollout step B, before
 -- step E re-creates this view.
 --
+-- ⚠️ DEPENDS ON prices.current_prices.price_basis (task 0274), the last column
+-- of the TO(...) list. Same failure shape: without init.sql's price_basis
+-- ALTER the DROP succeeds and the CREATE fails, leaving current_prices with no
+-- writer. Order: (1) the ALTER, (2) views.sql, (3) this file, (4) the API —
+-- prices-api selects `c.price_basis`, so an API that ships before (1) fails
+-- every price, list and batch request with an unknown-identifier error.
+--
 -- ⚠️ REDEPLOY MECHANICS (task 0068 → 0072): a refreshable MV's definition is
 -- FIXED AT CREATE TIME. Changing this SELECT requires DROP VIEW + re-CREATE —
 -- an ALTER does not take. No backfill/migration is needed: the MV fully
@@ -39,7 +46,8 @@
 -- matching order.
 --
 -- Columns (0072 completed the original ten; 0178 appends `method` for eleven;
--- 0216 appends `as_of` and `price_status` for thirteen):
+-- 0216 appends `as_of` and `price_status` for thirteen; 0274 appends
+-- `price_basis` for fourteen):
 --   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
 --                     NOT age-bounded — see the unfiltered CTE for why. The
 --                     per-venue pipeline IS bounded, but conditionally: see 1b.
@@ -63,6 +71,8 @@
 --                     price, which consumers must read as absent (0216)
 --   price_status    — 'priced' / 'carried' / 'unpriced'; '' only on a row the
 --                     MV has not rewritten since the column was added (0216)
+--   price_basis     — 'trades' / 'offer_dust' / ''; whether any priced candle
+--                     in the window rests on more than offer-priced dust (0274)
 --
 -- ── Numeric strategy ────────────────────────────────────────────────────────
 -- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
@@ -173,7 +183,7 @@ REFRESH EVERY 1 MINUTE
 TO prices.current_prices
    (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct,
     volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at, method,
-    as_of, price_status) AS
+    as_of, price_status, price_basis) AS
 WITH
     -- XLM's own USD close, as a scalar. Resolved by natural key exactly the way
     -- the enrichment worker's resolve_reference_ids() does (ch_enrich.rs:447):
@@ -513,6 +523,10 @@ WITH
     -- asset the price of whatever it was traded against — USDC would inherit
     -- XLM's price. Price and open stay strictly base-keyed. Do not re-merge.
     base_tip AS (
+        WITH
+            x -> round(toFloat64(x) * 1e7)                      AS stroops,
+            (a, b) -> a > 1000 AND b > 1000
+                      AND (a - 1000) * (b - 1000) >= 1e6        AS bound_holds
         SELECT
             asset_id                          AS asset_id,
             argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
@@ -547,7 +561,59 @@ WITH
             -- consumer subtracts from now(), so it must never run ahead of
             -- updated_at and publish a negative age.
             maxIf(timestamp, close_usd > 0)      AS as_of,
-            maxIf(timestamp, pf_trade_count > 0) AS tip_at
+            maxIf(timestamp, pf_trade_count > 0) AS tip_at,
+            -- confirmed_candles (task 0274): priced candles in the SAME window
+            -- and candle set as price_usd whose price does not rest only on
+            -- offer-priced dust. Since 0286 an order-book fill forms price at
+            -- the resting offer's N/D however small, so a 1-stroop fill against
+            -- an offer nobody else trades prices the asset; 0 here is what
+            -- price_basis = 'offer_dust' reports.
+            --
+            -- A candle is offer-dust when it is SDEX (below ADR 0287's bound
+            -- only an order-book fill can be price-forming — pool fills below
+            -- it never are, and every other source is a pool) and its
+            -- price-forming fills fail price.rs's bound, read the most exact
+            -- way the candle allows:
+            --   * one fill in the minute: its own amounts, exactly as the
+            --     ingest judged it;
+            --   * one price-forming fill beside non-forming ones: its base is
+            --     pf_volume exactly; its quote is pf_price_volume = offer price
+            --     x base, within one stroop of the real amount (the taker's
+            --     rounding). It is judged on that value + 1 stroop, the most the
+            --     real amount can be, so a fill that passes price.rs on its own
+            --     amounts never reads as dust; the error is at most one stroop,
+            --     towards 'trades';
+            --   * several price-forming fills: only the totals are known, and
+            --     a total <= 1000 stroops means every fill in it fails.
+            -- `bound_holds` is price.rs's shifted integer form, so this and
+            -- the ingest agree at exactly 1000 stroops on the exact branch.
+            -- `stroops` rounds because Decimal -> Float64 is not exact at 7
+            -- places (amounts below 2^53 are exact after it); `* 1e7` is right
+            -- because SDEX amounts are always classic 7-decimal.
+            --
+            -- SUFFICIENT, NOT EXACT on the last two branches: a minute of several
+            -- dust fills whose totals pass 1000 stroops reads as confirmed.
+            -- That errs towards 'trades', the safe side (0116: a small trade
+            -- of a dear asset is often a real price). The exact answer needs a
+            -- per-candle count written at ingest — a follow-up once 0286's
+            -- re-ingest is done, since every 1m writer would have to carry it.
+            -- close_usd > 0 implies a price-forming fill (ADR 0287 §6).
+            --
+            -- A candle not yet enriched (close_usd = 0) does not count, even
+            -- for a large real fill: it is not in price_usd's candle set
+            -- either, so the published price does not rest on it yet. Such an
+            -- asset reads 'offer_dust' until enrichment converts that candle,
+            -- then 'trades' — intended: the field describes the price as
+            -- published, and a fill whose quote never gains a USD path never
+            -- supports the USD price at all.
+            countIf(close_usd > 0 AND NOT (source = 'sdex' AND multiIf(
+                pf_trade_count = 1 AND trade_count = 1,
+                    NOT bound_holds(stroops(volume_base), stroops(volume_quote)),
+                pf_trade_count = 1,
+                    NOT bound_holds(stroops(pf_volume),
+                                    toFloat64(pf_price_volume) * 1e7 + 1),
+                stroops(pf_volume) <= 1000 OR stroops(pf_price_volume) <= 1000)))
+                                                 AS confirmed_candles
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
           AND timestamp <= now()
@@ -582,16 +648,20 @@ WITH
             -- into the `priced` branch WITHOUT the status expression having to
             -- key on is_oracle.
             usdc_reading.2                    AS as_of,
-            usdc_reading.2                    AS tip_at
+            usdc_reading.2                    AS tip_at,
+            -- A measured rate, not a print: it rests on no candle, so it can
+            -- rest on no dust. Must be explicit — the default 0 would label
+            -- the oracle price 'offer_dust' (task 0274).
+            toUInt64(1)                       AS confirmed_candles
         WHERE usdc_asset_id > 0
           AND usdc_reading.1 > 0
           AND usdc_asset_id NOT IN (SELECT asset_id FROM base_tip)
     ),
 
     unfiltered AS (
-        SELECT asset_id, price_usd, open_24h, is_oracle, as_of, tip_at FROM base_tip
+        SELECT asset_id, price_usd, open_24h, is_oracle, as_of, tip_at, confirmed_candles FROM base_tip
         UNION ALL
-        SELECT asset_id, price_usd, open_24h, is_oracle, as_of, tip_at FROM usdc_tip
+        SELECT asset_id, price_usd, open_24h, is_oracle, as_of, tip_at, confirmed_candles FROM usdc_tip
     ),
 
     -- ── volume_24h_usd counts BOTH legs (task 0178) ──────────────────────────
@@ -790,7 +860,21 @@ SELECT
             u.price_usd <= 0, 'unpriced',
             u.as_of < u.tip_at, 'carried',
             'priced'),
-        'LowCardinality(String)')                           AS price_status
+        'LowCardinality(String)')                           AS price_status,
+
+    -- price_basis — what price_usd rests on (task 0274). APPENDED LAST, and it
+    -- must sit last in the TO(...) list too (positional insert; the order test
+    -- in lib.rs). Over the WINDOW, not the as_of candle: an asset with real
+    -- fills whose latest print is a 1-stroop ping stays 'trades' — keying on
+    -- the as_of candle would flag BTC with $200k of real weekly volume.
+    -- Independent of price_status: an offer-dust price can be carried too.
+    -- '' mirrors method: no price, no basis.
+    CAST(
+        multiIf(
+            u.price_usd <= 0, '',
+            u.confirmed_candles > 0, 'trades',
+            'offer_dust'),
+        'LowCardinality(String)')                           AS price_basis
 FROM unfiltered AS u
 LEFT JOIN vol_all AS v  ON v.asset_id   = u.asset_id
 LEFT JOIN kept   AS k   ON k.asset_id   = u.asset_id

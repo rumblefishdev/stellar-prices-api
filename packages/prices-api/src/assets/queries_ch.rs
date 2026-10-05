@@ -50,6 +50,10 @@ pub struct CurrentPriceRow {
     /// `priced` / `carried` / `unpriced`, or `""` for a row the MV has not
     /// rewritten yet. Positional — see the note on `method`.
     pub price_status: String,
+    /// `trades` / `offer_dust` / `""` (task 0274): whether any priced candle in
+    /// the window rests on more than offer-priced dust. Positional — see the
+    /// note on `method`.
+    pub price_basis: String,
 }
 
 /// One `assets` row, for the detail endpoint.
@@ -93,10 +97,14 @@ pub struct AssetListRow {
     /// `priced` / `carried` / `unpriced` / `""` (task 0216). Positional — see
     /// [`CurrentPriceRow::method`].
     ///
+    pub price_status: String,
+    /// `trades` / `offer_dust` / `""` (task 0274). Positional — see
+    /// [`CurrentPriceRow::method`].
+    ///
     /// ⚠️ This is the LAST published field; `sort_key` below stays last in the
     /// struct. Both are `String`, so swapping them is a silent misparse that
-    /// would publish the cursor payload as the price's status.
-    pub price_status: String,
+    /// would publish the cursor payload as the price's basis.
+    pub price_basis: String,
     /// String form of the sort-column value for this row (cursor payload).
     pub sort_key: String,
 }
@@ -206,6 +214,7 @@ fn list_assets_sql(
            c.method AS method, \
            {AS_OF_SQL}, \
            c.price_status AS price_status, \
+           c.price_basis AS price_basis, \
            {sort_key_expr} AS sort_key \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
@@ -314,7 +323,8 @@ fn current_price_sql(where_sql: &str) -> String {
            formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
            c.method AS method, \
            {AS_OF_SQL}, \
-           c.price_status AS price_status \
+           c.price_status AS price_status, \
+           c.price_basis AS price_basis \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
          WHERE {where_sql} \
@@ -364,6 +374,9 @@ pub struct BatchPriceRow {
     /// `priced` / `carried` / `unpriced` / `""` (task 0216). Positional — see
     /// [`CurrentPriceRow::method`].
     pub price_status: String,
+    /// `trades` / `offer_dust` / `""` (task 0274). Positional — see
+    /// [`CurrentPriceRow::method`].
+    pub price_basis: String,
 }
 
 /// A natural-identity lookup key shared by a requested [`AssetIdentifier`] and a
@@ -412,7 +425,8 @@ fn current_prices_batch_sql(where_clause: &str) -> String {
            formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
            c.method AS method, \
            {AS_OF_SQL}, \
-           c.price_status AS price_status \
+           c.price_status AS price_status, \
+           c.price_basis AS price_basis \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
          WHERE {where_clause}"
@@ -2134,18 +2148,25 @@ mod tests {
                 sql.contains("c.price_status AS price_status"),
                 "{what} must project price_status, got: {sql}"
             );
+            assert!(
+                sql.contains("c.price_basis AS price_basis"),
+                "{what} must project price_basis (task 0274), got: {sql}"
+            );
         }
 
-        // The listing's cursor payload stays LAST: it and price_status are both
-        // String, so a reorder is a silent misparse that publishes the cursor
-        // as the price's status.
+        // The listing's cursor payload stays LAST: it, price_status and
+        // price_basis are all String, so a reorder is a silent misparse that
+        // publishes the cursor as the price's status or basis.
         let status_at = list
             .find("AS price_status")
             .expect("price_status in the listing");
+        let basis_at = list
+            .find("AS price_basis")
+            .expect("price_basis in the listing");
         let sort_at = list.find("AS sort_key").expect("sort_key in the listing");
         assert!(
-            status_at < sort_at,
-            "price_status must precede sort_key in the listing projection: {list}"
+            status_at < basis_at && basis_at < sort_at,
+            "price_status, price_basis, sort_key must be in that order in the listing: {list}"
         );
     }
 
@@ -2299,18 +2320,18 @@ mod tests {
         // COLUMN_NAMES would make every assertion above trivially true.
         assert_eq!(
             CurrentPriceRow::COLUMN_NAMES.len(),
-            10,
-            "CurrentPriceRow is 10 columns; update this count WITH the struct"
+            11,
+            "CurrentPriceRow is 11 columns; update this count WITH the struct"
         );
         assert_eq!(
             AssetListRow::COLUMN_NAMES.len(),
-            16,
-            "AssetListRow is 15 published columns plus the sort_key cursor payload"
+            17,
+            "AssetListRow is 16 published columns plus the sort_key cursor payload"
         );
         assert_eq!(
             BatchPriceRow::COLUMN_NAMES.len(),
-            13,
-            "BatchPriceRow is CurrentPriceRow's 10 plus the three identity columns"
+            14,
+            "BatchPriceRow is CurrentPriceRow's 11 plus the three identity columns"
         );
     }
 
