@@ -2,7 +2,8 @@
 id: "0149"
 title: "Two writers with incompatible version arithmetic own close_usd — the 0114 sweep's repair is overwritten inside the MV window"
 type: BUG
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0144", "0146", "0148", "0114", "0095", "0143"]
 tags:
@@ -12,6 +13,10 @@ links:
   - "../../../packages/enrichment-worker/src/repair.rs"
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
 history:
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: "Activated and assigned to akot to work through the options."
   - date: 2026-08-05
     status: backlog
     who: okarcz
