@@ -49,6 +49,14 @@ async fn setup(db: &str) -> Client {
     prices_clickhouse::apply_sql(&admin, &rewrite(prices_clickhouse::INIT_SQL, db))
         .await
         .unwrap();
+    // The SAC alias reads this view (task 0242); the rest of views.sql needs
+    // tables these tests do not seed.
+    let view = prices_clickhouse::VIEWS_SQL
+        .split(';')
+        .find(|s| s.contains("CREATE OR REPLACE VIEW prices.identity_by_contract"))
+        .expect("views.sql defines identity_by_contract");
+    let view = &view[view.find("CREATE OR REPLACE VIEW").unwrap()..];
+    admin.query(&rewrite(view, db)).execute().await.unwrap();
 
     let assets = [
         AssetFixture::new("XLM", "native", "", "").with_sac(XLM_SAC),

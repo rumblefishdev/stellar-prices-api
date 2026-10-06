@@ -510,7 +510,7 @@ fn resolve_asset_id_sql(where_sql: &str) -> String {
 // SAC alias (task 0242, D5)
 // ----------------------------------------------------------------------------
 
-/// A classic row named by its SAC address. Positional: field order is the
+/// A classic identity named by its SAC address. Positional: field order is the
 /// [`sac_alias_sql`] SELECT order.
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
 struct SacAliasRow {
@@ -519,14 +519,18 @@ struct SacAliasRow {
     issuer_address: String,
 }
 
-/// The classic rows whose stored `sac_address` is one of `n` bound addresses.
-/// Read from the column only: every classic row carries it (XLM's included).
+/// The classic identities (`native` / `credit`) of `n` bound SAC addresses,
+/// read through `identity_by_contract`, the one SAC→classic resolver of the
+/// read side (views.sql), so a fix there reaches the API too. The view reads
+/// the stored `sac_address`; the ingest writes it on every classic row (0 of
+/// 211,044 classic rows without it on 2026-10-06), and an address cannot be
+/// turned back into its classic, so a read cannot derive it.
 fn sac_alias_sql(n: usize) -> String {
     let binds = vec!["?"; n].join(", ");
     format!(
-        "SELECT a.sac_address, a.asset_code, a.issuer_address \
-         FROM assets AS a FINAL \
-         WHERE a.contract_address = '' AND a.sac_address IN ({binds})"
+        "SELECT contract AS sac_address, asset_code, issuer_address \
+         FROM identity_by_contract \
+         WHERE asset_kind != 'contract' AND contract IN ({binds})"
     )
 }
 
@@ -2456,14 +2460,14 @@ mod tests {
     /// Task 0242: classic rows only, one bind per address, positional order
     /// matching [`SacAliasRow`].
     #[test]
-    fn sac_alias_sql_reads_classic_rows_by_stored_sac_address() {
+    fn sac_alias_sql_reads_classic_rows_through_identity_by_contract() {
         use clickhouse::Row;
 
         let sql = sac_alias_sql(2);
         for needle in [
-            "FROM assets AS a FINAL",
-            "a.contract_address = ''",
-            "a.sac_address IN (?, ?)",
+            "FROM identity_by_contract",
+            "asset_kind != 'contract'",
+            "contract IN (?, ?)",
         ] {
             assert!(sql.contains(needle), "missing {needle}: {sql}");
         }
