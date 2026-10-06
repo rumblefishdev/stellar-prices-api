@@ -206,11 +206,20 @@ Prior art: soroban-block-explorer ADR 0051 (a SAC is a facet of the classic asse
   - Why: deployed earlier, that alarm would sit in ALARM on the dashboard's Row-0 alarm strip through stage C, stage D and the cleanup. That strip is [[0294]]'s SCF evidence (all alarms OK).
   - Cost: until §6 no alarm watches `SacUnprovenSkipped`. The runbook has the operator read the metric by hand after the cold start and at least daily.
   - Constraint on the team: no `make deploy-production-observability` from `develop` between the merge and §6. Such a deploy creates the alarms early, and the red tile's description says it is expected.
+- **D9 Compute after stage D (Adam, 2026-10-06, from Oskar's review of PR #390).** Compute (live + API) deploys after phase-3 stage D and before the §5 cleanup.
+  - Why: the API alias answers a SAC address as its classic. Until stage C has rebuilt a SAC's months under the classic id, that classic holds only part of the history, so `GET /v1/assets/{C…}/ohlcv` would lose the pre-heal AMM series. Group B is the visible case: its classics were seeded on 2026-10-06.
+  - Cost: the new live code lands two or three days later. The seed already resolves every known SAC on the old live after its next cold start.
 
 Plan choices confirmed by Adam on 2026-10-05 (GSD plan `261005-htu`):
 
 - **PC3 Fail closed at the live cold start.** If the Lambda cannot read BE's `is_sac` set, Init fails, like the other cold reads. An empty set would mint `Contract` identities, which D2 forbids. The cost: if BE's `default.soroban_contracts` breaks, live ingest stops until it is fixed.
 - **PC6 A summary without the new line passes.** The orchestrator STOPs only when `unproven sac swaps:` is present and non-zero. A binary built before 0242 prints no such line, so phase 3 keeps running on it, which is why D4 holds.
+Changed by Adam on 2026-10-06, after Oskar's review of PR #390:
+
+- **PC3 reversed: fail open.** An unreadable `is_sac` set no longer fails Init. The container ingests with no candidates, logs a WARN and publishes `SacCandidatesUnavailable` on every run, with an alarm on it (deployed in §6, D8).
+  - Why: the candidates guard only a SAC trade with no in-band proof, which happened 0 times in 338,601 legs. Failing closed stopped SDEX, oracle and AMM ingest over one BE table.
+  - The probe's `SacContractIdentities` counts any identity minted meanwhile.
+- **PC6 amended.** A month without the `unproven sac swaps:` line gets a visible note. Once a month of the same state has printed the line, a later month without it is a STOP: the host binary went back to a pre-0242 build. Stage C on the pre-0242 binary is unaffected.
 - **PC9 Residual rows of a SAC with no classic.** Such a row is the only copy of its trades, so it is never deleted silently. The operator either re-runs that month through phase 3 or records the loss on this task. The rows are copied beside the 72 metadata rows for rollback. The 202404 Z/Q row, from stage B before the seed, is the expected case.
 
 Open: **U3**. About 75.6k Soroswap swaps on BLTA/BLTB/BLTC/PPRIME/LumenJoule produce no candle under any id, and the cause is not established. It must be settled before AC3 promises numbers for those assets.
