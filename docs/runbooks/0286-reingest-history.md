@@ -255,12 +255,25 @@ the DROP and keep the output:
 SELECT source,
        count()            AS candles,
        sum(trade_count)   AS trades,
-       sum(volume_base)   AS volume_base,
-       sum(volume_quote)  AS volume_quote
+       sumIf(volume_base,
+             asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != '')
+         AND quote_asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != ''))
+                          AS volume_base,
+       sumIf(volume_quote,
+             asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != '')
+         AND quote_asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != ''))
+                          AS volume_quote
 FROM prices.price_ohlcv_1m FINAL
 WHERE toYYYYMM(timestamp) = <month>
 GROUP BY source ORDER BY source FORMAT TabSeparated;
 ```
+
+Volumes leave out every candle that touches a pure Soroban token (task 0329).
+The ingest now scales such a token's legs by its own `decimals()`, so its
+volume moves by design: an 18-decimal token's base volume falls by 10^11, a
+6-decimal one's rises tenfold. Trades are still counted on every candle.
+`reingest_0286.py` runs exactly this, and a month whose "before" was read
+without it gets volumes left uncompared, as a FINDING.
 
 (If you later need a row-level diff rather than these sums, attach the frozen
 parts to a scratch table with the `ATTACH PARTITION … FROM '/var/lib/clickhouse/
@@ -341,7 +354,9 @@ Re-run the step-4c query and compare, per source:
 | any source                                                                                                                                  | `count()` may differ: a minute that traded only dust still exists, so candles are not lost — but a minute whose every fill was dropped upstream for a zero amount never existed in either shape.                                                                                                                                                                                                                        |
 
 Differences in `open`/`high`/`low`/`close` are the POINT of the exercise and are
-not reconciled. Differences in volume are a defect. Record both.
+not reconciled. Differences in volume (on the candles step 4c compares) are a
+defect. Record both. So is a non-zero `trades dropped (decimals)` in §6: the
+script reads it and marks the month DEFECT.
 
 ### 4g. DROP the overlapping coarse partitions and pre-roll the month
 
