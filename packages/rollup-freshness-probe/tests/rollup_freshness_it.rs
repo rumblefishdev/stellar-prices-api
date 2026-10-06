@@ -1932,21 +1932,13 @@ async fn an_empty_registry_or_window_is_refused_as_unreadable() {
 
 // ---- task 0236: stored candles outside the OHLC band, on all seven tiers ----
 
-/// Clear all seven tiers, `_1m` FIRST and then the coarse tiers finest to
-/// coarsest. The rollup MVs run in this database: clearing a source before its
-/// target stops a refresh landing between the two from re-feeding the tier just
-/// cleared. Its own helper — [`reset_sanity_tables`] is shared and clears only
-/// two tiers.
+/// Clear every tier of `OHLC_BAND_TIERS`, in its order: `_1m` FIRST, then the
+/// coarse tiers finest to coarsest. The rollup MVs run in this database:
+/// clearing a source before its target stops a refresh landing between the two
+/// from re-feeding the tier just cleared. Its own helper — [`reset_sanity_tables`]
+/// is shared and clears only two tiers.
 async fn reset_ohlc_band_tables(c: &Client) {
-    for table in [
-        "price_ohlcv_1m",
-        "price_ohlcv_15m",
-        "price_ohlcv_1h",
-        "price_ohlcv_4h",
-        "price_ohlcv_1d",
-        "price_ohlcv_1w",
-        "price_ohlcv_1M",
-    ] {
+    for (table, _) in rollup_freshness_probe::ohlc_band::OHLC_BAND_TIERS {
         exec(c, &format!("TRUNCATE TABLE prices.{table}")).await;
     }
 }
@@ -2057,21 +2049,13 @@ async fn the_ohlc_band_scan_counts_only_rows_outside_the_band_on_every_tier() {
     assert_eq!(readings.len(), OHLC_BAND_TIERS.len());
     assert_eq!(
         reading(&readings, m),
-        OhlcBandCounts {
-            band: 1,
-            nonpositive: 2,
-            scanned: 6
-        },
+        OhlcBandCounts::new(1, 2, 6),
         "_1m: one band violation, two non-positive rows (the double-shaped one counted once)"
     );
     for (table, counts) in &readings[1..] {
         assert_eq!(
             *counts,
-            OhlcBandCounts {
-                band: 0,
-                nonpositive: 0,
-                scanned: 0
-            },
+            OhlcBandCounts::new(0, 0, 0),
             "{table} holds nothing"
         );
     }
@@ -2088,18 +2072,6 @@ async fn seed_healthy_1m(c: &Client) -> u32 {
     ts
 }
 
-fn band_only(
-    band: u64,
-    nonpositive: u64,
-    scanned: u64,
-) -> rollup_freshness_probe::ohlc_band::OhlcBandCounts {
-    rollup_freshness_probe::ohlc_band::OhlcBandCounts {
-        band,
-        nonpositive,
-        scanned,
-    }
-}
-
 /// The arm `high < greatest(open, close)`, and ONLY that arm: `o4 h4.5 l3 c5`
 /// has `low (3) <= least (4)` and `low <= high`. RED without the arm.
 #[tokio::test]
@@ -2113,7 +2085,7 @@ async fn the_ohlc_band_scan_catches_a_high_below_the_close() {
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, "price_ohlcv_1m"),
-        band_only(1, 0, 2),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(1, 0, 2),
         "high 4.5 below close 5 is outside the band"
     );
 
@@ -2133,7 +2105,7 @@ async fn the_ohlc_band_scan_catches_a_low_above_the_open() {
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, "price_ohlcv_1m"),
-        band_only(1, 0, 2),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(1, 0, 2),
         "low 4 above open 3 is outside the band"
     );
 
@@ -2156,7 +2128,7 @@ async fn the_ohlc_band_scan_catches_a_low_above_the_high_once() {
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, "price_ohlcv_1m"),
-        band_only(1, 0, 2),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(1, 0, 2),
         "a low above the high is one bad row"
     );
 
@@ -2178,7 +2150,7 @@ async fn the_ohlc_band_scan_catches_a_zero_low_beside_a_positive_close() {
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, "price_ohlcv_1m"),
-        band_only(0, 1, 2),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(0, 1, 2),
         "a priced low of 0 is a non-positive price"
     );
 
@@ -2207,15 +2179,18 @@ async fn the_ohlc_band_scan_reads_each_coarse_tier_over_its_own_bucket_window() 
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, "price_ohlcv_1w"),
-        band_only(1, 0, 1),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(1, 0, 1),
         "a week bucket older than 2 days but inside its widened window"
     );
     assert_eq!(
         reading(&readings, "price_ohlcv_1M"),
-        band_only(1, 0, 1),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(1, 0, 1),
         "a month bucket older than 2 days but inside its widened window"
     );
-    assert_eq!(reading(&readings, "price_ohlcv_1m"), band_only(0, 0, 1));
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1m"),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(0, 0, 1)
+    );
     assert_eq!(ohlc_band_metric(&readings).unwrap().value, 2.0);
 
     reset_ohlc_band_tables(&c).await;
@@ -2256,12 +2231,12 @@ async fn the_ohlc_band_scan_ignores_violations_outside_the_window() {
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, "price_ohlcv_1m"),
-        band_only(0, 0, 1),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(0, 0, 1),
         "only the healthy seed is inside the 1m window"
     );
     assert_eq!(
         reading(&readings, "price_ohlcv_1w"),
-        band_only(0, 0, 0),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(0, 0, 0),
         "a week bucket starting before now - 2d - 1w is outside"
     );
     for (table, counts) in &readings {
@@ -2289,7 +2264,7 @@ async fn a_repaired_candle_stops_counting_in_the_ohlc_band_scan() {
     let readings = read_ohlc_band(&c).await;
     assert_eq!(
         reading(&readings, m),
-        band_only(1, 0, 3),
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts::new(1, 0, 3),
         "the superseded version is neither counted nor scanned"
     );
 

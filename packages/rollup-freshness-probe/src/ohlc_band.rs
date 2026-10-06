@@ -34,6 +34,20 @@
 //! `least(o, c) >= low > high`, and then `greatest(o, c) > high`); it is kept as
 //! the literal invariant the reader expects to find.
 //!
+//! # `pf_trade_count > 0` means priced on every tier
+//!
+//! On a coarse tier `pf_trade_count` is a plain `sum` over the children, while
+//! the four prices come only from children with `pf_trade_count > 0 AND close
+//! >= 1e-12`. The two agree because the ingest counts a fill as price-forming
+//! only when its price clears that same floor
+//! (`prices_ingest_core::price::price_survives_column_scale`, pinned to
+//! `prices_clickhouse::PRICE_FLOOR_LITERAL`). So no `_1m` row has
+//! `pf_trade_count > 0` with a close below the floor, and a coarse row with
+//! `pf_trade_count > 0` always has a child that lends it a price. On prod, from
+//! 2026-09-23 to 2026-10-06, no row on any tier broke this. If one does, the
+//! ingest and rollup floors have drifted apart (the 0286 review WR-03 defect),
+//! and the `nonpositive` count reports it.
+//!
 //! # The window is per tier, on bucket START
 //!
 //! `timestamp >= now() - 2 days - <one bucket length>` (`_1m` plain 2 days). A
@@ -122,6 +136,15 @@ pub struct OhlcBandCounts {
 }
 
 impl OhlcBandCounts {
+    /// A reading from its three counts, for tests and fixtures.
+    pub const fn new(band: u64, nonpositive: u64, scanned: u64) -> Self {
+        Self {
+            band,
+            nonpositive,
+            scanned,
+        }
+    }
+
     /// Rows breaking either shape. The classes are disjoint, so this is a row
     /// count, not a count of arms.
     pub fn violations(&self) -> u64 {
@@ -193,12 +216,28 @@ impl std::fmt::Display for OhlcBandRefusal {
 
 impl std::error::Error for OhlcBandRefusal {}
 
+/// `(violations, band, nonpositive)` summed over the run, or `None` unless every
+/// tier of [`OHLC_BAND_TIERS`] was read exactly once. The one completeness rule
+/// the metric and the log share: a duplicate or unknown table name is not a
+/// complete run either.
+pub fn ohlc_band_totals(readings: &[(&'static str, OhlcBandCounts)]) -> Option<(u64, u64, u64)> {
+    let complete = readings.len() == OHLC_BAND_TIERS.len()
+        && OHLC_BAND_TIERS
+            .iter()
+            .all(|(t, _)| readings.iter().filter(|(r, _)| r == t).count() == 1);
+    complete.then(|| {
+        readings.iter().fold((0, 0, 0), |(v, b, n), (_, c)| {
+            (v + c.violations(), b + c.band, n + c.nonpositive)
+        })
+    })
+}
+
 /// Shape the readings into the one datum to publish, or refuse.
 ///
 /// In order: a positive sum is always published (never a false OK, even with a
-/// tier missing); a zero with any tier unread is [`OhlcBandRefusal::Incomplete`];
-/// a zero over an empty `_1m` window is [`OhlcBandRefusal::EmptyScan`]; otherwise
-/// a healthy zero.
+/// tier missing); a zero without a complete run ([`ohlc_band_totals`]) is
+/// [`OhlcBandRefusal::Incomplete`]; a zero over an empty `_1m` window is
+/// [`OhlcBandRefusal::EmptyScan`]; otherwise a healthy zero.
 pub fn ohlc_band_metric(
     readings: &[(&'static str, OhlcBandCounts)],
 ) -> Result<SanityMetric, OhlcBandRefusal> {
@@ -209,11 +248,14 @@ pub fn ohlc_band_metric(
             value: total as f64,
         });
     }
-    let read = |table: &str| readings.iter().find(|(t, _)| *t == table).map(|(_, c)| c);
-    if OHLC_BAND_TIERS.iter().any(|(t, _)| read(t).is_none()) {
+    if ohlc_band_totals(readings).is_none() {
         return Err(OhlcBandRefusal::Incomplete);
     }
-    if read(OHLC_BAND_TIERS[0].0).is_some_and(|c| c.scanned == 0) {
+    let scanned_1m = readings
+        .iter()
+        .find(|(t, _)| *t == OHLC_BAND_TIERS[0].0)
+        .map(|(_, c)| c.scanned);
+    if scanned_1m == Some(0) {
         return Err(OhlcBandRefusal::EmptyScan);
     }
     Ok(SanityMetric {
@@ -241,14 +283,6 @@ pub fn ohlc_band_detail(readings: &[(&'static str, OhlcBandCounts)]) -> String {
 mod tests {
     use super::*;
     use crate::ROLLUP_TIERS;
-
-    fn counts(band: u64, nonpositive: u64, scanned: u64) -> OhlcBandCounts {
-        OhlcBandCounts {
-            band,
-            nonpositive,
-            scanned,
-        }
-    }
 
     /// Seven readings, one per tier, all the given counts.
     fn all_tiers(c: OhlcBandCounts) -> Vec<(&'static str, OhlcBandCounts)> {
@@ -362,25 +396,25 @@ mod tests {
         let readings: Vec<(&'static str, OhlcBandCounts)> = OHLC_BAND_TIERS
             .iter()
             .enumerate()
-            .map(|(i, (t, _))| (*t, counts(i as u64, 2 * i as u64, 100)))
+            .map(|(i, (t, _))| (*t, OhlcBandCounts::new(i as u64, 2 * i as u64, 100)))
             .collect();
         // band 0+1+..+6 = 21, nonpositive 2*21 = 42
         let metric = ohlc_band_metric(&readings).unwrap();
         assert_eq!(metric.name, OHLC_BAND_METRIC);
         assert_eq!(metric.name, "CandleBandViolations");
         assert_eq!(metric.value, 63.0);
-        assert_eq!(counts(2, 3, 9).violations(), 5);
+        assert_eq!(OhlcBandCounts::new(2, 3, 9).violations(), 5);
     }
 
     #[test]
     fn an_empty_1m_scan_is_refused_not_published_as_healthy() {
-        let refusal = ohlc_band_metric(&all_tiers(counts(0, 0, 0))).unwrap_err();
+        let refusal = ohlc_band_metric(&all_tiers(OhlcBandCounts::new(0, 0, 0))).unwrap_err();
         assert_eq!(refusal, OhlcBandRefusal::EmptyScan);
     }
 
     #[test]
     fn a_zero_over_a_missing_tier_is_refused_as_incomplete() {
-        let mut readings = all_tiers(counts(0, 0, 10));
+        let mut readings = all_tiers(OhlcBandCounts::new(0, 0, 10));
         readings.remove(3);
         assert_eq!(
             ohlc_band_metric(&readings).unwrap_err(),
@@ -388,27 +422,52 @@ mod tests {
         );
     }
 
+    /// Seven readings are not a complete run when one tier is read twice or an
+    /// unknown table stands in for a real one. The metric and the log share
+    /// this rule through `ohlc_band_totals`.
+    #[test]
+    fn a_duplicate_or_unknown_tier_is_not_a_complete_run() {
+        let complete = all_tiers(OhlcBandCounts::new(1, 2, 10));
+        assert_eq!(ohlc_band_totals(&complete), Some((21, 7, 14)));
+
+        let mut duplicate = complete.clone();
+        duplicate[6].0 = duplicate[5].0;
+        let mut unknown = complete.clone();
+        unknown[6].0 = "price_ohlcv_2h";
+        for readings in [duplicate, unknown] {
+            assert_eq!(ohlc_band_totals(&readings), None);
+            let zero: Vec<_> = readings
+                .iter()
+                .map(|(t, _)| (*t, OhlcBandCounts::new(0, 0, 10)))
+                .collect();
+            assert_eq!(
+                ohlc_band_metric(&zero).unwrap_err(),
+                OhlcBandRefusal::Incomplete
+            );
+        }
+    }
+
     /// A positive value is never a false OK, so a failed tier elsewhere does
     /// not hide the violations the other six found.
     #[test]
     fn a_positive_sum_is_published_even_with_a_tier_missing() {
-        let mut readings = all_tiers(counts(0, 0, 10));
+        let mut readings = all_tiers(OhlcBandCounts::new(0, 0, 10));
         readings.remove(6);
-        readings[2].1 = counts(1, 2, 10);
+        readings[2].1 = OhlcBandCounts::new(1, 2, 10);
         assert_eq!(ohlc_band_metric(&readings).unwrap().value, 3.0);
     }
 
     #[test]
     fn empty_coarse_tiers_beside_a_scanned_1m_publish_a_healthy_zero() {
-        let mut readings = all_tiers(counts(0, 0, 0));
-        readings[0].1 = counts(0, 0, 500);
+        let mut readings = all_tiers(OhlcBandCounts::new(0, 0, 0));
+        readings[0].1 = OhlcBandCounts::new(0, 0, 500);
         assert_eq!(ohlc_band_metric(&readings).unwrap().value, 0.0);
     }
 
     #[test]
     fn a_coarse_violation_is_published_even_when_1m_scanned_nothing() {
-        let mut readings = all_tiers(counts(0, 0, 0));
-        readings[5].1 = counts(2, 0, 4);
+        let mut readings = all_tiers(OhlcBandCounts::new(0, 0, 0));
+        readings[5].1 = OhlcBandCounts::new(2, 0, 4);
         assert_eq!(ohlc_band_metric(&readings).unwrap().value, 2.0);
     }
 
@@ -432,8 +491,8 @@ mod tests {
     #[test]
     fn the_detail_names_every_reading() {
         let detail = ohlc_band_detail(&[
-            ("price_ohlcv_1m", counts(1, 2, 6)),
-            ("price_ohlcv_1w", counts(0, 0, 0)),
+            ("price_ohlcv_1m", OhlcBandCounts::new(1, 2, 6)),
+            ("price_ohlcv_1w", OhlcBandCounts::new(0, 0, 0)),
         ]);
         assert_eq!(
             detail,

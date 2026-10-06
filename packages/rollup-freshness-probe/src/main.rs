@@ -31,6 +31,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     };
     use rollup_freshness_probe::ohlc_band::{
         OHLC_BAND_TIERS, OhlcBandCounts, ohlc_band_detail, ohlc_band_metric, ohlc_band_queries,
+        ohlc_band_totals,
     };
     use rollup_freshness_probe::reconcile_mismatch::{
         MISMATCH_MIN_READ_SECS, MISMATCH_RESERVE, MismatchCount, mismatch_metric, mismatch_queries,
@@ -462,15 +463,57 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // Seven INDEPENDENT reads, not one `UNION ALL`: a statement fails as a
             // unit, so one dropped tier or lost grant would hide the other six
             // counts, and the alarm is `NOT_BREACHING` on missing data. A failed
-            // tier is recorded and the loop moves on.
+            // tier is recorded and the others still count.
+            //
+            // Run in parallel, each under the bound block 6 uses: `min(10 s,
+            // time left - 5 s reserve)`, server-side and client-side. A stalled
+            // tier (a `FINAL` during a merge, a busy box during a re-ingest)
+            // is then a recorded failure, not a hard timeout that loses block 6
+            // and the summary line. The block costs the slowest read, not the sum.
             //
             // Independent of block 5, although a priced `_1m` row with
             // `close = 0` fires both: that overlap is expected (see `ohlc_band`).
             let mut band_readings: Vec<(&'static str, OhlcBandCounts)> = Vec::new();
-            for (table, sql) in ohlc_band_queries.iter() {
-                match ch.query(sql).fetch_one::<OhlcBandCounts>().await {
-                    Ok(counts) => band_readings.push((*table, counts)),
-                    Err(e) => failures.push(format!("ohlc-band read {table}: {e}")),
+            let remaining = deadline
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default();
+            match mismatch_read_bound(remaining) {
+                None => failures.push(format!(
+                    "ohlc-band skipped: {:.1} s left of the invocation, \
+                     under the {} s reserve + {MISMATCH_MIN_READ_SECS} s a read needs",
+                    remaining.as_secs_f64(),
+                    MISMATCH_RESERVE.as_secs(),
+                )),
+                Some(bound) => {
+                    let mut reads = tokio::task::JoinSet::new();
+                    for (table, sql) in ohlc_band_queries.iter() {
+                        let bounded = prices_clickhouse::with_execution_bound((*ch).clone(), bound);
+                        let (table, sql) = (*table, sql.clone());
+                        reads.spawn(async move {
+                            let read = tokio::time::timeout(
+                                std::time::Duration::from_secs(bound + 2),
+                                bounded.query(&sql).fetch_one::<OhlcBandCounts>(),
+                            )
+                            .await;
+                            (table, read)
+                        });
+                    }
+                    while let Some(joined) = reads.join_next().await {
+                        match joined {
+                            Ok((table, Ok(Ok(counts)))) => band_readings.push((table, counts)),
+                            Ok((table, Ok(Err(e)))) => failures
+                                .push(format!("ohlc-band read {table} (bound {bound} s): {e}")),
+                            Ok((table, Err(_))) => failures.push(format!(
+                                "ohlc-band read {table}: no answer within {} s",
+                                bound + 2
+                            )),
+                            Err(e) => failures.push(format!("ohlc-band read task: {e}")),
+                        }
+                    }
+                    // Completion order is arbitrary; log in tier order.
+                    band_readings.sort_by_key(|(t, _)| {
+                        OHLC_BAND_TIERS.iter().position(|(o, _)| o == t)
+                    });
                 }
             }
             match ohlc_band_metric(&band_readings) {
@@ -483,13 +526,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 }
                 Err(refusal) => failures.push(format!("ohlc-band: {refusal}")),
             }
-            // Totals only when every tier was read: a partial sum logged as a
-            // number would read as the whole chain. The detail names each tier.
-            let band_totals = (band_readings.len() == OHLC_BAND_TIERS.len()).then(|| {
-                band_readings.iter().fold((0u64, 0u64, 0u64), |(v, b, n), (_, c)| {
-                    (v + c.violations(), b + c.band, n + c.nonpositive)
-                })
-            });
+            // Totals only for a complete run: a partial sum logged as a number
+            // would read as the whole chain. The detail names each tier.
+            let band_totals = ohlc_band_totals(&band_readings);
             let band_scanned_1m = band_readings
                 .iter()
                 .find(|(t, _)| *t == OHLC_BAND_TIERS[0].0)
