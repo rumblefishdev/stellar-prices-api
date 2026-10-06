@@ -447,7 +447,7 @@ month cannot be silently ordered the old way any more.
 
 What survives is the value check. `application_order` is `Int16`, and a negative
 value is not a position — `resolve_transaction_index` degrades it to 0 and counts
-it. The run's last summary line reports it:
+it. The run's summary reports it:
 
 ```
 negative apply order:      0
@@ -456,6 +456,19 @@ negative apply order:      0
 **Anything but `0` means those fills ARE in the wrong order and the month is NOT
 repaired** — do not record it as done. The run also emits one WARN, once, naming
 the first ledger and `application_order` it saw.
+
+Since task 0329 the summary ends with one more line:
+
+```
+trades dropped (decimals): 0
+```
+
+A pure Soroban token's legs are scaled by its `decimals()`, read over Soroban
+RPC the first time the run meets it and kept in `prices.asset_decimals`.
+**Anything but `0` means a token did not resolve and its trades are NOT in the
+month's candles.** The run WARNs naming the contract. Re-run the month once it
+resolves. The binary needs outbound HTTPS to `SOROBAN_RPC_URL` (default
+`https://mainnet.sorobanrpc.com`), and `prices.asset_decimals` must exist.
 
 ---
 

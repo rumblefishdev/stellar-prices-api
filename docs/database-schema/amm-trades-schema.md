@@ -466,12 +466,11 @@ references. The remaining item is still pending BE input.
    `Symbol("swap")` emitters outside the three venues are dropped via
    a strict allowlist (no `venue: unknown` bucket) — see lore 0005.
 
-3. **Decimals normalisation.** `amount_in` and `amount_out` are stored
-   as `NUMERIC(28,14)`. Confirm whether the BE Ledger Processor will
-   divide raw on-chain amounts by each token's `decimals()` before
-   insertion, or write the raw integer scalar. The Prices API expects
-   the **decimal-normalised** value (matching how it stores quantities
-   throughout `price_ohlcv` and `current_prices`). _Still open._
+3. **~~Decimals normalisation.~~** **Resolved** by lore 0329. The Prices
+   ingest normalises raw on-chain amounts itself: classic assets and their
+   SACs at 7, a pure Soroban token at its `decimals()`, read once over RPC
+   and kept in `prices.asset_decimals`. Until then it assumed 7 for every
+   token, which priced non-7-decimal tokens off by 10^(7 − decimals).
 
 ---
 
