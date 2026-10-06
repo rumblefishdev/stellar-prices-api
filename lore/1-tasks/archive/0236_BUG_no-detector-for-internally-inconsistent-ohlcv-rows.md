@@ -2,7 +2,7 @@
 id: "0236"
 title: "Nothing detects an internally inconsistent `price_ohlcv_*` row — and 0229's clamp removed the one surface that used to surface them"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: ["0011"]
 related_tasks: ["0229", "0120", "0182", "0227"]
@@ -46,6 +46,14 @@ history:
       all seven tiers on prod, so the alarm will not fire on legacy rows. The
       branch is rebased on develop, alongside 0139's and 0203's probe checks,
       as block 5c. PR to follow; deploy is Adam's.
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      PR #396 merged (81a48f08) after review; Observability (3 ohlc-band
+      alarms) and EventBridge (probe Lambda only) deployed 2026-10-06. First
+      run 13:05 UTC: 7 tiers read, 0 violations, checks_failed 0, alarms OK.
+      Probe 104 unit tests, 40 ClickHouse ITs.
 ---
 
 # No detector for an internally inconsistent stored candle
@@ -181,7 +189,59 @@ construction and checked with zero tolerance where it is checked at all.
 - [x] If the count is non-zero, the cause is identified and filed as its own
       task rather than absorbed here. Band violations are 0. The legacy
       zero-price rows are recorded above and left to [[0286]] phase 3.
-- [ ] A recurring check exists wherever the other data-quality probes live, with
-      its threshold justified by the measured baseline.
-- [ ] 0229's clamp is explicitly confirmed as the right behaviour for the read
+- [x] A recurring check exists wherever the other data-quality probes live, with
+      its threshold justified by the measured baseline. Block 5c of
+      `rollup-freshness-probe`, every 15 min, alarm at >= 1 (baseline 0).
+- [x] 0229's clamp is explicitly confirmed as the right behaviour for the read
       path, or changed — with the decision recorded in [[ADR-0011]] §3.
+      Confirmed, merged with #396.
+
+## Implementation Notes
+
+- `packages/rollup-freshness-probe/src/ohlc_band.rs`: seven per-tier `FINAL`
+  queries, the `band` and `nonpositive` classes, `ohlc_band_totals` (the one
+  completeness rule) and the `CandleBandViolations` metric with its two
+  refusals (`EmptyScan`, `Incomplete`).
+- `main.rs` block 5c: the seven reads run in parallel on a `JoinSet`, each
+  under block 6's `mismatch_read_bound`, server- and client-side.
+- Observability: `prices-{env}-ohlc-band-{1,100,10000}` on `zeroLadder`.
+- ADR-0011 §3: the clamp stays; the as-stored arm does not clamp.
+
+## Deployed to production (2026-10-06)
+
+| step | result |
+|---|---|
+| merge | #396 → `develop` 81a48f08, 12:43 UTC |
+| Observability | 3 alarms created, dashboard 86 alarms, 14:48 CEST |
+| EventBridge | only `prices-production-rollup-freshness-probe` changed, 12:57 UTC |
+| first run | 13:05:21 UTC: 7 tiers, 0 violations, `checks_failed` 0, 3.1–3.4 s, 51 MB |
+| alarms | `ohlc-band-*` INSUFFICIENT_DATA → OK |
+
+## Design Decisions
+
+### From Plan
+
+1. **Predicate, scope, threshold**: Adam's decisions of 2026-09-28 above.
+
+### Emerged
+
+2. **Block 5c, not last**: block 6 (0203) is time-budgeted and stays last.
+   The seven reads cost 0.29 s of server time on prod.
+3. **Bounded, parallel reads** (review of #396): a stalled tier is a
+   recorded failure, not a Lambda timeout that loses block 6 and the log.
+4. **One completeness rule** (review): `ohlc_band_totals`, which also
+   rejects duplicate or unknown tier names.
+5. **Review finding 1 declined**: `pf_trade_count > 0` means priced on every
+   tier, because the ingest floor is the rollup floor (0286 WR-03). Prod had
+   0 rows that break this from 2026-09-23 to 2026-10-06. A break would be the
+   WR-03 defect, so paging on it is right. Documented in the module doc.
+6. **The old blocked entry carries `by: ["0286"]`**: the validator requires
+   `by`, and the block was waiting for pre-0286 buckets to leave the window.
+
+## Issues Encountered
+
+- **Rebase onto 299 commits of develop**: 0139 (block 5b) and 0203 (block 6,
+  time budget, `%reading` log style) had grown the same probe. Four files
+  conflicted; the band block was fitted in between.
+- **`client()` became async on develop**: it now stops the shared reconcile
+  MVs before a test seeds tiers. The 0236 ITs were adapted in c2eeddaf.
