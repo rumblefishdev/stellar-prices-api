@@ -145,14 +145,8 @@ const PORTAL_API_RESOURCE_PATH = '/api/{proxy+}';
  * `/auth/logout`; `DELETE` for task 0192's revoke if it prefers that shape to a
  * `POST`.
  *
- * ⚠️ Task 0186's four routes sit at **depth 3** (`auth/login`, not `login`),
- * which the greedy `{proxy+}` above covers and the intermediate
- * `{proxy}` + `{proxy}/{sub}` pair that is CURRENTLY DEPLOYED does not — see
- * task 0205, which ships this file's committed shape. Until that deploy runs,
- * `/api/auth/login` answers the gateway's own
- * `403 Missing Authentication Token` rather than reaching the handler. That is a
- * deployment gap, not a defect in either task: the flag keeps the handler dark
- * regardless, and `/config` at depth 1 is unaffected.
+ * Task 0186's four routes sit at **depth 3** (`auth/login`, not `login`), which
+ * is why the proxy is greedy rather than a fixed number of `{proxy}` levels.
  *
  * ⚠️ A verb that is NOT listed here never reaches the handler: it gets the
  * gateway's own `404 {"code": "not_found", …}` (task 0309's gateway response)
