@@ -1,9 +1,11 @@
-// Tests for getAssignee in generate-lore-board.mjs (task 0327).
+// Tests for getAssignee in generate-lore-board.mjs (task 0327) and its use in
+// board.html (task 0328).
 //
 // Run: node --test tools/scripts/generate-lore-board.test.mjs
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { getAssignee } from './generate-lore-board.mjs';
 
@@ -95,3 +97,14 @@ for (const { name, dir = 'active', task, want } of CASES) {
     assert.equal(getAssignee({ _dir: dir, ...task }), want);
   });
 }
+
+// The page must show what board.json carries, not re-derive it (task 0328).
+test('board.html reads the assignee from board.json', () => {
+  const html = readFileSync(
+    new URL('../../lore/board.html', import.meta.url),
+    'utf-8',
+  );
+  const fn = html.match(/function getTaskAssignee\(t\) \{([\s\S]*?)\n\s*\}/);
+  assert.ok(fn, 'getTaskAssignee not found in board.html');
+  assert.equal(fn[1].trim(), 'return t.assignee || null;');
+});
