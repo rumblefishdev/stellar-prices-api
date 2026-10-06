@@ -202,6 +202,10 @@ Prior art: soroban-block-explorer ADR 0051 (a SAC is a facet of the classic asse
   - **One PR** with ordered commit slices: resolver + live, then `events-backfill`, then probe + alarm, then API alias. This overrides the ~400-line norm for this task.
   - The heal is a runbook section, with no window.
   - The new `events-backfill` binary is swapped on ch-prod-01 only between phase-3 stages, never during an `amm` step.
+- **D8 Observability after the cleanup (Adam, 2026-10-06).** The PR deploys Compute and EventBridge only. Observability, with both 0242 alarms, is deployed in runbook §6, after §5, with the `SacContractIdentities` actions already on.
+  - Why: deployed earlier, that alarm would sit in ALARM on the dashboard's Row-0 alarm strip through stage C, stage D and the cleanup. That strip is [[0294]]'s SCF evidence (all alarms OK).
+  - Cost: until §6 no alarm watches `SacUnprovenSkipped`. The runbook has the operator read the metric by hand after the cold start and at least daily.
+  - Constraint on the team: no `make deploy-production-observability` from `develop` between the merge and §6. Such a deploy creates the alarms early, and the red tile's description says it is expected.
 
 Plan choices confirmed by Adam on 2026-10-05 (GSD plan `261005-htu`):
 
@@ -224,6 +228,12 @@ No code fix is needed. Phase 3 stage C, run with the 29-row seed, rebuilds them 
 The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap was indexed, and phase 3 covers that under 0290. STELLA, TESTTTT, TEST77 and TEST12 have pools with no swaps.
 
 **October window (measured 2026-10-05, `dev_read`).** Since 2026-10-01, no candle on any tier is keyed on the 36 SAC ids, and no contract row has been minted since BURNMKR. No decision is needed now. The runbook re-checks months after 202609 before the cleanup, and any non-zero result goes through PC9.
+
+## Heal log
+
+- **2026-10-06, seed (runbook §3).** Stage B finished 202404. The seed ran at 10:29:11 UTC as `dev_shared`, straight from `seed-0242.sql` rather than through the staged variant of §3. There is therefore no `bak_0242_seed_stage`, and `bak_0242_seed` was created afterwards from the 29 rows with that `created_at`.
+  - Check: `29 29 / 29 / 0`, with collisions at 0. No candle under any seeded id on any tier.
+  - Comet's `pool_registry` row is present (1).
 
 ## Acceptance Criteria
 
