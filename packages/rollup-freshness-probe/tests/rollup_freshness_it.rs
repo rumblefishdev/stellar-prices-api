@@ -2105,7 +2105,7 @@ fn band_only(
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_ohlc_band_scan_catches_a_high_below_the_close() {
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     let ts = seed_healthy_1m(&c).await;
     insert_ohlc_row(&c, "price_ohlcv_1m", ts, 31, ("4", "4.5", "3", "5"), 2, 1).await;
@@ -2125,7 +2125,7 @@ async fn the_ohlc_band_scan_catches_a_high_below_the_close() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_ohlc_band_scan_catches_a_low_above_the_open() {
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     let ts = seed_healthy_1m(&c).await;
     insert_ohlc_row(&c, "price_ohlcv_1m", ts, 32, ("3", "6", "4", "5"), 2, 1).await;
@@ -2148,7 +2148,7 @@ async fn the_ohlc_band_scan_catches_a_low_above_the_open() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_ohlc_band_scan_catches_a_low_above_the_high_once() {
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     let ts = seed_healthy_1m(&c).await;
     insert_ohlc_row(&c, "price_ohlcv_1m", ts, 33, ("5", "4", "6", "5"), 2, 1).await;
@@ -2170,7 +2170,7 @@ async fn the_ohlc_band_scan_catches_a_low_above_the_high_once() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_ohlc_band_scan_catches_a_zero_low_beside_a_positive_close() {
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     let ts = seed_healthy_1m(&c).await;
     insert_ohlc_row(&c, "price_ohlcv_1m", ts, 34, ("4", "6", "0", "5"), 2, 1).await;
@@ -2196,7 +2196,7 @@ async fn the_ohlc_band_scan_catches_a_zero_low_beside_a_positive_close() {
 async fn the_ohlc_band_scan_reads_each_coarse_tier_over_its_own_bucket_window() {
     use rollup_freshness_probe::ohlc_band::ohlc_band_metric;
 
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     seed_healthy_1m(&c).await;
     let week = ts_ago(&c, "INTERVAL 5 DAY").await;
@@ -2227,7 +2227,7 @@ async fn the_ohlc_band_scan_reads_each_coarse_tier_over_its_own_bucket_window() 
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_ohlc_band_scan_ignores_violations_outside_the_window() {
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     seed_healthy_1m(&c).await;
     let old_minute = ts_ago(&c, "INTERVAL 2 DAY - INTERVAL 1 HOUR").await;
@@ -2278,7 +2278,7 @@ async fn the_ohlc_band_scan_ignores_violations_outside_the_window() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_repaired_candle_stops_counting_in_the_ohlc_band_scan() {
-    let c = client();
+    let c = client().await;
     reset_ohlc_band_tables(&c).await;
     let ts = seed_healthy_1m(&c).await;
     let m = "price_ohlcv_1m";
