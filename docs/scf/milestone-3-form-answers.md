@@ -95,20 +95,28 @@
 
 ## Pre-submission checklist
 
-- [ ] Every figure in Fields 1 and 3 appears, with the same value and date, in
+Checked 2026-10-06.
+
+- [x] Every figure in Fields 1 and 3 appears, with the same value and date, in
       the evidence package
-- [ ] Every deviation the package declares is mentioned in Field 3 by number
-- [ ] Every `<TO FILL: …>` and `<ANGLE_BRACKET>` placeholder replaced
-- [ ] The reviewer key still works and is on the free plan
-- [ ] `develop` released to `master`: the repository's default branch shows
+- [x] Every deviation the package declares is mentioned in Field 3 by number
+      → deviations 1–4, all four the deviations document declares
+- [x] Every `<TO FILL: …>` and `<ANGLE_BRACKET>` placeholder replaced
+- [x] The reviewer key still works and is on the free plan
+      → `prices-production-scf-reviewer-key-20260909T120021Z`: enabled, on
+      `pricing-api-free-production`
+- [x] `develop` released to `master`: the repository's default branch shows
       the root `README.md` and the fresh-account runbook (AC 7), and every
-      `.../blob/master/...` link above resolves. On 2026-09-28 `master` still
-      had neither
-- [ ] The first CI run on `master` after the release is green in every job,
+      `.../blob/master/...` link above resolves
+      → release #381 (2026-10-05), the package in #391
+- [x] The first CI run on `master` after the release is green in every job,
       `XDR protocol lag` included (fixed by task 0325, PR #383)
-- [ ] The 0139 window is closed: alarms back to OK, the alarm count updated
+      → run 37298469682, all four jobs green
+- [x] The 0139 window is closed: alarms back to OK, the alarm count updated
       wherever "65" appears (evidence, video script, Field 1 item 6)
-- [ ] Portal links use `/prices-api/`, and an old `/api/` link still answers
+      → 83 of 83 `prices-production-*` alarms OK; no alarm count of 65 left
+- [x] Portal links use `/prices-api/`, and an old `/api/` link still answers
       `301` on submission day
-- [ ] The video was recorded against the public deployment, no secrets on
+      → `/api/` and `/api/dashboard` answer `301` to `/prices-api/…`
+- [x] The video was recorded against the public deployment, no secrets on
       screen (see the scenario's ⚠️ section)
