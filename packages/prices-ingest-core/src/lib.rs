@@ -19,6 +19,8 @@
 //!   ([`STATIC_POOLS`], task 0300) merged into the AMM registries.
 //! - [`canonical`] — asset identity, the [`AssetRegistry`] of known and newly
 //!   seen identities, and `(base, quote)` canonicalisation.
+//! - [`decimals`] — Soroban token decimals: the RPC resolver the AMM path's
+//!   callers use when a decode reports a token it cannot scale.
 //! - [`price`] / [`tick`] — per-trade price + the [`TradeTick`] the bucketer eats.
 //! - [`bucket`] — 1-minute OHLCV accumulation ([`CandleAccumulator`]).
 //! - [`writer`] — the transport-agnostic ClickHouse [`OhlcvWriter`] (works with a
@@ -28,6 +30,7 @@
 
 pub mod bucket;
 pub mod canonical;
+pub mod decimals;
 pub mod decode;
 pub mod error;
 pub mod filter;
@@ -43,6 +46,7 @@ pub mod writer;
 
 pub use bucket::{CandleAccumulator, OhlcvCandle};
 pub use canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
+pub use decimals::{DecimalsResolver, DecimalsRow};
 pub use decode::{decode_object, ledger_close_time, ledger_sequence};
 pub use error::IngestError;
 pub use filter::{

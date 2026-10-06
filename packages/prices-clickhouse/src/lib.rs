@@ -512,8 +512,9 @@ mod tests {
         // (−1 = 42: task 0256 removed `discovery_state` with the ledger scan
         // that was its only reader and writer.)
         // (+1 = 43: task 0274's `current_prices.price_basis` ALTER, same shape.)
+        // (+1 = 44: task 0329's `asset_decimals` table.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 43, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 44, "got {}", stmts.len());
     }
 
     /// The single `CREATE TABLE … IF NOT EXISTS <table> (` statement of `sql`.
