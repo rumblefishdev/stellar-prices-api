@@ -2,7 +2,7 @@
 id: "0140"
 title: "asset-discovery re-emits the whole asset registry every hour — 0132's defect in a second component"
 type: PERF
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0210", "0132", "0133", "0067", "0256", "0226", "0241"]
@@ -50,6 +50,15 @@ history:
     who: akot
     note: >
       Activated together with [[0226]]: one PR on one branch. The oracle-worker `write_assets` and the `ensure_seed` whole-registry read are the same shape as 0226's load, and 0226 removes the registry the oracle write depends on.
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      Closed without code: [[0139]] (PR #382, deployed 2026-10-02 12:30 UTC)
+      removed both remaining whole-registry paths. Measured on prod: 0 assets
+      written in 99 asset-discovery runs, largest daily `prices.assets` part
+      1–29 rows (was ~210 k), memory 250 → 50 MB. All five ACs met; no
+      follow-up tasks.
 ---
 
 # `asset-discovery` re-emits the full asset registry every hour
@@ -223,10 +232,46 @@ Priority stays at `medium`: what remains is the oracle instance below.
   load and points here. Same shape as [[0226]] (the oracle, every 5 minutes —
   twelve times as often, so that one first).
 
+## ✅ Resolved by [[0139]] — measured on prod 2026-10-06
+
+No code in this task. [[0139]] (PR #382, a6ecd20d) replaced both remaining
+whole-registry paths with `OhlcvWriter::write_absent_assets`, a keyed
+`count()` per identity: `ensure_seed` checks only its ~20 seed identities, and
+the oracle's `write_assets` behind `count() > known_before` is gone (the oracle
+checks its 2 sampled identities). With ids derived by ClickHouse
+(`xxh3(identity)`), no watermark is needed. Deployed with the 0139 window:
+CloudTrail `UpdateFunctionCode` for both Lambdas at 2026-10-02 12:30:16 UTC.
+
+| | before (09-28 → 10-02) | after (10-03 → 10-06) |
+|---|---|---|
+| `prices.assets` largest new part per day (`system.part_log`) | ~210 k rows (whole registry) | **1–2 rows**; 29 on 10-06 = [[0242]]'s classic seed |
+| `assets_written` by asset-discovery | — | **0 in 99 runs** since the deploy |
+| asset-discovery `Max Memory Used` | ~250 MB | **47–50 MB** |
+| asset-discovery average duration | ~4 s | **0.6 s** |
+| `loaded asset registry` lines from asset-discovery | 24 a day | **none** after 2026-10-02 11:19 UTC |
+
+- `system.query_log`, last 24 h: the keyed check ran **1,056 times** = 20 × 24
+  (asset-discovery) + 2 × 288 (oracle), 6 ms average, at most 8,546 rows read.
+- `prices.assets` holds one copy: 211,103 rows = 211,103 identities.
+- The whole-registry `SELECT` still runs ~18 times a day, from the
+  ledger-processor's cold start (35 in 3 days, one AWS address each, in the
+  INIT second) and from an operator machine running backfills (18, one
+  non-AWS address). Neither is this task's: `load_assets()` stays for them by
+  design ([[0226]] AC 3).
+- `OhlcvWriter::write_assets` has no production caller left (one IT,
+  `asset-discovery/tests/enrichment_survives_it.rs`). Not removed: dead but
+  harmless, and not worth a PR while the project closes (Adam, 2026-10-06).
+
 ## Acceptance Criteria
 
-- [ ] A zero-discovery hourly run writes **no** `prices.assets` rows.
-- [ ] Newly-discovered assets are still persisted (seed path unaffected).
-- [ ] The comment sits with the guard it actually describes.
-- [ ] Other `write_assets` callers audited for the same defect.
-- [ ] `part_log` shows the hourly ~204k rows gone, measured on prod.
+- [x] A zero-discovery hourly run writes **no** `prices.assets` rows — 0 in 99
+      runs since 2026-10-02 12:30 UTC.
+- [x] Newly-discovered assets are still persisted (seed path unaffected) —
+      `seed_it::seed_writes_only_the_absent_identities` and
+      `absent_assets_it`, green in #382's CI.
+- [x] The comment sits with the guard it actually describes — moot, deleted
+      with `discover_window` ([[0256]], PR #331).
+- [x] Other `write_assets` callers audited for the same defect — AC 4 audit
+      above; the oracle instance was removed by [[0139]].
+- [x] `part_log` shows the hourly ~204k rows gone, measured on prod —
+      largest daily part 1–29 rows since 2026-10-03.

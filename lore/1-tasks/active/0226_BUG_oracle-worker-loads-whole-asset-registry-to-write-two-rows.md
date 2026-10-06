@@ -104,6 +104,15 @@ history:
     who: akot
     note: >
       Activated together with [[0140]]: one PR on one branch, because both rewrite the same oracle-worker pass (the whole-registry load and the `write_assets` at `lib.rs:569`) and both ship through the EventBridge stack, whose deploy carries the cleanup-rule hazard.
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: >
+      Found already fixed by [[0139]] before any code was written: the oracle
+      no longer loads the registry (deployed 2026-10-02 12:30 UTC). Measured on
+      prod: 256 → 52 MB, 7–8 s → 0.75 s, 0 errors and 0 OOM since. ACs 1, 2,
+      3 and 5 met; AC 4 (a week without an OOM) ends 2026-10-09 12:44 UTC,
+      close after it. [[0140]] closed the same day.
 ---
 
 # The oracle worker reads the entire asset registry on every run
@@ -318,19 +327,70 @@ no `-errors` alarm at all, `createWorkerLambda` (`lambda-baseline.ts:309`) build
   does not, that is a separate question.
 - [[0223]]'s framing decision itself — only the scope gap above is recorded here.
 
+## ✅ Resolved by [[0139]] — measured on prod 2026-10-06
+
+No code in this task. [[0139]] (PR #382, adfe4ccc + a6ecd20d) removed the
+registry from the oracle's pass: it now calls `OhlcvWriter::write_absent_assets`
+for its 2 sampled identities (`oracle-worker/src/lib.rs:562`), one keyed
+`count()` each, and the `write_assets` at the old `lib.rs:569` is gone with it
+— the collision with [[0140]] described above resolved itself. That is option
+1 in its narrowest form; `load_assets()` is untouched for its other callers.
+
+**Cause, not coincidence.** CloudTrail: `UpdateFunctionCode` at 2026-10-02
+12:30:16 UTC, after #382 merged (11:33 UTC). The last old-code run, 11:52 UTC,
+loaded `existing_assets=842792` (four un-merged copies) and used 256 MB in
+10.9 s. The schedule was paused for the 0139 window; the first run on the new
+code, 12:44 UTC on a cold container, used **51 MB in 1.4 s**. No
+`loaded asset registry` line from the oracle since 11:52 UTC.
+
+| | 2026-09-28 → 10-02 | 2026-10-03 → 10-06 |
+|---|---|---|
+| `Max Memory Used`, daily max / p50 | **256** / 151–222 MB | **52 / 51 MB**, every day |
+| `Runtime.OutOfMemory` lines | 8 (09-24 → 10-02) | **0**; last 2026-10-02 09:17 UTC |
+| `AWS/Lambda Errors`, daily | 0–3 | **0** |
+| average duration | 6.9–8.2 s | **0.74–0.77 s** |
+| `prices-production-oracle-errors` | ALARM ↔ OK several times a day | last fired 2026-10-02 09:18 UTC, OK since |
+
+- The load was **per invocation**: ~12 cold starts a day against 288 runs,
+  with p50 at 151–222 MB and one `loaded asset registry` line per run (288 a
+  day).
+- `system.query_log`, last 24 h: the oracle's keyed check is part of 1,056
+  runs of `SELECT count() FROM prices.assets WHERE asset_code = ? AND …`
+  (2 × 288 oracle + 20 × 24 asset-discovery), 6 ms average, ≤ 8,546 rows read.
+  None of the 53 whole-registry `SELECT`s of the last 3 days is the oracle's:
+  35 are ledger-processor cold starts, 18 an operator machine running
+  backfills — and the oracle could not have paid one, since the read alone
+  costs ~148 MB.
+- The memory is now independent of un-merged copies and of the registry's
+  size, so the [[0294]] risk "the oracle OOMs while the re-ingest re-emits the
+  registry" is gone with it.
+- `memorySize` stays 256 MB; no EventBridge change was needed.
+  `prices-production-cleanup` reads `DISABLED` (2026-10-06).
+
+**Callers of `load_assets()`** (AC 3), all unchanged by this task:
+`events-backfill/src/run.rs:185`, `sdex-backfill/src/run.rs:147` (via
+`sink.rs:72`), `prices-ledger-processor/src/sink/mod.rs:103` (cold start,
+`main.rs:92`; `bin/cli.rs:86`).
+
+**Still open:** AC 4. The week without an OOM runs from the first new-code run
+to **2026-10-09 12:44 UTC**; close after checking it.
+
 ## Acceptance Criteria
 
-- [ ] Whether the registry load is per-invocation or per-cold-start is
-      **measured**, not inferred from the two log lines above.
-- [ ] The remedy reduces **peak** memory on a real production invocation, with
-      `Max Memory Used` recorded before and after.
-- [ ] Every other caller of `load_assets()` is enumerated, and the change is
+- [x] Whether the registry load is per-invocation or per-cold-start is
+      **measured**, not inferred from the two log lines above — per
+      invocation (288 load lines a day against ~12 cold starts).
+- [x] The remedy reduces **peak** memory on a real production invocation, with
+      `Max Memory Used` recorded before and after — 256 → 52 MB ([[0139]]).
+- [x] Every other caller of `load_assets()` is enumerated, and the change is
       shown not to alter their behaviour — or the narrowing is confined to a new
-      entry point.
+      entry point — `write_absent_assets` is the new entry point; callers
+      listed above.
 - [ ] `prices-production-oracle-errors` shows **zero** `Runtime.OutOfMemory` for
       a full week after the change.
-- [ ] If the deploy touches `eventbridge-stack.ts`, `describe-rule` output for
-      `prices-production-cleanup` is recorded **before and after**.
+- [x] If the deploy touches `eventbridge-stack.ts`, `describe-rule` output for
+      `prices-production-cleanup` is recorded **before and after** — not
+      touched (no `memorySize` change); the rule reads `DISABLED` on 2026-10-06.
 
 ## Notes
 
