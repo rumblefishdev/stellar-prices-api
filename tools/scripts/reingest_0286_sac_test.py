@@ -51,6 +51,33 @@ class UnprovenSacLine(unittest.TestCase):
                 self.assertIn(part, msg)
             self.assertNotIn("nothing was written", msg)
 
+    def test_a_missing_line_stops_only_after_an_earlier_month_printed_it(self):
+        self.assertIsNone(r.amm_summary(summary(None), LOG, dry_run=True)["unproven_sacs"])
+        with self.assertRaises(r.Stop) as cm:
+            r.amm_summary(summary(None), LOG, dry_run=True, unproven_line_seen=True)
+        msg = str(cm.exception)
+        for part in ("earlier month", "built before task 0242", str(LOG), "§4e"):
+            self.assertIn(part, msg)
+        self.assertEqual(r.amm_summary(summary(0), LOG, dry_run=True, unproven_line_seen=True)
+                         ["unproven_sacs"], 0)
+
+    def test_the_month_records_the_line_and_the_seen_test_reads_other_months(self):
+        class St:
+            d = {"months": {"202405": {"step": 9}}}
+        notes = []
+        orig, r.note = r.note, notes.append
+        try:
+            ms = St.d["months"]["202405"]
+            r.record_amm_summary(ms, 202405, {"fallbacks": 0, "dropped": 0, "unproven_sacs": None})
+            self.assertIsNone(ms["unproven_sacs"])
+            self.assertTrue(any("built before task 0242" in n for n in notes), notes)
+            self.assertFalse(r.unproven_line_seen(St, 202406))
+            r.record_amm_summary(ms, 202405, {"fallbacks": 0, "dropped": 0, "unproven_sacs": 0})
+            self.assertTrue(r.unproven_line_seen(St, 202406))
+            self.assertFalse(r.unproven_line_seen(St, 202405), "the month itself does not count")
+        finally:
+            r.note = orig
+
     def test_a_missing_required_line_still_stops(self):
         with self.assertRaises(r.Stop) as cm:
             r.amm_summary(summary(0, fallbacks=False), LOG, dry_run=True)
