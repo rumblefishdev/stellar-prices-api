@@ -4,7 +4,7 @@ title: 'Deploy the portal gateway mapping and verify it live — three deploys 0
 type: CHORE
 status: active
 related_adr: []
-related_tasks: ['0184', '0183', '0185', '0186', '0194', '0141']
+related_tasks: ['0184', '0183', '0185', '0186', '0194', '0141', '0195', '0235', '0309', '0326']
 tags:
   [
     layer-infra,
@@ -18,7 +18,8 @@ tags:
   ]
 milestone: 3
 links:
-  - '../active/0184_FEATURE_portal-hosting-skeleton.md'
+  - '../../archive/0184_FEATURE_portal-hosting-skeleton.md'
+  - 'notes/R-live-measurement-2026-10-06.md'
   - '../../../docs/scf/api-endpoints.md'
 history:
   - date: "2026-08-14"
@@ -77,9 +78,26 @@ history:
       ([[0194]]: backend on prices-api.sorobanscan…/api/, [[0326]]: bundle at
       sorobanscan…/prices-api/), so each criterion is measured against what
       replaced it.
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: >
+      Measured live, read-only, about 12:10 UTC
+      ([R-live-measurement-2026-10-06](notes/R-live-measurement-2026-10-06.md)).
+      The three deploys are moot: PortalHosting was deleted on 2026-08-31 and
+      [[0235]]'s `/api/{proxy+}` sits under a new parent, so no
+      variable-child conflict. 10 of 11 criteria hold, or hold for what
+      replaced their subject. Open: the stale notes about the intermediate
+      mapping, in the gateway docblock, the OAuth deploy runbook and
+      [[0184]]'s record.
 ---
 
 # Deploy the portal gateway mapping and verify it live
+
+> **2026-10-06: no deploy left to do.** Everything below describes production
+> as of 2026-08-14. The portal moved off `/api-tokens` and our CloudFront since
+> ([[0235]], [[0194]], [[0326]]); the criteria are marked against what replaced
+> them — see [R-live-measurement-2026-10-06](notes/R-live-measurement-2026-10-06.md).
 
 ## Summary
 
@@ -175,28 +193,33 @@ deferred criteria.
 
 ## Acceptance Criteria
 
-- [ ] `/api-tokens` returns `302` to `/api-tokens/`, not `403 AccessDenied`
-- [ ] `/api-tokens/index.html` carries
+- [x] `/api-tokens` returns `302` to `/api-tokens/`, not `403 AccessDenied`
+      — prefix gone; `sorobanscan…/prices-api` answers `301 /prices-api/`
+- [x] `/api-tokens/index.html` carries
       `Cache-Control: public, max-age=0, must-revalidate` — the entry document
       must revalidate, or a visitor keeps booting a stale app from a URL that
-      still resolves
-- [ ] Everything under `/api-tokens/assets/` carries
+      still resolves — `/prices-api/index.html`, measured
+- [x] Everything under `/api-tokens/assets/` carries
       `Cache-Control: public, max-age=31536000, immutable` — safe only because
-      those names are content-hashed, so a new build is a new URL
-- [ ] `/api-tokens/api/a/b/c` returns an empty `404` — greedy matches any depth
-      again, so the depth-3 `403` is gone
-- [ ] The deployed stage carries a throttle entry per verb (`GET`, `POST`,
-      `DELETE`) at 10 req/s burst 40, with caching off
-- [ ] CloudFront access logs are landing in the log bucket, without cookies
-- [ ] `/api-tokens/api/config` still answers `200 {"enabled":false}` with
+      those names are content-hashed, so a new build is a new URL —
+      `/prices-api/assets/`, all 5 files
+- [x] `/api-tokens/api/a/b/c` returns an empty `404` — greedy matches any depth
+      again, so the depth-3 `403` is gone — `/api/a/b/c` on the API host
+- [x] The deployed stage carries a throttle entry per verb (`GET`, `POST`,
+      `DELETE`) at 10 req/s burst 40, with caching off — and `OPTIONS`
+- [x] CloudFront access logs are landing in the log bucket, without cookies
+      — our distribution is gone; the explorer's land, `IncludeCookies: false`
+- [x] `/api-tokens/api/config` still answers `200 {"enabled":false}` with
       `no-store`, and every other path under the prefix still answers an empty
-      `404` — the flag is untouched by this task
-- [ ] `/health`, `/api-docs-json` and `/v1/assets` (keyless → `403`) unchanged
+      `404` — the flag is untouched by this task — `/api/config`, now
+      `{"enabled":true,…}` after [[0194]] opened the portal
+- [x] `/health`, `/api-docs-json` and `/v1/assets` (keyless → `403`) unchanged
       throughout — the data routes must not notice this happening
 - [ ] Both "ahead of the deploy" notes deleted
-- [ ] The synthesized `PortalHosting` template shows the entry-document
+- [x] The synthesized `PortalHosting` template shows the entry-document
       deployment depending on the asset deployment — neither is `DependsOn: null`
-      any more
-- [ ] On a cold cache after the deploy, `/api-tokens/` loads and every asset it
+      any more — no template any more; `sync-portal-explorer` syncs `assets/*`
+      first, sequentially
+- [x] On a cold cache after the deploy, `/api-tokens/` loads and every asset it
       references returns `200`; nothing under `/api-tokens/assets/` answers
-      `403 AccessDenied`
+      `403 AccessDenied` — per-object misses, no invalidation issued
