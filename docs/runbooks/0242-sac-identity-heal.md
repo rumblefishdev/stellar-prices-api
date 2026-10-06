@@ -11,7 +11,7 @@ deletes what is left.
 Observability stacks.
 
 **Read first:** [`0286-reingest-history.md`](0286-reingest-history.md) (phase 3,
-its stages and its orchestrator) and lore task 0242 (decisions D1–D7, PC3, PC6,
+its stages and its orchestrator) and lore task 0242 (decisions D1–D8, PC3, PC6,
 PC9).
 
 ---
@@ -45,13 +45,13 @@ runbook heals the past.
 
 ## 1. Order of events
 
-| #   | Step                                                                                                                                                                                                                | When                                                                                       | Section |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------- |
-| 1   | Seed the 29 classic identities. Works with the `events-backfill` already on ch-prod-01 (D4)                                                                                                                         | After phase-3 stage B (202402–202404), before stage C                                      | §3      |
-| 2   | Re-plan phase 3 to 202609, run stage C with `--to-month 202609` (D4; the plan ended at 202608)                                                                                                                      | After the seed                                                                             | §4a–§4d |
-| 3   | Deploy the PR: Compute (live ledger processor + API), then EventBridge (probe), then Observability. Swap `events-backfill` on ch-prod-01 only between phase-3 stages, never while a month is at its `amm` step (D7) | Once merged. Independent of phase 3 (D4: phase 3 is not held for the code)                 | §4e     |
-| 4   | Residual cleanup (D3)                                                                                                                                                                                               | After stage D (`finish`) AND after the live slice is deployed with at least one cold start | §5      |
-| 5   | Enable the `SacContractIdentities` alarm actions (D6)                                                                                                                                                               | After §5's post-checks are green                                                           | §6      |
+| #   | Step                                                                                                                                                                                                                    | When                                                                                       | Section |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------- |
+| 1   | Seed the 29 classic identities. Works with the `events-backfill` already on ch-prod-01 (D4)                                                                                                                             | After phase-3 stage B (202402–202404), before stage C                                      | §3      |
+| 2   | Re-plan phase 3 to 202609, run stage C with `--to-month 202609` (D4; the plan ended at 202608)                                                                                                                          | After the seed                                                                             | §4a–§4d |
+| 3   | Deploy the PR: Compute (live ledger processor + API), then EventBridge (probe). Not Observability (D8). Swap `events-backfill` on ch-prod-01 only between phase-3 stages, never while a month is at its `amm` step (D7) | Once merged. Independent of phase 3 (D4: phase 3 is not held for the code)                 | §4e     |
+| 4   | Residual cleanup (D3)                                                                                                                                                                                                   | After stage D (`finish`) AND after the live slice is deployed with at least one cold start | §5      |
+| 5   | Deploy Observability with the `SacContractIdentities` alarm actions on (D6, D8)                                                                                                                                         | After §5's post-checks are green                                                           | §6      |
 
 Step 4 waits for the live deploy because until then a warm container that predates
 the seed, or a SAC the seed does not cover, can still mint a contract identity
@@ -399,11 +399,31 @@ done | tee ~/heal-0242/deployed-before.tsv
 
 **Deploy** (AWS shell, `cd infra`):
 
-| Order | Target                                 | Ships                                                                                                                        |
-| ----- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| 1     | `make deploy-production-compute`       | the live ledger processor (proof pre-pass, skip, `SacUnprovenSkipped`) and the API alias                                     |
-| 2     | `make deploy-production-eventbridge`   | `rollup-freshness-probe` with `SacContractIdentities`                                                                        |
-| 3     | `make deploy-production-observability` | `prices-production-ledger-processor-sac-unproven` (actions on) and `prices-production-sac-contract-identities` (actions off) |
+| Order | Target                               | Ships                                                                                    |
+| ----- | ------------------------------------ | ---------------------------------------------------------------------------------------- |
+| 1     | `make deploy-production-compute`     | the live ledger processor (proof pre-pass, skip, `SacUnprovenSkipped`) and the API alias |
+| 2     | `make deploy-production-eventbridge` | `rollup-freshness-probe` with `SacContractIdentities`                                    |
+
+**Observability waits for §6 (D8).** Deployed now, `sac-contract-identities`
+would sit in ALARM, red on the dashboard's Row-0 alarm strip, through stage C,
+stage D and §5. That strip is the SCF evidence of task 0294 (all alarms OK).
+Its two alarms come in §6 instead. Every Observability deploy from a commit
+that holds this PR creates them, so tell the team: no
+`make deploy-production-observability` from `develop` until §6. A deploy that
+cannot wait shows the red tile; its description says it is expected.
+
+Until §6 no alarm watches `SacUnprovenSkipped`. Read it by hand after the cold
+start and at least daily until §6:
+
+```bash
+aws cloudwatch get-metric-statistics --namespace Prices/Ingest --metric-name SacUnprovenSkipped \
+  --dimensions Name=Environment,Value=production \
+  --start-time "$(date -u -d '-1 day' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 3600 --statistics Sum
+```
+
+No datapoints is healthy: the metric is published only when trades were
+skipped. Any datapoint: §9.
 
 **Post-checks.**
 
@@ -415,13 +435,6 @@ done | tee ~/heal-0242/deployed-before.tsv
   `sac_contract_rows` = 36 (the baseline until §5), `be_sac_contracts` ≈ 4,042.
   If the file holds an `errorMessage`, read the metric instead:
   `aws cloudwatch get-metric-statistics --namespace Prices/Rollup --metric-name SacContractIdentities --dimensions Name=Environment,Value=production --start-time "$(date -u -d '-30 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 900 --statistics Maximum`.
-- `aws cloudwatch describe-alarms --alarm-names prices-production-sac-contract-identities --query 'MetricAlarms[0].[ActionsEnabled,StateValue]'`
-  → `false`, `"ALARM"` (or `"INSUFFICIENT_DATA"` before the first probe run).
-  **`ALARM` is expected until §6**: actions off stops notifications, not
-  evaluation, and the metric reads 36 until §5. The alarm shows red on the
-  dashboard's Row-0 alarm strip for the whole window (stage C, stage D, §5); its
-  description says so. Tell whoever reports from that strip (tasks 0294, 0296)
-  before the deploy.
 - `curl -sS -H "x-api-key: $PRICES_API_KEY" "$API/assets/$XLM_SAC" | jq '{asset, code}'` → `"native"`, `"XLM"`.
 
 **`events-backfill` on ch-prod-01.** Build it from the merge commit as in 0286
@@ -429,7 +442,7 @@ done | tee ~/heal-0242/deployed-before.tsv
 and swap only between phase-3 stages, never while a month is at its `amm` step
 (D7). Confirm with the one-ledger dry run of §4b.
 
-**Rollback.** Redeploy the previous commit with the same `make` targets (the
+**Rollback.** Redeploy the previous commit with the same two `make` targets (the
 CodeSha256 in `deployed-before.tsv` is what must come back). On the host,
 `cp -p ~/events-backfill.pre0242 ~/events-backfill`. Nothing in the PR writes a
 schema change.
@@ -764,21 +777,24 @@ from the same identity. Keep the `bak_0242_*` tables until 0242 is closed; then
 
 ---
 
-## 6. Enable the alarm (D6)
+## 6. Deploy Observability with the alarm on (D6, D8)
 
-The `SacContractIdentities` alarm was deployed with its actions off, because
-production read 36 until §5.
+Observability was held back in §4e (D8), so this deploy creates both 0242
+alarms, `prices-production-ledger-processor-sac-unproven` and
+`prices-production-sac-contract-identities`, the second with its actions on.
 
-**Pre-check.** `SacContractIdentities` reads `0` for at least two periods (30 min),
-and
+**Pre-check.** §5g is green and `SacContractIdentities` reads `0` for at least
+two periods (30 min):
 
 ```bash
-aws cloudwatch describe-alarms --alarm-names prices-production-sac-contract-identities \
-  --query 'MetricAlarms[0].StateValue'
+aws cloudwatch get-metric-statistics --namespace Prices/Rollup --metric-name SacContractIdentities \
+  --dimensions Name=Environment,Value=production \
+  --start-time "$(date -u -d '-45 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 900 --statistics Maximum
 ```
 
-prints `"OK"`. CloudWatch notifies only on a transition: enabled while in ALARM,
-the alarm would say nothing about the next mint.
+Every `Maximum` is `0`. Created with its actions on while the metric read 36,
+the alarm would fire at once.
 
 **Run.** Set `opsAlarms.sacContractIdentitiesActionsEnabled` to `true` in
 `infra/envs/production.json` through a PR; once merged:
@@ -787,10 +803,21 @@ the alarm would say nothing about the next mint.
 cd infra && make deploy-production-observability
 ```
 
-**Post-check.** The same `describe-alarms` with `--query 'MetricAlarms[0].ActionsEnabled'`
-prints `true`.
+**Post-check.**
 
-**Rollback.** The same key back to `false`, the same deploy.
+```bash
+aws cloudwatch describe-alarms \
+  --alarm-names prices-production-sac-contract-identities prices-production-ledger-processor-sac-unproven \
+  --query 'MetricAlarms[].[AlarmName,ActionsEnabled,StateValue]' --output text
+```
+
+Both alarms print `True`, then `OK` (`INSUFFICIENT_DATA` until the first
+evaluation). The `INSUFFICIENT_DATA` → `OK` transition sends one OK
+notification: expected.
+
+**Rollback.** The same key back to `false` and the same deploy turns the
+actions off. Redeploying Observability from a commit without this PR removes
+both alarms.
 
 ---
 
