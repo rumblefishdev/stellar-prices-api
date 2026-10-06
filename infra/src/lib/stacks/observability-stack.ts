@@ -345,6 +345,11 @@ export class ObservabilityStack extends cdk.Stack {
    */
   public readonly ledgerProcessorSacUnprovenAlarm: cloudwatch.Alarm;
   /**
+   * Task 0242: a live container started without BE's `is_sac` set, so it mints
+   * an unproven SAC as a `Contract` identity instead of skipping it.
+   */
+  public readonly ledgerProcessorSacCandidatesAlarm: cloudwatch.Alarm;
+  /**
    * Task 0100: the weekly coverage sweep found swap/trade emitters in neither
    * `pool_registry` nor the committed allow-list (layer 3).
    */
@@ -1510,6 +1515,36 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorSacUnprovenAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorSacUnprovenAlarm.addOkAction(snsAction);
+
+    // Task 0242 — the cold start could not read BE's `is_sac` set and the
+    // processor runs on without it rather than failing Init (review of 0242).
+    // Each run of such a container publishes one `SacCandidatesUnavailable`;
+    // nothing is published while the set is loaded.
+    this.ledgerProcessorSacCandidatesAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorSacCandidatesAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-sac-candidates-unavailable`,
+        alarmDescription:
+          'The ledger-processor cold-started without BE\'s is_sac contract set (default.soroban_contracts unreadable as prices_writer: grant, rename or a BE migration). Ingest continues, but until a cold start reads the set again an unproven SAC is minted as a Contract identity instead of being skipped (task 0242). The WARN "is_sac contract set unreadable" carries the error. Fix the read, then force a cold start; SacContractIdentities shows any identity minted meanwhile. Runbook: docs/runbooks/0242-sac-identity-heal.md.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'SacCandidatesUnavailable',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only while the set is missing: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorSacCandidatesAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorSacCandidatesAlarm.addOkAction(snsAction);
 
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage

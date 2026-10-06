@@ -72,6 +72,14 @@ pub const UNREGISTERED_POOL_EVENTS: &str = "UnregisteredPoolEvents";
 /// asset in the same transaction, a shape the resolver does not cover.
 pub const SAC_UNPROVEN_SKIPPED: &str = "SacUnprovenSkipped";
 
+/// One per run of a container whose cold start could not read BE's `is_sac`
+/// set (task 0242). Such a container mints an unproven SAC as a `Contract`
+/// identity instead of skipping it, until its next cold start.
+///
+/// Emitted ONLY while the set is missing, so the alarm on it is `>= 1` over
+/// `NOT_BREACHING`.
+pub const SAC_CANDIDATES_UNAVAILABLE: &str = "SacCandidatesUnavailable";
+
 /// `PutMetricData` accepts at most 150 entries in a datum's `Values` array, so
 /// a run with more INSERTs than that spills into further datums of the same
 /// metric rather than being truncated (or, worse, aggregated back into
@@ -193,6 +201,19 @@ pub fn sac_unproven_metrics(total: u64) -> Vec<Metric> {
     }]
 }
 
+/// The missing-candidates datapoint for one run (task 0242), or nothing when
+/// the cold start read BE's `is_sac` set.
+pub fn sac_candidates_unavailable_metrics(unavailable: bool) -> Vec<Metric> {
+    if !unavailable {
+        return Vec::new();
+    }
+    vec![Metric {
+        name: SAC_CANDIDATES_UNAVAILABLE,
+        unit: Unit::Count,
+        values: vec![1.0],
+    }]
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
 /// `Environment` dimension. One `PutMetricData` call for the whole batch.
 ///
@@ -283,6 +304,17 @@ mod tests {
         assert_eq!(m[0].name, SAC_UNPROVEN_SKIPPED);
         assert_eq!(m[0].unit, Unit::Count);
         assert_eq!(m[0].values, vec![3.0]);
+    }
+
+    /// Task 0242: absent while the set is loaded, one count per run otherwise.
+    #[test]
+    fn missing_sac_candidates_publish_one_per_run() {
+        assert!(sac_candidates_unavailable_metrics(false).is_empty());
+        let m = sac_candidates_unavailable_metrics(true);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].name, SAC_CANDIDATES_UNAVAILABLE);
+        assert_eq!(m[0].unit, Unit::Count);
+        assert_eq!(m[0].values, vec![1.0]);
     }
 
     #[test]

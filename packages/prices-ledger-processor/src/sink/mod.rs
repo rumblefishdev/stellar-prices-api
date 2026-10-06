@@ -30,6 +30,30 @@ pub fn with_sac_candidates(
     registry
 }
 
+/// [`with_sac_candidates`] when BE's `is_sac` set was read, else the registry
+/// as loaded, with no candidates; the flag says which (task 0242 PC3,
+/// reversed in review). An unreadable BE table must not stop live ingest: with
+/// no candidates an unproven SAC mints a `Contract` identity, which the probe's
+/// `SacContractIdentities` counts and the 0242 heal removes, while SDEX, oracle
+/// and AMM candles keep flowing. The caller publishes
+/// `SacCandidatesUnavailable` while the flag is false.
+pub fn arm_sac_candidates(
+    registry: AssetRegistry,
+    sac_contracts: Result<HashSet<String>, SinkError>,
+) -> (AssetRegistry, bool) {
+    match sac_contracts {
+        Ok(set) => (with_sac_candidates(registry, set), true),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "is_sac contract set unreadable: no SAC candidates until the next cold start, \
+                 an unproven SAC mints a Contract identity (task 0242)"
+            );
+            (registry, false)
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SinkError {
     #[error("sink write failed: {0}")]
@@ -132,15 +156,15 @@ impl ClickHouseSink {
     }
 
     /// The registry the live processor ingests with: [`load_registry`] armed
-    /// with BE's `is_sac` set by [`with_sac_candidates`], the two reads joined.
-    /// Either failing fails the cold start: with no candidates an unproven SAC
-    /// would be minted as a `Contract` identity (task 0242 D2, PC3).
+    /// with BE's `is_sac` set by [`arm_sac_candidates`], the two reads joined,
+    /// and whether the set was read. Only the `prices.assets` read fails the
+    /// cold start; an unreadable BE set is a warning and a metric (task 0242).
     ///
     /// [`load_registry`]: ClickHouseSink::load_registry
-    pub async fn load_ingest_registry(&self) -> Result<AssetRegistry, SinkError> {
+    pub async fn load_ingest_registry(&self) -> Result<(AssetRegistry, bool), SinkError> {
         let (registry, sac_contracts) =
             tokio::join!(self.load_registry(), self.load_sac_contracts());
-        Ok(with_sac_candidates(registry?, sac_contracts?))
+        Ok(arm_sac_candidates(registry?, sac_contracts))
     }
 
     /// Preload the discovered AMM pool registry from `prices.pool_registry` so the

@@ -23,7 +23,7 @@ use prices_ledger_processor::{
     galexie_key::ledger_s3_key,
     object_fetcher::{FetchError, ObjectFetcher},
     reconcile::Reconciler,
-    sink::{CandleSink, SinkError, with_sac_candidates},
+    sink::{CandleSink, SinkError, arm_sac_candidates, with_sac_candidates},
 };
 use stellar_xdr::{
     ContractEvent, ContractEventBody, ContractEventType, ContractEventV0, ContractId, Hash,
@@ -197,7 +197,31 @@ fn the_lambda_cold_start_arms_the_sac_candidates() {
         "a registry without candidates"
     );
     let sink = include_str!("../src/sink/mod.rs");
-    assert!(sink.contains("Ok(with_sac_candidates(registry?, sac_contracts?))"));
+    assert!(sink.contains("Ok(arm_sac_candidates(registry?, sac_contracts))"));
+    assert!(main.contains("sac_candidates_unavailable_metrics("));
+}
+
+/// Review of 0242 (PC3 reversed): an unreadable `is_sac` set does not stop
+/// ingest. The flag drops, the SAC set is empty, and an unproven SAC trades
+/// as a `Contract` identity, which the probe counts and the heal removes.
+#[test]
+fn an_unreadable_sac_set_ingests_without_candidates() {
+    let (mut assets, loaded) = arm_sac_candidates(
+        AssetRegistry::from_existing(vec![]),
+        Err(SinkError::Write("Code: 60. Unknown table".to_string())),
+    );
+    assert!(!loaded);
+    let out = run(vec![trade(XLM_SAC, XCR_SAC)], &mut assets);
+    assert!(out.sac_unproven.is_empty(), "not a candidate, not skipped");
+    assert_eq!(out.amm_ticks.len(), 1, "the trade still prices");
+    assert!(holds_contract(&assets, XCR_SAC), "minted, for the probe");
+
+    let (assets, loaded) = arm_sac_candidates(
+        AssetRegistry::from_existing(vec![]),
+        Ok(HashSet::from([XCR_SAC.to_string()])),
+    );
+    assert!(loaded);
+    assert!(assets.is_unproven_sac(XCR_SAC));
 }
 
 /// The fixture constants are pinned by our own derivation, not trusted.

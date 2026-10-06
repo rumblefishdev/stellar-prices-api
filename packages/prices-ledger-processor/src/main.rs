@@ -80,8 +80,10 @@ async fn main() -> Result<(), Error> {
     // - load_ingest_registry: the identities already in `prices.assets`, armed
     //   with the contracts BE flags `is_sac` in `default.soroban_contracts`, read
     //   with prices_writer's SELECT on that table (task 0242). A flagged token no
-    //   SAC proof resolves is skipped, not minted, so a failed read fails Init: an
-    //   empty set would mint (D2). `tests/sac_identity.rs` pins this call.
+    //   SAC proof resolves is skipped, not minted. A failed BE read does NOT fail
+    //   Init: ingest runs without candidates and every invocation publishes
+    //   `SacCandidatesUnavailable` until a cold start reads the set again.
+    //   `tests/sac_identity.rs` pins this call.
     // - load_pool_registry: discovered AMM pool classification from
     //   `prices.pool_registry` (task 0078). The processor writes back only the
     //   pools it learns from factory events (task 0291; `prices_writer` holds
@@ -97,7 +99,7 @@ async fn main() -> Result<(), Error> {
         sink.load_ingest_registry(),
         sink.load_pool_registry(),
     );
-    let registry = registry?;
+    let (registry, sac_candidates_loaded) = registry?;
     let pool_registry = pool_registry?;
 
     // Seed only on a genuinely empty table (true first run); any OTHER read error
@@ -189,7 +191,17 @@ async fn main() -> Result<(), Error> {
         let r = reconciler.clone();
         let cw = cw.clone();
         let env_name = env_name.clone();
-        async move { handler(event, r, max_iterations, cw, env_name).await }
+        async move {
+            handler(
+                event,
+                r,
+                max_iterations,
+                cw,
+                env_name,
+                sac_candidates_loaded,
+            )
+            .await
+        }
     }))
     .await
 }
@@ -200,6 +212,7 @@ async fn handler(
     max_iterations: usize,
     cw: Arc<aws_sdk_cloudwatch::Client>,
     env_name: Arc<String>,
+    sac_candidates_loaded: bool,
 ) -> Result<SqsBatchResponse, Error> {
     let (payload, _ctx) = event.into_parts();
     let mut batch_item_failures = Vec::new();
@@ -242,6 +255,10 @@ async fn handler(
                 ));
                 // Task 0242 — trades skipped on a SAC no proof resolved.
                 m.extend(metrics::sac_unproven_metrics(stats.sac_unproven_skipped));
+                // Task 0242 — this container runs without BE's `is_sac` set.
+                m.extend(metrics::sac_candidates_unavailable_metrics(
+                    !sac_candidates_loaded,
+                ));
                 if let Err(e) = metrics::publish(&cw, &env_name, &m).await {
                     warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
                 }
