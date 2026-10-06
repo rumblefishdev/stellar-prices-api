@@ -13,7 +13,7 @@ use crate::canonical::AssetRegistry;
 use crate::error::IngestError;
 
 /// BE's database, holding `soroban_contracts` and `soroban_events`.
-pub const BE_DATABASE: &str = "default";
+pub const BE_DATABASE: &str = prices_clickhouse::BE_DATABASE;
 /// Ours, holding `assets`.
 pub const PRICES_DATABASE: &str = prices_clickhouse::PROD_DATABASE;
 

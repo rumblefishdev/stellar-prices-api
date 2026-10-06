@@ -511,16 +511,10 @@ pub fn process_soroban_event_rows(
                 .all(|e| e.transaction_index == transaction_index),
             "events of transaction {tx_id} disagree on transaction_index"
         );
-        // Kept identical to `process_ledger`, but in production it learns
-        // nothing: events-backfill streams pool events only, so a SAC's own
-        // transfer/mint/burn/clawback never reaches this seam. There the proofs
-        // come from `preload_sac_resolver` at run start.
-        learn_sacs(
-            events[tx_start..tx_end]
-                .iter()
-                .map(|ev| (ev.contract_id.as_str(), &ev.topics)),
-            assets,
-        );
+        // No `learn_sacs` here, unlike `process_ledger`: events-backfill streams
+        // pool events only, so a SAC's own transfer/mint/burn/clawback never
+        // reaches this seam. Its proofs come from `preload_sac_resolver` at run
+        // start, before the first chunk (`execute`'s test pins the order).
         classify_amm_groups(
             amm_groups,
             transaction_index,

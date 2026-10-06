@@ -271,6 +271,12 @@ impl AssetRegistry {
     }
 
     /// The contracts BE flags `is_sac` (task 0242), replacing any earlier set.
+    ///
+    /// A snapshot: the live processor sets it once per cold start and never
+    /// refreshes it. A SAC deployed while a container stays warm is no
+    /// candidate there, so a trade of it with no in-band proof mints a
+    /// `Contract` identity. The probe's `SacContractIdentities` counts it (a
+    /// known gap, heal runbook §8).
     pub fn set_sac_candidates(&mut self, contracts: HashSet<String>) {
         self.sac_candidates = contracts;
     }

@@ -44,7 +44,7 @@ pub const ASSET_ID_ORPHAN_CANDLES_METRIC: &str = "AssetIdOrphanCandles";
 pub const SAC_CONTRACT_IDENTITIES_METRIC: &str = "SacContractIdentities";
 
 /// BE's database, holding `soroban_contracts` (prices_writer has SELECT on it).
-pub const BE_DATABASE: &str = "default";
+pub const BE_DATABASE: &str = prices_clickhouse::BE_DATABASE;
 
 /// The tier every writer of candles writes; the coarse tiers derive from it.
 pub const ORPHAN_CANDLE_TABLE: &str = "price_ohlcv_1m";
