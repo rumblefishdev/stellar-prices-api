@@ -32,10 +32,6 @@ use crate::price::{price_forming_i128, price_survives_column_scale};
 use crate::tick::TradeTick;
 use crate::writer::OracleSample;
 
-/// AMM token amounts are treated as 7-decimal (Stellar SAC convention). Token
-/// decimals vary; this is a documented sizing-measurement approximation.
-const AMM_AMOUNT_SCALE: u32 = 7;
-
 /// Per-run registries, grown incrementally from in-window factory events.
 ///
 /// Oracle assets are NOT kept here: they are resolved through the same
@@ -195,6 +191,12 @@ pub struct LedgerSoroban {
     /// re-read ledger and in callers that never read the count, so it only
     /// logs at debug level.
     pub unregistered_pool_contracts: Vec<String>,
+    /// The Soroban token behind every AMM trade dropped because its
+    /// `decimals()` is not known yet (task 0329): one entry per unknown leg of
+    /// each dropped trade. A caller that can reach RPC resolves these and
+    /// decodes the ledger again; whatever is still here after that is lost
+    /// volume.
+    pub missing_decimals: Vec<String>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -565,8 +567,13 @@ fn classify_amm_groups(
         match dispatch(&rows, &reg.venue, &reg.phoenix, reg.pair_registries()) {
             Ok(trades) => {
                 for t in trades {
-                    if let Some(tick) = amm_trade_to_tick(&t, transaction_index, closed_at, assets)
-                    {
+                    if let Some(tick) = amm_trade_to_tick(
+                        &t,
+                        transaction_index,
+                        closed_at,
+                        assets,
+                        &mut out.missing_decimals,
+                    ) {
                         out.amm_ticks.push((source, tick));
                     }
                 }
@@ -826,11 +833,15 @@ fn resolve_amm_token(contract_addr: &str, assets: &AssetRegistry) -> AssetIdenti
 }
 
 /// Convert a venue `TradeRow` into a `TradeTick` for the candle accumulator.
+///
+/// `None` also when a leg's decimals are unknown; that leg's contract is then
+/// pushed onto `missing_decimals`.
 fn amm_trade_to_tick(
     trade: &extractors_core::TradeRow,
     transaction_index: u16,
     closed_at: i64,
     assets: &mut AssetRegistry,
+    missing_decimals: &mut Vec<String>,
 ) -> Option<TradeTick> {
     // Collapse a SAC token onto its underlying classic identity (§12.4) so
     // AMM-via-SAC and SDEX-classic share one asset_id; a pure Soroban token keeps
@@ -848,16 +859,34 @@ fn amm_trade_to_tick(
         return None;
     }
 
+    // Task 0329: each leg is scaled by its own token's decimals. A pure Soroban
+    // token whose `decimals()` is not known yet gets no tick at all — never the
+    // fixed 7 this replaced, which put SolvBTC (8) at a tenth of its price and
+    // every 18-decimal token 10^11 too low. Checked before `canonicalise`, so a
+    // dropped trade interns nothing.
+    let (Some(decimals_in), Some(decimals_out)) =
+        (assets.decimals_of(&sold), assets.decimals_of(&bought))
+    else {
+        for leg in [&sold, &bought] {
+            if let AssetIdentity::Contract(addr) = leg
+                && assets.decimals_of(leg).is_none()
+            {
+                missing_decimals.push(addr.clone());
+            }
+        }
+        return None;
+    };
+
     let pair = canonicalise(&sold, &bought, assets);
 
     // Classified on the RAW i128 amounts, in each token's own decimals, BEFORE
-    // the scaling below (task 0286, ADR 0287 §1): `AMM_AMOUNT_SCALE` turns them
-    // into a Decimal, and after that the integer unit the rounding bound reasons
-    // about is gone — every fill would look equally precise.
+    // the scaling below (task 0286, ADR 0287 §1): scaling turns them into a
+    // Decimal, and after that the integer unit the rounding bound reasons about
+    // is gone — every fill would look equally precise.
     let bound_holds = price_forming_i128(trade.amount_in, trade.amount_out);
 
-    let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, AMM_AMOUNT_SCALE).ok()?;
-    let amount_out = Decimal::try_from_i128_with_scale(trade.amount_out, AMM_AMOUNT_SCALE).ok()?;
+    let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, decimals_in).ok()?;
+    let amount_out = Decimal::try_from_i128_with_scale(trade.amount_out, decimals_out).ok()?;
     if amount_in.is_zero() || amount_out.is_zero() {
         return None;
     }
@@ -1628,6 +1657,7 @@ mod tests {
             .register(POOL.to_string(), T0.to_string(), T1.to_string());
 
         let mut assets = AssetRegistry::from_existing(vec![]);
+        assets.set_decimals(T1.to_string(), 7);
         let mut out = LedgerSoroban::default();
         classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
@@ -1825,6 +1855,7 @@ mod tests {
             .register(POOL.to_string(), T0.to_string(), T1.to_string());
 
         let mut assets = AssetRegistry::from_existing(vec![]);
+        assets.set_decimals(T1.to_string(), 7);
         let mut out = LedgerSoroban::default();
         process_soroban_event_rows(SEQ, CLOSED_AT, &[swap], &mut reg, &mut assets, &mut out);
 
@@ -2032,6 +2063,8 @@ mod tests {
         );
 
         let mut assets = AssetRegistry::from_existing(vec![]);
+        // Pinned at 7 so the fixture keeps the scale it was written for.
+        assets.set_decimals(T1.to_string(), 7);
         let tick = amm_trade_to_tick(
             &extractors_core::TradeRow {
                 venue: Venue::Soroswap,
@@ -2049,6 +2082,7 @@ mod tests {
             0,
             1_700_000_000,
             &mut assets,
+            &mut Vec::new(),
         )
         .expect("the swap still produces a tick");
         // T0 is XLM's SAC: the tick carries the collapsed identity (D6).
@@ -2104,16 +2138,30 @@ mod tests {
         }
 
         let mut assets = AssetRegistry::from_existing(vec![]);
+        // Pinned at 7 so the fixture keeps the scale it was written for.
+        assets.set_decimals(T1.to_string(), 7);
 
         assert!(price_forming_i128(2_000, AMOUNT_OUT));
-        let at_floor = amm_trade_to_tick(&trade(2_000, AMOUNT_OUT), 0, 1_700_000_000, &mut assets)
-            .expect("the swap prices");
+        let at_floor = amm_trade_to_tick(
+            &trade(2_000, AMOUNT_OUT),
+            0,
+            1_700_000_000,
+            &mut assets,
+            &mut Vec::new(),
+        )
+        .expect("the swap prices");
         assert_eq!(at_floor.price, Decimal::new(1, 12), "the fixture is 1e-12");
         assert!(at_floor.price_forming, "the floor itself is a price");
 
         assert!(price_forming_i128(1_980, AMOUNT_OUT));
-        let under = amm_trade_to_tick(&trade(1_980, AMOUNT_OUT), 0, 1_700_000_000, &mut assets)
-            .expect("the swap still produces a tick");
+        let under = amm_trade_to_tick(
+            &trade(1_980, AMOUNT_OUT),
+            0,
+            1_700_000_000,
+            &mut assets,
+            &mut Vec::new(),
+        )
+        .expect("the swap still produces a tick");
         assert_eq!(under.price, Decimal::new(99, 14), "the fixture is 9.9e-13");
         assert!(
             !under.price_forming,
@@ -2127,7 +2175,7 @@ mod tests {
 
     /// Task 0286 / ADR 0287 §1 — an AMM fill is classified on the RAW i128
     /// amounts the swap event carries, in each token's own decimals, BEFORE
-    /// `AMM_AMOUNT_SCALE` turns them into `Decimal`s. Once scaled they are
+    /// scaling turns them into `Decimal`s. Once scaled they are
     /// fractions and every fill looks equally precise, so the bound has to be
     /// evaluated on the way in or not at all.
     #[test]
@@ -2156,15 +2204,23 @@ mod tests {
         }
 
         let mut assets = AssetRegistry::from_existing(vec![]);
+        // Pinned at 7 so the fixture keeps the scale it was written for.
+        assets.set_decimals(T1.to_string(), 7);
 
-        let ordinary = amm_trade_to_tick(&trade(1_000_000, 914_145), 4, CLOSED_AT, &mut assets)
-            .expect("an ordinary swap prices");
+        let ordinary = amm_trade_to_tick(
+            &trade(1_000_000, 914_145),
+            4,
+            CLOSED_AT,
+            &mut assets,
+            &mut Vec::new(),
+        )
+        .expect("an ordinary swap prices");
         assert!(
             ordinary.price_forming,
             "a million units against ~914k clears the bound by orders of magnitude"
         );
 
-        let dust = amm_trade_to_tick(&trade(34, 5), 4, CLOSED_AT, &mut assets)
+        let dust = amm_trade_to_tick(&trade(34, 5), 4, CLOSED_AT, &mut assets, &mut Vec::new())
             .expect("a dust swap still produces a tick");
         assert!(
             !dust.price_forming,
@@ -2172,7 +2228,7 @@ mod tests {
         );
         assert_eq!(
             dust.volume_base + dust.volume_quote,
-            Decimal::try_from_i128_with_scale(39, AMM_AMOUNT_SCALE).unwrap(),
+            Decimal::try_from_i128_with_scale(39, 7).unwrap(),
             "the dust fill keeps its volumes: it is a real trade"
         );
 
@@ -2227,12 +2283,19 @@ mod tests {
         reg
     }
 
+    /// SEAM_T0 is XLM's SAC; SEAM_T1 is a pure Soroban token, pinned at 7.
+    fn seam_assets() -> AssetRegistry {
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        assets.set_decimals(SEAM_T1.to_string(), 7);
+        assets
+    }
+
     /// The events-backfill seam carries BE's apply order onto the tick, so a
     /// repriced candle orders its fills exactly like the live path does.
     #[test]
     fn the_seam_carries_the_groups_apply_order_onto_its_ticks() {
         let mut reg = seam_registries();
-        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut assets = seam_assets();
         let mut out = LedgerSoroban::default();
         process_soroban_event_rows(
             SEAM_SEQ,
@@ -2257,7 +2320,7 @@ mod tests {
     #[should_panic(expected = "disagree on transaction_index")]
     fn a_group_disagreeing_on_its_apply_order_is_refused_in_debug() {
         let mut reg = seam_registries();
-        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut assets = seam_assets();
         let mut out = LedgerSoroban::default();
         process_soroban_event_rows(
             SEAM_SEQ,
@@ -2294,8 +2357,139 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let before = assets.assets().count();
-        assert!(amm_trade_to_tick(&trade, 0, 1_700_000_000, &mut assets).is_none());
+        assert!(
+            amm_trade_to_tick(&trade, 0, 1_700_000_000, &mut assets, &mut Vec::new()).is_none()
+        );
         assert_eq!(assets.assets().count(), before, "nothing interned");
+    }
+
+    // ---- task 0329: each leg in its own token's decimals --------------------
+
+    /// SolvBTC, the token SBE reported at a tenth of its price.
+    const SOLVBTC: &str = "CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN";
+
+    fn usdc() -> AssetIdentity {
+        AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: USDC_ISSUER.to_string(),
+        }
+    }
+
+    /// One whole `token` sold for `usdc_raw` stroops of USDC, through its SAC.
+    fn sell_for_usdc(
+        assets: &AssetRegistry,
+        token: &str,
+        token_raw: i128,
+        usdc_raw: i128,
+    ) -> extractors_core::TradeRow {
+        extractors_core::TradeRow {
+            venue: Venue::Aquarius,
+            contract_id: "CDE57N6XTUPBKYYDGQMXX7E7SLNOLFY3JEQB4MULSMR2AKTSAENGX2HC".to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: 100,
+            first_event_index: 0,
+            token_in: token.to_string(),
+            token_out: assets.sac_address_of(&usdc()).expect("USDC has a SAC"),
+            amount_in: token_raw,
+            amount_out: usdc_raw,
+            fee: None,
+            trader: None,
+        }
+    }
+
+    /// The defect SBE reported: amounts were scaled at a fixed 7, so a token
+    /// with d decimals priced at 10^(7 − d) of market. Each case sells exactly
+    /// one whole token for a USDC (7-decimal) amount and must read back that
+    /// amount as the price and one token as the base volume.
+    #[test]
+    fn each_leg_is_scaled_by_its_own_tokens_decimals() {
+        for (decimals, usdc_per_token) in [(8u32, 86_055i128), (18, 1), (6, 2), (7, 41)] {
+            let mut assets = AssetRegistry::from_existing(vec![]);
+            assets.set_decimals(SOLVBTC.to_string(), decimals);
+            let one_token = 10i128.pow(decimals);
+            let trade = sell_for_usdc(&assets, SOLVBTC, one_token, usdc_per_token * 10_000_000);
+
+            let tick = amm_trade_to_tick(&trade, 0, 1_700_000_000, &mut assets, &mut Vec::new())
+                .unwrap_or_else(|| panic!("{decimals}-decimal leg prices"));
+
+            assert_eq!(
+                (&tick.base, &tick.quote),
+                (&AssetIdentity::Contract(SOLVBTC.to_string()), &usdc()),
+                "the token is the base, USDC the quote"
+            );
+            assert_eq!(
+                tick.price,
+                Decimal::from(usdc_per_token),
+                "{decimals} decimals"
+            );
+            assert_eq!(tick.volume_base, Decimal::ONE, "{decimals} decimals");
+            assert_eq!(
+                tick.volume_quote,
+                Decimal::from(usdc_per_token),
+                "{decimals} decimals"
+            );
+        }
+    }
+
+    /// A pure Soroban token whose decimals are unknown is never guessed at 7:
+    /// the trade yields no tick, interns nothing, and every unknown leg is
+    /// reported so the caller can resolve it.
+    #[test]
+    fn a_leg_with_unknown_decimals_prices_nothing_and_is_reported() {
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let before = assets.assets().count();
+        let mut missing = Vec::new();
+        let trade = sell_for_usdc(&assets, SOLVBTC, 100_000_000, 860_550_000_000);
+
+        assert!(amm_trade_to_tick(&trade, 0, 1_700_000_000, &mut assets, &mut missing).is_none());
+        assert_eq!(missing, vec![SOLVBTC.to_string()], "only the unknown leg");
+        assert_eq!(assets.assets().count(), before, "nothing interned");
+
+        // Two unknown legs: both reported, so one resolve pass covers the trade.
+        let other = "CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO";
+        let both = extractors_core::TradeRow {
+            token_out: other.to_string(),
+            ..trade
+        };
+        missing.clear();
+        assert!(amm_trade_to_tick(&both, 0, 1_700_000_000, &mut assets, &mut missing).is_none());
+        assert_eq!(missing, vec![SOLVBTC.to_string(), other.to_string()]);
+    }
+
+    /// The contract the callers rely on: a ledger decoded before a token's
+    /// decimals are known reports the token and prices nothing; decoded again
+    /// once they are set, it prices.
+    #[test]
+    fn a_ledger_decoded_again_after_its_decimals_resolve_prices() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        let events = [seam_swap("tx-a", 0, 0)];
+
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            &events,
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert!(out.amm_ticks.is_empty());
+        assert_eq!(out.missing_decimals, vec![SEAM_T1.to_string()]);
+        assert!(out.unresolved.is_empty(), "a known pool is not unresolved");
+
+        assets.set_decimals(SEAM_T1.to_string(), 7);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            &events,
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(out.amm_ticks.len(), 1);
+        assert!(out.missing_decimals.is_empty());
     }
 }
 

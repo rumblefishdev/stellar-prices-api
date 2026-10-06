@@ -164,7 +164,7 @@ pub fn price_forming_i64(amount_sold: i64, amount_bought: i64) -> bool {
 /// [`rounding_bound_holds`] for a Soroban AMM fill's RAW i128 amounts.
 ///
 /// Must be called on the amounts as the event carries them, in each token's own
-/// decimals — BEFORE `soroban::AMM_AMOUNT_SCALE` converts them to `Decimal`.
+/// decimals — BEFORE they are scaled by those decimals into `Decimal`.
 /// After that conversion the integer unit the bound reasons about is gone, and
 /// every fill looks equally precise.
 pub fn price_forming_i128(amount_in: i128, amount_out: i128) -> bool {
@@ -340,7 +340,7 @@ mod tests {
     }
 
     /// Soroban amounts are raw i128 in each token's own decimals — classified
-    /// BEFORE `AMM_AMOUNT_SCALE`, because after scaling the integer information
+    /// BEFORE scaling, because after scaling the integer information
     /// the bound reads is gone.
     #[test]
     fn the_i128_wrapper_widens_without_losing_the_verdict() {
