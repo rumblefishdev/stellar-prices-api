@@ -5,7 +5,9 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use prices_ingest_core::{AssetRegistry, Registries, UnresolvedPool, UnresolvedPoolSwap};
+use prices_ingest_core::{
+    AssetRegistry, DecimalsResolver, Registries, UnresolvedPool, UnresolvedPoolSwap,
+};
 
 use crate::error::BackfillError;
 use crate::ingest::{
@@ -146,6 +148,12 @@ pub async fn execute(
 
     let existing_assets = sink.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing_assets);
+    // Task 0329: only the AMM path scales by token decimals, so an SDEX-only
+    // run neither reads `prices.asset_decimals` nor needs it to exist.
+    if mode == ExtractMode::Combined {
+        sink.load_decimals(&mut registry).await?;
+    }
+    let mut decimals = DecimalsResolver::from_env();
     // Venue / pool registries. Preloaded from the persisted `pool_registry`
     // artifact (decision #4) so a window starting after activation still
     // resolves earlier-created pools; empty on a fresh full run. Then grown
@@ -193,6 +201,7 @@ pub async fn execute(
                 &completed,
                 &mut registry,
                 &mut reg,
+                &mut decimals,
                 mode,
                 &mut accs,
                 partition_end,

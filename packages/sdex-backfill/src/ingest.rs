@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, OhlcvCandle, Registries, TradeTick, UnresolvedPoolSwap,
-    extract_trades, ledger_sequence, offer_lookup_counts, process_ledger, raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, DecimalsResolver, OhlcvCandle, Registries, TradeTick,
+    UnresolvedPoolSwap, extract_trades, ledger_sequence, offer_lookup_counts, process_ledger,
+    raw_trade_to_tick,
 };
 
 use crate::error::BackfillError;
@@ -333,6 +334,7 @@ pub async fn index_partition(
     completed: &HashSet<u32>,
     registry: &mut AssetRegistry,
     reg: &mut Registries,
+    decimals: &mut DecimalsResolver,
     mode: ExtractMode,
     accs: &mut RunAccumulators,
     end: PartitionEnd,
@@ -401,7 +403,20 @@ pub async fn index_partition(
             // Only in Combined mode — pre-Soroban ledgers carry no Soroban
             // events, so SdexOnly skips the decode entirely.
             if mode == ExtractMode::Combined {
-                let sob = process_ledger(lcm, reg, registry);
+                let mut sob = process_ledger(lcm, reg, registry);
+                // Task 0329: a trade naming a token whose decimals are unknown
+                // was dropped, not guessed. Resolve, persist, decode again —
+                // the same step as the live processor.
+                if !sob.missing_decimals.is_empty() {
+                    let rows = decimals.resolve(&sob.missing_decimals).await;
+                    if !rows.is_empty() {
+                        sink.write_decimals(&rows).await?;
+                        for row in &rows {
+                            row.record(registry);
+                        }
+                        sob = process_ledger(lcm, reg, registry);
+                    }
+                }
                 for (source, tick) in sob.amm_ticks {
                     accs.merge_amm(source, tick);
                     stats.amm_ticks += 1;

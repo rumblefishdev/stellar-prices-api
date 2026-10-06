@@ -63,9 +63,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, OfferLookupCounts, OracleSample, PoolRegistryRow, Registries,
-    decode_object, extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
-    raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, DecimalsResolver, OfferLookupCounts, OracleSample,
+    PoolRegistryRow, Registries, decode_object, extract_trades_with_counts, ledger_close_time,
+    ledger_sequence, process_ledger, raw_trade_to_tick,
 };
 use tokio::sync::Mutex;
 use tracing::info;
@@ -137,6 +137,10 @@ pub struct ProcessingState {
     /// here only *after* the write succeeds, so a failed write is retried next
     /// run. Init: everything loaded at cold start is already in the table.
     pub persisted_pools: HashMap<String, PoolRegistryRow>,
+    /// Resolves Soroban token decimals a decode reports missing (task 0329).
+    /// Warm across invocations, like the registries, so a token that will not
+    /// resolve is not re-asked on every ledger.
+    pub decimals: DecimalsResolver,
 }
 
 /// The cold-start [`ProcessingState`] built from what was loaded.
@@ -160,6 +164,7 @@ fn initial_state(assets: AssetRegistry, mut registries: Registries) -> Processin
         assets,
         registries,
         persisted_pools,
+        decimals: DecimalsResolver::from_env(),
     }
 }
 
@@ -279,7 +284,21 @@ where
                     sdex.merge(raw_trade_to_tick(&trade, &mut state.assets));
                 }
                 // Soroban AMM trades + oracle samples.
-                let sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
+                let mut sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
+                // Task 0329: a trade naming a token whose decimals are not known
+                // yet was dropped, not guessed. Resolve, persist, and decode the
+                // ledger again — decoding is deterministic, and the first
+                // result is discarded whole, so nothing is counted twice.
+                if !sob.missing_decimals.is_empty() {
+                    let rows = state.decimals.resolve(&sob.missing_decimals).await;
+                    if !rows.is_empty() {
+                        self.sink.write_decimals(&rows).await?;
+                        for row in &rows {
+                            row.record(&mut state.assets);
+                        }
+                        sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
+                    }
+                }
                 for (source, tick) in sob.amm_ticks {
                     amm.entry(source).or_default().merge(tick);
                 }
