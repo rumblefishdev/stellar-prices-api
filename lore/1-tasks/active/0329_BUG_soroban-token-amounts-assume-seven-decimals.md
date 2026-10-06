@@ -141,14 +141,66 @@ Rejected:
    range. Coordinate with the phase-3 operator.
 6. Tell Karol (SBE) when prices are correct.
 
+## Implementation (branch `fix/0329_soroban-token-amounts-assume-seven-decimals`)
+
+- `prices_ingest_core::soroban_rpc`: the `simulateTransaction` envelope and the
+  Absent/Transient boundary, moved from asset-discovery's `symbols.rs`, which now
+  delegates to it and re-exports the old names.
+- `AssetRegistry::decimals_of`: classic identities and SACs → 7, a `Contract`
+  → its resolved decimals or `None`. `amm_trade_to_tick` scales each leg by its
+  own decimals. An unknown leg yields no tick, interns nothing, and lands in
+  `LedgerSoroban::missing_decimals`.
+- `prices.asset_decimals` + `OhlcvWriter::{load,write}_decimals` +
+  `DecimalsResolver` (`decimals()` must be a `U32` ≤ 28).
+- Callers decode, resolve what was missing, persist it, record it, and decode
+  that ledger again: the live reconcile loop, `events-backfill`, and
+  `sdex-backfill` in `combined` mode.
+
+### Design decisions
+
+#### Emerged
+
+1. **No `unresolved_pools`-style record for unresolved tokens.** That table is
+   keyed by pool. The resolver WARNs once per contract per retry window, and
+   `events-backfill` prints `trades dropped (decimals): N`, which the 0286
+   runbook now tells the operator to read. The live path has no metric or alarm
+   for it yet.
+2. **A failed contract is retried after 10 minutes, in memory.** Absent and
+   Transient are treated alike, with no `attempts` column. That costs one RPC
+   call per such token per 10 minutes, and stops a token that trades every
+   ledger from costing a 5 s timeout per ledger.
+3. **Decode again rather than a two-phase tick.** Decoding is deterministic and
+   the registry inserts are idempotent map writes, so the first result is
+   discarded whole.
+4. **`CandleSink::write_decimals` defaults to a no-op.** Only `ClickHouseSink`
+   persists. The test sinks need no change.
+5. **`sdex-backfill` reads the table only in `combined` mode.** The 0286 phase-3
+   `sdex-only` runs therefore do not need the table to exist.
+6. **An `events-backfill` dry-run resolves but does not persist.**
+
+### Deploy order
+
+1. Apply `init.sql` on the box: it creates `prices.asset_decimals`. The live
+   processor's init fails without it.
+2. Optional pre-seed, so the first cold start needs no RPC call (the Lambda has
+   a 60 s budget):
+   `INSERT INTO prices.asset_decimals (contract_address, decimals) VALUES ('CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN', 8), ('CBI7UCH5KGSVQRO5H4SUCZUTZABCITZLRHQQZTWL2TK4RZ72TAR6IHRV', 18), ('CB7OOP3VSAWBZOOTOG2YEFANVU45GVWYUUM5HI32DKLHVKUDOFVQ37XP', 6), ('CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO', 9), ('CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL', 18), ('CCT4ZYIYZ3TUO2AWQFEOFGBZ6HQP3GW5TA37CK7CRZVFRDXYTHTYX7KP', 18), ('CAUP7NFABXE5TJRL3FKTPMWRLC7IAXYDCTHQRFSCLR5TMGKHOOQO772J', 8)`
+3. Deploy the ledger processor.
+4. Repair history right away. Until it is repaired, `vwap_24h` blends old and
+   new candles for 24 h, and a `carried` price keeps the old candle. Run
+   `events-backfill` + pre-roll at least over a recent window, and the full
+   range via 0286 phase 3 if stage C has not passed these months yet.
+
 ## Acceptance Criteria
 
-- [ ] Unit test: an 8-, 18- and 6-decimal leg against a 7-decimal leg gives the
-      true price and the true base volume.
-- [ ] A token whose decimals are unresolved never produces a price.
+- [x] Unit test: an 8-, 18- and 6-decimal leg against a 7-decimal leg gives the
+      true price and the true base volume
+      (`each_leg_is_scaled_by_its_own_tokens_decimals`).
+- [x] A token whose decimals are unresolved never produces a price
+      (`a_leg_with_unknown_decimals_prices_nothing_and_is_reported`).
 - [ ] After deploy, all six priced tokens are within a few percent of an
       external reference.
 - [ ] History of the affected assets re-ingested; `price_usd_series*` right over
       the full range, with significant digits restored for the 18-decimal
       tokens.
-- [ ] `amm-trades-schema.md` §3 closed; the `AMM_AMOUNT_SCALE` constant removed.
+- [x] `amm-trades-schema.md` §3 closed; the `AMM_AMOUNT_SCALE` constant removed.
