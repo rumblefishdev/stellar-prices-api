@@ -81,8 +81,8 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
         ("asset_identifier" = String, Path,
          description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
           the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
-          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
-          addresses, which as a rule answer `404`"),
+          asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the \
+          answer names the asset by `CODE:ISSUER` (or `native`)"),
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
          description = "Drop every venue whose trailing 24-hour USD volume is at or below this value, then \
           recompute `vwap_24h` over the venues that remain. Applied exactly as given: it can \
@@ -114,6 +114,10 @@ pub async fn get_price(
     if let Some(resp) = min_volume_error(q.min_volume_usd) {
         return resp;
     }
+    let id = match queries_ch::resolve_sac_alias(state.ch(), id).await {
+        Ok(id) => id,
+        Err(e) => return errors::db_error(&e, "asset lookup"),
+    };
 
     match queries_ch::current_price(state.ch(), &id).await {
         Ok(Some(row)) => {
@@ -143,8 +147,8 @@ pub async fn get_price(
         ("asset_identifier" = String, Path,
          description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
           the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
-          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
-          addresses, which as a rule answer `404`")
+          asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the \
+          answer names the asset by `CODE:ISSUER` (or `native`)")
     ),
     responses(
         (status = 200, description = "Asset detail", body = AssetDetail),
@@ -163,6 +167,10 @@ pub async fn get_asset(
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
+    };
+    let id = match queries_ch::resolve_sac_alias(state.ch(), id).await {
+        Ok(id) => id,
+        Err(e) => return errors::db_error(&e, "asset lookup"),
     };
 
     match queries_ch::asset_detail(state.ch(), &id).await {
@@ -403,8 +411,8 @@ pub struct OhlcvParams {
     params(
         ("asset_identifier" = String, Path, description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
           the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
-          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
-          addresses, which as a rule answer `404`"),
+          asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the \
+          answer names the asset by `CODE:ISSUER` (or `native`)"),
         ("timeframe" = Option<Timeframe>, Query,
          description = "Window ending now: `1h`, `24h` (default), `7d`, `30d`, `1y` or `all` (from Stellar \
           genesis). `start` overrides its start"),
@@ -533,6 +541,10 @@ pub async fn get_ohlcv(
     }
 
     // Resolve the base asset.
+    let id = match queries_ch::resolve_sac_alias(state.ch(), id).await {
+        Ok(id) => id,
+        Err(e) => return errors::db_error(&e, "asset lookup"),
+    };
     let asset_id = match queries_ch::resolve_asset_id(state.ch(), &id).await {
         Ok(Some(a)) => a,
         Ok(None) => return errors::not_found("unknown asset"),
@@ -627,17 +639,13 @@ pub async fn get_ohlcv(
         limit: OHLCV_MAX_POINTS,
     };
     // ADR 0011 §6: canonical USDC is only ever a quote leg, so a normal query
-    // for it matches zero rows and no amount of filter-dropping helps — its
-    // series is synthesized instead. Keyed on the requested identity, not on a
-    // resolved asset_id, because 0139 has ids serving more than one identity.
-    // ADR 0011 §6: canonical USDC is only ever a quote leg, so a normal query
     // for it matches zero rows in EITHER denomination and no amount of
     // filter-dropping helps — its series is synthesized instead.
     //
     // Matched on the natural identity (case-insensitively: `AssetIdentifier`
-    // preserves the code's case verbatim) OR on the resolved id. The id arm is
-    // what catches USDC addressed by its SAC contract address, which is a
-    // different identity for the same asset.
+    // preserves the code's case verbatim) OR on the resolved id. USDC's SAC
+    // address already arrives here as the classic identity (task 0242 alias);
+    // the id arm stays as a backstop.
     // ⚠️ [[0139]] means an `asset_id` can serve more than one identity, so the
     // id arm could in principle route a colliding asset here. Accepted: the
     // alternative is that a legitimate USDC identity silently falls back to the

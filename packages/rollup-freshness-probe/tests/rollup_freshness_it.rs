@@ -1929,3 +1929,146 @@ async fn an_empty_registry_or_window_is_refused_as_unreadable() {
 
     drop_scratch_db(db).await;
 }
+
+// ---- Task 0242: SAC contract identities -------------------------------------
+//
+// A scratch prices database plus a scratch BE database holding only
+// `soroban_contracts` (DDL as coverage_sweep_it.rs), read through the
+// production query.
+
+const XCR_SAC: &str = "CDJQXBQO5ICVQUPHZHW7SHOM56K2UNNPPAIXUUSA3XACEI6Q4JQLXNVI";
+const XCR: AssetFixture = AssetFixture::new(
+    "XCR",
+    "classic",
+    "GBLJBHWVORDFI4J7CLBDRPECMYT3XO5S6GERXGC74VXOJMZPLI6ZU3S7",
+    "",
+)
+.with_sac(XCR_SAC);
+const XCR_AS_CONTRACT: AssetFixture = AssetFixture::new("", "soroban", "", XCR_SAC);
+/// An is_sac contract whose classic `assets` never held.
+const ORPHAN_SAC: &str = "CORPHANSACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const ORPHAN_SAC_ROW: AssetFixture = AssetFixture::new("", "soroban", "", ORPHAN_SAC);
+const TOKEN: &str = "CGENUINETOKENXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const TOKEN_ROW: AssetFixture = AssetFixture::new("", "soroban", "", TOKEN);
+
+async fn scratch_be_db(db: &str) {
+    let admin = Client::default().with_url(ch_url());
+    exec(&admin, &format!("DROP DATABASE IF EXISTS {db}")).await;
+    exec(&admin, &format!("CREATE DATABASE {db}")).await;
+    exec(
+        &admin,
+        &format!(
+            "CREATE TABLE {db}.soroban_contracts (
+                id                       Int64,
+                contract_id              String,
+                wasm_hash                Nullable(FixedString(32)),
+                wasm_uploaded_at_ledger  Int64 DEFAULT 0,
+                deployer_id              Nullable(Int64),
+                deployed_at_ledger       Nullable(Int64),
+                contract_type            Nullable(Int16),
+                is_sac                   Bool
+            )
+            ENGINE = ReplacingMergeTree(wasm_uploaded_at_ledger)
+            ORDER BY (contract_id)"
+        ),
+    )
+    .await;
+}
+
+async fn be_contract(be: &str, contract: &str, is_sac: bool) {
+    let admin = Client::default().with_url(ch_url());
+    exec(
+        &admin,
+        &format!(
+            "INSERT INTO {be}.soroban_contracts (id, contract_id, is_sac) \
+             VALUES (1, '{contract}', {is_sac})"
+        ),
+    )
+    .await;
+}
+
+async fn read_sac_contracts(
+    c: &Client,
+    be: &str,
+) -> rollup_freshness_probe::asset_id_uniqueness::SacContractCounts {
+    c.query(&rollup_freshness_probe::asset_id_uniqueness::sac_contract_identities_query(be))
+        .fetch_one()
+        .await
+        .expect("the SAC-identity query executes and deserializes")
+}
+
+/// A contract row is counted through either disjunct: XCR's SAC through the
+/// classic row's `sac_address`, a SAC with no classic through BE's `is_sac`.
+/// A genuine token is scanned, not counted.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn sac_contract_identities_counts_both_disjuncts_and_not_a_token() {
+    use rollup_freshness_probe::asset_id_uniqueness::sac_contract_identities_metric;
+
+    let (db, be) = ("it_probe_0242_sac", "it_probe_0242_sac_be");
+    let c = scratch_db(db).await;
+    scratch_be_db(be).await;
+    // XCR_SAC is deliberately absent from BE: the first disjunct alone counts it.
+    // ORPHAN_SAC on two unmerged versions still counts once in be_sacs.
+    be_contract(be, ORPHAN_SAC, true).await;
+    be_contract(be, ORPHAN_SAC, true).await;
+    be_contract(be, TOKEN, false).await;
+
+    let cases = [
+        (XCR, (0, 0), "classic only: no contract row"),
+        (XCR_AS_CONTRACT, (1, 1), "XCR's SAC via sac_address"),
+        (ORPHAN_SAC_ROW, (2, 2), "a SAC with no classic via is_sac"),
+        (TOKEN_ROW, (2, 3), "a genuine token is not a SAC"),
+    ];
+    for (row, (sac_rows, scanned), why) in cases {
+        exec(&c, &assets_insert(db, &[row])).await;
+        let counts = read_sac_contracts(&c, be).await;
+        assert_eq!(
+            (counts.sac_rows, counts.scanned),
+            (sac_rows, scanned),
+            "{why}"
+        );
+        assert_eq!(counts.be_sacs, 1, "{why}");
+        if scanned > 0 {
+            assert_eq!(
+                sac_contract_identities_metric(&counts).unwrap().value,
+                sac_rows as f64,
+                "{why}"
+            );
+        }
+    }
+
+    drop_scratch_db(db).await;
+    drop_scratch_db(be).await;
+}
+
+/// No contract row, or no is_sac contract in BE, is unreadable: refused rather
+/// than published as a healthy 0.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn sac_contract_identities_refuses_an_empty_scan_or_be_set() {
+    use rollup_freshness_probe::asset_id_uniqueness::{
+        UniquenessRefusal, sac_contract_identities_metric,
+    };
+
+    let (db, be) = ("it_probe_0242_sac_empty", "it_probe_0242_sac_empty_be");
+    let c = scratch_db(db).await;
+    scratch_be_db(be).await;
+    be_contract(be, ORPHAN_SAC, true).await;
+    exec(&c, &assets_insert(db, &[XCR])).await;
+    assert_eq!(
+        sac_contract_identities_metric(&read_sac_contracts(&c, be).await),
+        Err(UniquenessRefusal::NoContractRows)
+    );
+
+    scratch_be_db(be).await;
+    be_contract(be, TOKEN, false).await;
+    exec(&c, &assets_insert(db, &[TOKEN_ROW])).await;
+    assert_eq!(
+        sac_contract_identities_metric(&read_sac_contracts(&c, be).await),
+        Err(UniquenessRefusal::EmptyBeSacSet)
+    );
+
+    drop_scratch_db(db).await;
+    drop_scratch_db(be).await;
+}

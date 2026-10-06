@@ -116,6 +116,10 @@ pub struct RunStats {
     /// missing from the registry — dropped, not priced (task 0291). Counted over
     /// the minutes this run WROTE, like `offer_lookups`. Empty when healthy.
     pub unregistered_pool_events: BTreeMap<&'static str, u64>,
+    /// Trades skipped because a leg is an `is_sac` contract no SAC proof
+    /// resolved (task 0242 D2). Counted over the minutes this run WROTE, like
+    /// `unregistered_pool_events`. 0 when healthy.
+    pub sac_unproven_skipped: u64,
     /// Candle-INSERT latency for this run, or `None` when the run wrote no
     /// candles at all. `None` rather than a zeroed struct so an idle run
     /// publishes no `ClickHouseWriteLatencyMs` datapoint instead of a 0 ms one
@@ -256,6 +260,9 @@ where
         // minute closes.
         let mut ledger_unregistered: Vec<(u32, &'static str, u32)> = Vec::new();
         let mut ledger_unregistered_contracts: Vec<(u32, String)> = Vec::new();
+        // (minute_start, contract) per trade skipped on an unproven SAC (task
+        // 0242), per ledger for the same reason.
+        let mut ledger_sac_unproven: Vec<(u32, String)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -300,6 +307,7 @@ where
                         .iter()
                         .map(|c| (minute, c.clone())),
                 );
+                ledger_sac_unproven.extend(sob.sac_unproven.into_iter().map(|c| (minute, c)));
                 obj_max = obj_max.max(seq);
             }
             // Flag only this object's HIGHEST ledger as a valid cursor landing
@@ -326,6 +334,7 @@ where
                 rows_emitted: 0,
                 pools_persisted: 0,
                 unregistered_pool_events: BTreeMap::new(),
+                sac_unproven_skipped: 0,
                 // Nothing was persisted, so no INSERT happened: no datapoint.
                 ch_write: None,
             });
@@ -486,6 +495,7 @@ where
                 // Pools are dimension rows written above, like the assets.
                 pools_persisted,
                 unregistered_pool_events: BTreeMap::new(),
+                sac_unproven_skipped: 0,
                 ch_write: None,
             });
         };
@@ -566,6 +576,19 @@ where
                 "dropped trades from pools missing from prices.pool_registry (task 0291)"
             );
         }
+        let sac_unproven: Vec<&str> = ledger_sac_unproven
+            .iter()
+            .filter(|(minute, _)| *minute < flush_boundary)
+            .map(|(_, c)| c.as_str())
+            .collect();
+        if !sac_unproven.is_empty() {
+            let contracts: BTreeSet<&str> = sac_unproven.iter().copied().collect();
+            tracing::warn!(
+                skipped = sac_unproven.len(),
+                ?contracts,
+                "skipped trades on is_sac contracts with no SAC proof (task 0242)"
+            );
+        }
         info!(
             start,
             end = current,
@@ -590,6 +613,7 @@ where
             rows_emitted,
             pools_persisted,
             unregistered_pool_events,
+            sac_unproven_skipped: sac_unproven.len() as u64,
             ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })
     }

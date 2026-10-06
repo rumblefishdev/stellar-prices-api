@@ -160,6 +160,10 @@ Four of those steps exist because of one fact and nothing else:
   wrapper exists to prevent. Watch `restarts.log` and answer the prompt, or run
   those stages without the wrapper.
 
+  Before stage C: the task-0242 seed, then `plan` and `run` with
+  `--to-month 202609` ([`0242-sac-identity-heal.md`](0242-sac-identity-heal.md)
+  §1, §3, §4).
+
 - `events-backfill` reads `default.*` AND writes `prices.*`, so it runs **on the
   CH host as the `default` user** against `localhost:8123` — the prices mTLS user
   cannot read `default.*`
@@ -456,6 +460,16 @@ negative apply order:      0
 **Anything but `0` means those fills ARE in the wrong order and the month is NOT
 repaired** — do not record it as done. The run also emits one WARN, once, naming
 the first ledger and `application_order` it saw.
+
+Since task 0242 the summary also prints `unproven sac swaps: N`: swaps skipped
+because a leg is a contract BE flags `is_sac` and no proof resolved it. Anything
+but `0` means the month is NOT complete, and the orchestrator STOPs on it after
+either pass. After the `--dry-run` pass no AMM candle is written, but the month's
+`1m` is already dropped and holds SDEX-only candles; after the write pass its AMM
+candles lack those swaps. The STOP names the pass. A binary built before 0242 prints
+no such line and is not checked. What to do:
+[`0242-sac-identity-heal.md`](0242-sac-identity-heal.md) §4c, and §4d for
+`--amm wait`, where `amm-done` does not read the line.
 
 ---
 

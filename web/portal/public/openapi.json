@@ -234,7 +234,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the answer names the asset by `CODE:ISSUER` (or `native`)",
             "required": true,
             "schema": {
               "type": "string"
@@ -325,7 +325,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the answer names the asset by `CODE:ISSUER` (or `native`)",
             "required": true,
             "schema": {
               "type": "string"
@@ -471,7 +471,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the answer names the asset by `CODE:ISSUER` (or `native`)",
             "required": true,
             "schema": {
               "type": "string"
@@ -633,7 +633,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the answer names the asset by `CODE:ISSUER` (or `native`)",
             "required": true,
             "schema": {
               "type": "string"
@@ -718,7 +718,7 @@
       "post": {
         "tags": ["prices"],
         "summary": "`POST /prices/batch` — current prices for many assets in one call.",
-        "description": "The same snapshot `GET /assets/{asset_identifier}/price` returns, for up to 100 assets\nin one request. The whole list is validated first: a malformed identifier, an empty list\nor more than 100 entries fails the entire request with a 400. Assets without a current\nprice are listed in `not_found` instead of failing the call. Results follow the order of\nthe request; a duplicated identifier is answered each time. Not cached.",
+        "description": "The same snapshot `GET /assets/{asset_identifier}/price` returns, for up to 100 assets\nin one request. The whole list is validated first: a malformed identifier, an empty list\nor more than 100 entries fails the entire request with a 400. Assets without a current\nprice are listed in `not_found` instead of failing the call. `prices` follows the order of the\nrequest with the not-found identifiers left out, and a duplicated identifier is answered each\ntime. Each entry's `asset` is the canonical identifier of the asset found: a classic asset's\nStellar Asset Contract address is answered as `CODE:ISSUER` (or `native`), so a request naming\nboth forms gets two identical entries. `not_found` echoes each identifier as it was asked,\nin canonical form. Not cached.",
         "operationId": "post_batch",
         "requestBody": {
           "content": {

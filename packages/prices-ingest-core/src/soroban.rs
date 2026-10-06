@@ -195,6 +195,10 @@ pub struct LedgerSoroban {
     /// re-read ledger and in callers that never read the count, so it only
     /// logs at debug level.
     pub unregistered_pool_contracts: Vec<String>,
+    /// One entry per trade skipped because a leg is a contract BE flags
+    /// `is_sac` that no SAC proof resolved, holding that leg's address (task
+    /// 0242 D2). Minting it as a `Contract` identity would split its asset.
+    pub sac_unproven: Vec<String>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -301,6 +305,37 @@ fn signature(topics: &Value) -> Option<&str> {
     topic_symbol(topics, 0)
 }
 
+/// The SEP-11 asset a SAC names in its own `transfer`/`mint`/`burn`/`clawback`
+/// event: the last topic, when it is a string (task 0242). Only a claim until
+/// [`AssetRegistry::learn_sac`] checks it against the emitter.
+fn sac_proof(topics: &Value) -> Option<&str> {
+    if !matches!(
+        signature(topics),
+        Some("transfer" | "mint" | "burn" | "clawback")
+    ) {
+        return None;
+    }
+    let last = topics.as_array()?.last()?.as_object()?;
+    match last.get("type")?.as_str()? {
+        "string" | "str" => last.get("value")?.as_str(),
+        _ => None,
+    }
+}
+
+/// Feed every SAC proof among one transaction's events to the registry, before
+/// its trades are classified, so event order inside the transaction does not
+/// matter (task 0242 D1).
+fn learn_sacs<'a>(
+    events: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    assets: &mut AssetRegistry,
+) {
+    for (contract_id, topics) in events {
+        if let Some(sep11) = sac_proof(topics) {
+            assets.learn_sac(contract_id, sep11);
+        }
+    }
+}
+
 /// Process all Soroban events in one ledger.
 pub fn process_ledger(
     lcm: &LedgerCloseMeta,
@@ -346,6 +381,13 @@ pub fn process_ledger(
             }
         }
 
+        learn_sacs(
+            events
+                .iter()
+                .filter(|ev| ev.source != EventSource::Diagnostic)
+                .filter_map(|ev| Some((ev.contract_id.as_deref()?, &ev.topics))),
+            assets,
+        );
         classify_amm_groups(
             amm_groups,
             tx_index as u16,
@@ -469,6 +511,10 @@ pub fn process_soroban_event_rows(
                 .all(|e| e.transaction_index == transaction_index),
             "events of transaction {tx_id} disagree on transaction_index"
         );
+        // No `learn_sacs` here, unlike `process_ledger`: events-backfill streams
+        // pool events only, so a SAC's own transfer/mint/burn/clawback never
+        // reaches this seam. Its proofs come from `preload_sac_resolver` at run
+        // start, before the first chunk (`execute`'s test pins the order).
         classify_amm_groups(
             amm_groups,
             transaction_index,
@@ -565,6 +611,14 @@ fn classify_amm_groups(
         match dispatch(&rows, &reg.venue, &reg.phoenix, reg.pair_registries()) {
             Ok(trades) => {
                 for t in trades {
+                    // Before `canonicalise`, so a skipped trade interns nothing.
+                    if let Some(sac) = [&t.token_in, &t.token_out]
+                        .into_iter()
+                        .find(|c| assets.is_unproven_sac(c))
+                    {
+                        out.sac_unproven.push(sac.clone());
+                        continue;
+                    }
                     if let Some(tick) = amm_trade_to_tick(&t, transaction_index, closed_at, assets)
                     {
                         out.amm_ticks.push((source, tick));
@@ -818,7 +872,8 @@ fn first_address(v: &Value) -> Option<String> {
 
 /// Resolve an AMM token (contract address) to a canonical `AssetIdentity`: the
 /// underlying classic asset if the address is a known SAC (§12.4), else the
-/// `Contract` identity for a pure Soroban token.
+/// `Contract` identity for a pure Soroban token. Only tokens BE does not flag
+/// `is_sac` reach the fallback: an unproven SAC is skipped earlier (task 0242).
 fn resolve_amm_token(contract_addr: &str, assets: &AssetRegistry) -> AssetIdentity {
     assets
         .resolve_sac(contract_addr)
@@ -1001,6 +1056,37 @@ mod tests {
             }
             _ => panic!("expected map"),
         }
+    }
+
+    #[test]
+    fn sac_proof_reads_a_string_last_topic_of_a_sac_signature() {
+        // Task 0242: transfer/mint/burn/clawback carry the SEP-11 asset last.
+        let topics = |sig: &str, last: Value| {
+            json!([
+                {"type":"sym","value":sig},
+                {"type":"address","value":"GFROM"},
+                last
+            ])
+        };
+        let s = |v: &str| json!({"type":"string","value":v});
+        let cases: [(&str, Value, Option<&str>); 8] = [
+            ("transfer", s("XCR:G"), Some("XCR:G")),
+            ("mint", s("native"), Some("native")),
+            ("burn", s("XCR:G"), Some("XCR:G")),
+            (
+                "clawback",
+                json!({"type":"str","value":"XCR:G"}),
+                Some("XCR:G"),
+            ),
+            ("swap", s("XCR:G"), None),
+            ("approve", s("XCR:G"), None),
+            ("transfer", json!({"type":"address","value":"GTO"}), None),
+            ("transfer", json!({"type":"sym","value":"XCR"}), None),
+        ];
+        for (sig, last, want) in cases {
+            assert_eq!(sac_proof(&topics(sig, last.clone())), want, "{sig} {last}");
+        }
+        assert_eq!(sac_proof(&json!([])), None, "empty topics");
     }
 
     #[test]

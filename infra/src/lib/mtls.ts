@@ -55,7 +55,9 @@ export function secretsManagerLayerArn(region: string): string {
  *   `default.soroban_contracts` over this identity; those two SELECTs are
  *   BE's to grant (request text: docs/runbooks/0100-coverage-sweep-triage.md
  *   §4.1), and until they land the probe fails with Code 497. A dedicated
- *   read-only identity for it is task 0258's later clean-up.
+ *   read-only identity for it is task 0258's later clean-up. Task 0242 also
+ *   reads `default.soroban_contracts` over it, from the ledger processor's
+ *   cold start and the rollup-freshness probe.
  * - `api`       → CH user `prices_reader` (axum read handlers;
  *   `SELECT ON prices.*`).
  */
