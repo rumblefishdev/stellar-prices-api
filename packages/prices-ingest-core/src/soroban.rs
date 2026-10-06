@@ -194,9 +194,12 @@ pub struct LedgerSoroban {
     /// The Soroban token behind every AMM trade dropped because its
     /// `decimals()` is not known yet (task 0329): one entry per unknown leg of
     /// each dropped trade. A caller that can reach RPC resolves these and
-    /// decodes the ledger again; whatever is still here after that is lost
-    /// volume.
+    /// decodes the ledger again.
     pub missing_decimals: Vec<String>,
+    /// How many AMM trades were dropped for that reason — trades, not legs.
+    /// Whatever is still counted after the caller's second decode is lost
+    /// volume.
+    pub trades_missing_decimals: u32,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -567,6 +570,7 @@ fn classify_amm_groups(
         match dispatch(&rows, &reg.venue, &reg.phoenix, reg.pair_registries()) {
             Ok(trades) => {
                 for t in trades {
+                    let unknown_legs = out.missing_decimals.len();
                     if let Some(tick) = amm_trade_to_tick(
                         &t,
                         transaction_index,
@@ -575,6 +579,8 @@ fn classify_amm_groups(
                         &mut out.missing_decimals,
                     ) {
                         out.amm_ticks.push((source, tick));
+                    } else if out.missing_decimals.len() > unknown_legs {
+                        out.trades_missing_decimals += 1;
                     }
                 }
             }
@@ -2476,6 +2482,7 @@ mod tests {
         );
         assert!(out.amm_ticks.is_empty());
         assert_eq!(out.missing_decimals, vec![SEAM_T1.to_string()]);
+        assert_eq!(out.trades_missing_decimals, 1);
         assert!(out.unresolved.is_empty(), "a known pool is not unresolved");
 
         assets.set_decimals(SEAM_T1.to_string(), 7);
@@ -2490,6 +2497,7 @@ mod tests {
         );
         assert_eq!(out.amm_ticks.len(), 1);
         assert!(out.missing_decimals.is_empty());
+        assert_eq!(out.trades_missing_decimals, 0);
     }
 }
 

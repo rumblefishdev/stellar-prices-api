@@ -116,6 +116,10 @@ pub struct RunStats {
     /// missing from the registry — dropped, not priced (task 0291). Counted over
     /// the minutes this run WROTE, like `offer_lookups`. Empty when healthy.
     pub unregistered_pool_events: BTreeMap<&'static str, u64>,
+    /// AMM trades dropped because a leg's token decimals did not resolve over
+    /// RPC, even after the second decode (task 0329). Counted over the minutes
+    /// this run WROTE, like `unregistered_pool_events`. 0 when healthy.
+    pub trades_missing_decimals: u64,
     /// Candle-INSERT latency for this run, or `None` when the run wrote no
     /// candles at all. `None` rather than a zeroed struct so an idle run
     /// publishes no `ClickHouseWriteLatencyMs` datapoint instead of a 0 ms one
@@ -261,6 +265,9 @@ where
         // minute closes.
         let mut ledger_unregistered: Vec<(u32, &'static str, u32)> = Vec::new();
         let mut ledger_unregistered_contracts: Vec<(u32, String)> = Vec::new();
+        // (minute_start, trades, contracts) dropped because a token's decimals
+        // did not resolve (task 0329). Per ledger for the same reason as above.
+        let mut ledger_missing_decimals: Vec<(u32, u32, Vec<String>)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -319,6 +326,13 @@ where
                         .iter()
                         .map(|c| (minute, c.clone())),
                 );
+                if sob.trades_missing_decimals > 0 {
+                    ledger_missing_decimals.push((
+                        minute,
+                        sob.trades_missing_decimals,
+                        sob.missing_decimals,
+                    ));
+                }
                 obj_max = obj_max.max(seq);
             }
             // Flag only this object's HIGHEST ledger as a valid cursor landing
@@ -345,6 +359,7 @@ where
                 rows_emitted: 0,
                 pools_persisted: 0,
                 unregistered_pool_events: BTreeMap::new(),
+                trades_missing_decimals: 0,
                 // Nothing was persisted, so no INSERT happened: no datapoint.
                 ch_write: None,
             });
@@ -505,6 +520,7 @@ where
                 // Pools are dimension rows written above, like the assets.
                 pools_persisted,
                 unregistered_pool_events: BTreeMap::new(),
+                trades_missing_decimals: 0,
                 ch_write: None,
             });
         };
@@ -585,6 +601,25 @@ where
                 "dropped trades from pools missing from prices.pool_registry (task 0291)"
             );
         }
+        let flushed_missing_decimals: Vec<&(u32, u32, Vec<String>)> = ledger_missing_decimals
+            .iter()
+            .filter(|(minute, _, _)| *minute < flush_boundary)
+            .collect();
+        let trades_missing_decimals: u64 = flushed_missing_decimals
+            .iter()
+            .map(|(_, n, _)| *n as u64)
+            .sum();
+        if trades_missing_decimals > 0 {
+            let contracts: BTreeSet<&str> = flushed_missing_decimals
+                .iter()
+                .flat_map(|(_, _, c)| c.iter().map(String::as_str))
+                .collect();
+            tracing::warn!(
+                trades_missing_decimals,
+                ?contracts,
+                "dropped AMM trades whose token decimals did not resolve (task 0329)"
+            );
+        }
         info!(
             start,
             end = current,
@@ -609,6 +644,7 @@ where
             rows_emitted,
             pools_persisted,
             unregistered_pool_events,
+            trades_missing_decimals,
             ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })
     }

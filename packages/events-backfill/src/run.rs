@@ -104,7 +104,7 @@ fn accumulate_ledger(
     raw_unresolved: &mut Vec<UnresolvedPoolSwap>,
     missing_decimals: &mut u64,
 ) {
-    *missing_decimals += out.missing_decimals.len() as u64;
+    *missing_decimals += out.trades_missing_decimals as u64;
     for (source, tick) in out.amm_ticks {
         accumulators.entry(source).or_default().merge(tick);
         *ticks_by_source.entry(source).or_default() += 1;
@@ -260,8 +260,8 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // not cover this ledger" — it can only be a corrupt or unexpected row, and
     // any non-zero count means those fills ARE in the wrong order.
     let mut apply_order_fallbacks: u64 = 0;
-    // Unknown-decimals legs of AMM trades the run could not reprice because
-    // the token's `decimals()` did not resolve (task 0329).
+    // AMM trades the run could not reprice because a token's `decimals()` did
+    // not resolve (task 0329) — trades, not legs.
     let mut missing_decimals: u64 = 0;
 
     // Run-level state (persists across chunks): one accumulator per source and

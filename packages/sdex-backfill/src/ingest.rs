@@ -33,6 +33,10 @@ pub struct PartitionStats {
     pub skipped: usize,
     pub trade_ticks: usize,
     pub amm_ticks: usize,
+    /// AMM trades dropped because a token's decimals did not resolve over RPC
+    /// (task 0329). Their ledgers are still marked done, so a non-zero total
+    /// means a range to reprice.
+    pub trades_missing_decimals: usize,
     pub oracle_rows: usize,
     pub candles_written: usize,
     pub total_bytes: u64,
@@ -416,6 +420,7 @@ pub async fn index_partition(
                         }
                         sob = process_ledger(lcm, reg, registry);
                     }
+                    stats.trades_missing_decimals += sob.trades_missing_decimals as usize;
                 }
                 for (source, tick) in sob.amm_ticks {
                     accs.merge_amm(source, tick);
@@ -485,6 +490,7 @@ pub async fn index_partition(
         skipped = stats.skipped,
         trade_ticks = stats.trade_ticks,
         amm_ticks = stats.amm_ticks,
+        trades_missing_decimals = stats.trades_missing_decimals,
         oracle_rows = stats.oracle_rows,
         candles = stats.candles_written,
         bytes = stats.total_bytes,

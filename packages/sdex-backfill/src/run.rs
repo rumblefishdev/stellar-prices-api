@@ -212,6 +212,7 @@ pub async fn execute(
             totals.skipped += stats.skipped;
             totals.trade_ticks += stats.trade_ticks;
             totals.amm_ticks += stats.amm_ticks;
+            totals.trades_missing_decimals += stats.trades_missing_decimals;
             totals.oracle_rows += stats.oracle_rows;
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
@@ -543,6 +544,13 @@ fn print_run_summary(
     println!("ledgers already in DB:     {}", totals.skipped);
     println!("SDEX trade ticks:          {}", totals.trade_ticks);
     println!("AMM trade ticks:           {}", totals.amm_ticks);
+    // Always printed, 0 included. Non-zero: a token's decimals() did not
+    // resolve, its trades are NOT in the candles, and their ledgers are marked
+    // done anyway — reprice that range (task 0329).
+    println!(
+        "trades dropped (decimals): {}",
+        totals.trades_missing_decimals
+    );
     println!("oracle rows:               {}", totals.oracle_rows);
     println!("price_ohlcv_1m rows:       {}", totals.candles_written);
     println!("total bytes downloaded:    {}", totals.total_bytes);
