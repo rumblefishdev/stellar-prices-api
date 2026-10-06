@@ -2,7 +2,7 @@
 id: '0205'
 title: 'Deploy the portal gateway mapping and verify it live — three deploys 0184 merged but never shipped'
 type: CHORE
-status: active
+status: completed
 related_adr: []
 related_tasks: ['0184', '0183', '0185', '0186', '0194', '0141', '0195', '0235', '0309', '0326']
 tags:
@@ -90,6 +90,15 @@ history:
       replaced their subject. Open: the stale notes about the intermediate
       mapping, in the gateway docblock, the OAuth deploy runbook and
       [[0184]]'s record.
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      Closed with no deploy: the portal this task was written for no longer
+      exists. 11 of 11 criteria met — 8 against today's subject, 3 (redirect,
+      access logs, DependsOn) against what replaced theirs. The last one was
+      the stale notes: the gateway docblock, the OAuth deploy runbook and
+      [[0184]]'s record, on this branch. No code change, no follow-up tasks.
 ---
 
 # Deploy the portal gateway mapping and verify it live
@@ -215,7 +224,9 @@ deferred criteria.
       `{"enabled":true,…}` after [[0194]] opened the portal
 - [x] `/health`, `/api-docs-json` and `/v1/assets` (keyless → `403`) unchanged
       throughout — the data routes must not notice this happening
-- [ ] Both "ahead of the deploy" notes deleted
+- [x] Both "ahead of the deploy" notes deleted — the `api-endpoints.md` one was
+      already gone; removed the gateway docblock's, the OAuth runbook's and
+      [[0184]]'s
 - [x] The synthesized `PortalHosting` template shows the entry-document
       deployment depending on the asset deployment — neither is `DependsOn: null`
       any more — no template any more; `sync-portal-explorer` syncs `assets/*`
@@ -223,3 +234,20 @@ deferred criteria.
 - [x] On a cold cache after the deploy, `/api-tokens/` loads and every asset it
       references returns `200`; nothing under `/api-tokens/assets/` answers
       `403 AccessDenied` — per-object misses, no invalidation issued
+
+## Design Decisions
+
+### Emerged
+
+1. **Measured against what replaced each criterion's subject, not closed as
+   void.** Three criteria name things that are gone (`/api-tokens`, our
+   CloudFront, the `PortalHosting` template). Each has a successor with the
+   same job — the explorer's `/prices-api` redirect, its access logs, the
+   ordered `sync-portal-explorer` — so the property was checked there.
+2. **The 0184 note was replaced by a short pointer, not deleted.** An archived
+   record that loses the paragraph explaining why its numbers differ from
+   production reads as wrong; three lines saying it was resolved, and by what,
+   keep it truthful.
+3. **No cache invalidation for the cold-cache criterion.** It is a write on
+   another team's distribution; per-object `Miss from cloudfront` on the
+   bundle files was taken as enough.
