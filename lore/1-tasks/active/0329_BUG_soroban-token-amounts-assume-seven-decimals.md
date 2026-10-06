@@ -160,15 +160,17 @@ Rejected:
 
 #### Emerged
 
-1. **No `unresolved_pools`-style record for unresolved tokens.** That table is
-   keyed by pool. The resolver WARNs once per contract per retry window, and
-   `events-backfill` prints `trades dropped (decimals): N`, which the 0286
-   runbook now tells the operator to read. The live path has no metric or alarm
-   for it yet.
-2. **A failed contract is retried after 10 minutes, in memory.** Absent and
-   Transient are treated alike, with no `attempts` column. That costs one RPC
-   call per such token per 10 minutes, and stops a token that trades every
-   ledger from costing a 5 s timeout per ledger.
+1. **Dropped trades are counted, not recorded in a table.** `unresolved_pools`
+   is keyed by pool, so there is no row for a token. Instead the live processor
+   counts them on `RunStats`, WARNs with the contracts, and publishes
+   `TradesMissingDecimals`, alarmed like `UnregisteredPoolEvents`. Both
+   backfills print `trades dropped (decimals)`, and `reingest_0286.py` marks a
+   month with a non-zero count DEFECT. Added after review (PR #395).
+2. **Absent is terminal per process, Transient retries after 10 minutes.** A
+   contract that answered with no usable scale is not asked again until a cold
+   start, and is never persisted as a sentinel. A contract that gave no answer
+   is retried after 10 minutes. Calls run concurrently, so one ledger costs one
+   RPC timeout at worst.
 3. **Decode again rather than a two-phase tick.** Decoding is deterministic and
    the registry inserts are idempotent map writes, so the first result is
    discarded whole.
@@ -177,6 +179,11 @@ Rejected:
 5. **`sdex-backfill` reads the table only in `combined` mode.** The 0286 phase-3
    `sdex-only` runs therefore do not need the table to exist.
 6. **An `events-backfill` dry-run resolves but does not persist.**
+7. **Phase-3 volume reconcile leaves out contract-token candles.** Their volume
+   moves by design (an 18-decimal token's base volume falls by 10^11), so
+   `reingest_0286.py` compares volumes on the other candles only and trades on
+   all of them. A "before" read without that scope compares trades only, as a
+   FINDING. Added after review (PR #395).
 
 ### Deploy order
 

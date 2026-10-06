@@ -65,6 +65,10 @@ impl AssetIdentity {
 /// symbol resolves to the same identity used as a trade quote.
 pub(crate) use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
+/// Decimals of every classic asset, and so of every SAC: fixed by the protocol
+/// (stroops). A pure Soroban token has its own, read from `decimals()`.
+pub const CLASSIC_DECIMALS: u32 = 7;
+
 /// Mainnet (Public) network passphrase. A SAC contract id is **network-scoped**:
 /// it is `sha256(HashIdPreimage::ContractId { network_id, asset })`, and
 /// `network_id = sha256(passphrase)`. So the passphrase decides which network's
@@ -80,10 +84,6 @@ pub(crate) use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 /// liquidity when someone debugs it. To support a non-mainnet backfill, thread the
 /// network passphrase through config and into [`AssetRegistry::from_existing`]
 /// (the single bake-in point, below) rather than reading this const.
-/// Decimals of every classic asset, and so of every SAC: fixed by the protocol
-/// (stroops). A pure Soroban token has its own, read from `decimals()`.
-pub const CLASSIC_DECIMALS: u32 = 7;
-
 const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
 
 fn mainnet_network_id() -> [u8; 32] {

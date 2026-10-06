@@ -417,8 +417,10 @@ SETTINGS index_granularity = 8192;
 -- `decimals()` of each pure Soroban token an AMM swap has touched (task 0329).
 -- The ingest scales each swap leg's raw i128 amount by its token's decimals.
 -- Before this table it assumed 7 for every token, the classic convention, and
--- priced every other token off by 10^(7 - decimals). Classic assets and their
--- SACs are 7 by protocol and have no row.
+-- priced every other token off by 10^(7 - decimals). A classic identity is 7
+-- by protocol and needs no row. A SAC the ingest does not yet know as one (its
+-- classic asset not seen yet, task 0242) is held as a contract like any token:
+-- it is resolved over RPC and gets a row, with 7.
 --
 -- Written by the ingest itself (live processor, events-backfill, sdex-backfill)
 -- the first time a swap names a token it has no row for: one Soroban RPC

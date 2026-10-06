@@ -1484,9 +1484,11 @@ each of which rules out an easier home:
 
 ### 3.10b `prices.asset_decimals` — Soroban token decimals (task 0329)
 
-A swap event carries each leg as a raw i128 in its token's own decimals. Classic
-assets and their SACs are 7-decimal by protocol and have no row here; a pure
-Soroban token's decimals are whatever its SEP-41 `decimals()` returns.
+A swap event carries each leg as a raw i128 in its token's own decimals. A
+classic identity is 7-decimal by protocol and needs no row here; a pure Soroban
+token's decimals are whatever its SEP-41 `decimals()` returns. A SAC the ingest
+does not yet know as one (its classic asset not seen yet, task 0242) is held as
+a contract and gets a row too, with 7.
 
 ```sql
 CREATE TABLE prices.asset_decimals (
@@ -1505,9 +1507,11 @@ no row, the decode drops that trade rather than guessing a scale. The caller
 asks `decimals()` over Soroban RPC, writes the row, and decodes the ledger
 again. **Read by:** the same three, in full, at startup.
 
-> **Only answers are stored.** A token whose call failed has no row and is asked
-> again after ten minutes. Until then its trades are not priced, and
-> `events-backfill` counts them in its `trades dropped (decimals)` summary line.
+> **Only answers are stored.** A token whose call got no answer has no row and
+> is asked again after ten minutes. One that answered with no usable scale is
+> not asked again until the process restarts. Until it resolves, its trades are
+> not priced. The live processor publishes them as `TradesMissingDecimals`
+> (alarmed), and both backfills print them as `trades dropped (decimals)`.
 > Rows are never refreshed, because decimals are fixed at deploy.
 
 > ⚠️ **Deploy order.** The live processor's cold start reads this table and
