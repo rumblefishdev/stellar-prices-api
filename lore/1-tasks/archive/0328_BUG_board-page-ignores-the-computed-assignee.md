@@ -2,7 +2,7 @@
 id: "0328"
 title: "The board page recomputes the assignee from the last history entry and ignores the one board.json carries"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0327", "0149", "0041"]
@@ -11,6 +11,14 @@ links:
   - "../../board.html"
   - "../../../tools/scripts/generate-lore-board.mjs"
 history:
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      PR #394 merged (d0399fd2) and deployed to GitHub Pages. getTaskAssignee
+      returns t.assignee; a test in generate-lore-board.test.mjs pins it
+      (14/14, red on the old page). The deployed board shows 0149, 0242 and
+      0139 as akot.
   - date: "2026-10-06"
     status: active
     who: akot
@@ -46,7 +54,8 @@ carried the right value since. The page never reads it.
 
 ## Acceptance Criteria
 
-- [ ] `board.html` reads `assignee` from `board.json` and has no assignee
+- [x] `board.html` reads `assignee` from `board.json` and has no assignee
       logic of its own.
-- [ ] On the deployed board, 0149, 0242 and 0139 show `@akot`.
-- [ ] The assignee filter counts match `board.json`'s `assignee` values.
+- [x] On the deployed board, 0149, 0242 and 0139 show `@akot`.
+- [x] The assignee filter counts match `board.json`'s `assignee` values. By
+      construction: the filter counts go through the same `getTaskAssignee`.
