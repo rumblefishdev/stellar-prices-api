@@ -2,7 +2,8 @@
 id: "0140"
 title: "asset-discovery re-emits the whole asset registry every hour — 0132's defect in a second component"
 type: PERF
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0210", "0132", "0133", "0067", "0256", "0226", "0241"]
 tags: ["priority-medium", "effort-small", "cost", "write-amplification", "clickhouse"]
@@ -44,6 +45,11 @@ history:
       that PR's review: `ensure_seed` still READS the whole registry hourly to
       check ~20 identities. What remains here is that read and the
       `oracle-worker` instance.
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: >
+      Activated together with [[0226]]: one PR on one branch. The oracle-worker `write_assets` and the `ensure_seed` whole-registry read are the same shape as 0226's load, and 0226 removes the registry the oracle write depends on.
 ---
 
 # `asset-discovery` re-emits the full asset registry every hour

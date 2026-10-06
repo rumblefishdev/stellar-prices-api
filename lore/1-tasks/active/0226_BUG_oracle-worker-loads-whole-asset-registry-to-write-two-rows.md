@@ -2,7 +2,8 @@
 id: "0226"
 title: "The oracle worker loads all 620,615 assets into memory to write 2 rows, sits at its 256 MB ceiling and OOMs several times a day"
 type: BUG
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0223", "0222", "0167", "0112", "0132", "0256", "0241", "0140"]
 tags: [layer-infra, priority-high, effort-medium, oracle, lambda, memory, observability, ops]
@@ -98,6 +99,11 @@ history:
       task is an efficiency task, not an outage fix — but one more un-merged
       copy of the registry puts the oracle back at the ceiling. Priority left
       at high for the operator to lower; not lowered here.
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: >
+      Activated together with [[0140]]: one PR on one branch, because both rewrite the same oracle-worker pass (the whole-registry load and the `write_assets` at `lib.rs:569`) and both ship through the EventBridge stack, whose deploy carries the cleanup-rule hazard.
 ---
 
 # The oracle worker reads the entire asset registry on every run
