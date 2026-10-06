@@ -13,6 +13,8 @@
 //! Layers, in pipeline order:
 //! - [`filter`] — classic SDEX trades from `LedgerCloseMeta` operation results.
 //! - [`soroban`] — Soroban AMM trades + oracle samples from contract events.
+//! - [`soroban_rpc`] — read-only token calls (`decimals()`, `symbol()`) over
+//!   RPC `simulateTransaction`.
 //! - [`static_pools`] — the committed list of factory-less pools
 //!   ([`STATIC_POOLS`], task 0300) merged into the AMM registries.
 //! - [`canonical`] — asset identity, the [`AssetRegistry`] of known and newly
@@ -34,6 +36,7 @@ pub mod registry_io;
 pub mod retry;
 pub mod safe_log;
 pub mod soroban;
+pub mod soroban_rpc;
 pub mod static_pools;
 pub mod tick;
 pub mod writer;
