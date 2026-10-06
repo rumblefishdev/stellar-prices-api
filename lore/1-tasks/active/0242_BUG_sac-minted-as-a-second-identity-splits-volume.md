@@ -210,6 +210,20 @@ Plan choices confirmed by Adam on 2026-10-05 (GSD plan `261005-htu`):
 - **PC9 Residual rows of a SAC with no classic.** Such a row is the only copy of its trades, so it is never deleted silently. The operator either re-runs that month through phase 3 or records the loss on this task. The rows are copied beside the 72 metadata rows for rollback. The 202404 Z/Q row, from stage B before the seed, is the expected case.
 
 Open: **U3**. About 75.6k Soroswap swaps on BLTA/BLTB/BLTC/PPRIME/LumenJoule produce no candle under any id, and the cause is not established. It must be settled before AC3 promises numbers for those assets.
+Stays in scope of 0242 (Adam, 2026-10-05): this task closes everything that concerns SACs.
+
+**U3 settled (2026-10-05).** Neither the dust rule nor an ingest bug: those swaps were missing from the candle tables because of the 0139 re-key.
+- Each of the five SAC contract identities shared its old UInt32 id with an unrelated classic asset: 123376 LumenJoule/BTC, 123377 BLTB/ETH, 123378 BLTA/AST, 123379 BLTC/ASC1148, 123380 PPRIME/KWD.
+- `asset_id_map_0139` therefore marks all five `colliding`. The re-key copies only `mapped` and `sentinel` (`rekey.rs` `COPYABLE`), so their candles stayed in `price_ohlcv_*__pre0139`.
+- Before 0139, the 1h counts matched BE's swaps exactly for 202603–202606.
+- Jul–Sep were already short before 0139: the 07-09 Soroswap gap (0101) and burst minutes before the 0282 fix.
+- Locally, five real transactions from 202603–202609 produce candles under the classic identity on the 0242 branch.
+
+No code fix is needed. Phase 3 stage C, run with the 29-row seed, rebuilds them under the classic ids. AC3 for these five then rests on stage C's post-check; the BLT assets will have volume but no price, because their fills are dust.
+
+The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap was indexed, and phase 3 covers that under 0290. STELLA, TESTTTT, TEST77 and TEST12 have pools with no swaps.
+
+**October window (measured 2026-10-05, `dev_read`).** Since 2026-10-01, no candle on any tier is keyed on the 36 SAC ids, and no contract row has been minted since BURNMKR. No decision is needed now. The runbook re-checks months after 202609 before the cleanup, and any non-zero result goes through PC9.
 
 ## Acceptance Criteria
 
