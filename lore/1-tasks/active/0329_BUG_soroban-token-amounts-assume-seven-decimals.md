@@ -1,0 +1,154 @@
+---
+id: "0329"
+title: "Soroban AMM amounts are scaled as if every token had 7 decimals — every contract token's price is off by 10^(7 − decimals)"
+type: BUG
+status: active
+assignee: stkrolikiewicz
+related_adr: []
+related_tasks: ["0286", "0242", "0210", "0097", "0060", "0048", "0018"]
+tags: [layer-backend, priority-high, effort-medium, ingest, soroban, data-correctness, defect]
+links:
+  - "../../../packages/prices-ingest-core/src/soroban.rs"
+  - "../../../packages/asset-discovery/src/symbols.rs"
+  - "../../../docs/database-schema/amm-trades-schema.md"
+history:
+  - date: "2026-10-06"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Renumbered from 0328. This task was committed as 0328 but its push did
+      not land, and another 0328 (board page assignee) was pushed and merged
+      meanwhile. An unpushed task reserves no ID.
+  - date: "2026-10-06"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated for implementation with the proposed design accepted:
+      SEP-41 decimals() over RPC, resolved by the ingest on a cache miss,
+      persisted in prices.asset_decimals, never defaulting to 7.
+  - date: "2026-10-06"
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Reported by Karol (SBE) on 2026-10-05: SolvBTC, XAUM and XRP priced at
+      10^(7 − decimals) of market. SBE holds off pricing pools that contain
+      these tokens until we fix it. Root cause confirmed in code; decimals of
+      all seven contract tokens the API lists were read on mainnet, and none
+      is 7. Design for where decimals come from proposed below, not yet
+      decided.
+---
+
+# Soroban AMM amounts are scaled as if every token had 7 decimals
+
+## Summary
+
+`amm_trade_to_tick` turns both raw i128 legs of every Soroban swap into
+`Decimal` with one fixed scale, `AMM_AMOUNT_SCALE = 7`
+([soroban.rs:37](../../../packages/prices-ingest-core/src/soroban.rs), used at
+:859–860). Seven is right for a SAC (classic assets are 7-decimal by protocol)
+and wrong for a pure contract token, which has its own `decimals()`. Against a
+7-decimal counter-leg the stored price is `true × 10^(7 − d)`. The constant came
+in with 0060's sizing backfill as a "documented sizing-measurement
+approximation" and never got replaced, though 0018 and 0048 §7.2 had both
+specified reading `decimals()`. `amm-trades-schema.md` §3 still lists decimals
+normalisation as "_Still open._"
+
+## Evidence (2026-10-05)
+
+`/v1/assets?type=soroban&min_volume_usd=0` lists 7 assets. Decimals were read
+with `stellar contract invoke --network mainnet --send no -- decimals`.
+
+| Token | Contract | decimals | Our price | × 10^(d−7) | Corrected |
+|---|---|---|---|---|---|
+| SolvBTC | `CBIJBDNZ…M6VN` | 8 | 8 580.10 | ×10 | ~85 800 |
+| XAUM | `CC2RBGYN…VAGO` | 9 | 41.92 | ×100 | ~4 192 |
+| XRP | `CB7OOP3V…37XP` | 6 | 14.78 | ÷10 | ~1.48 |
+| deJTRSY | `CBI7UCH5…IHRV` | 18 | 1.026e-11 | ×10¹¹ | ~1.03 |
+| deJAAA | `CC64WBDG…YGSL` | 18 | 1.05e-11 | ×10¹¹ | ~1.05 |
+| BnUSD | `CCT4ZYIY…X7KP` | 18 | 9.98e-12 | ×10¹¹ | ~0.998 |
+| xSolvBTC | `CAUP7NFA…772J` | 8 | unpriced | — | — |
+
+**Not proven:** that the other leg in every priced pool is 7-decimal. This is
+inferred only from the corrected prices matching the market.
+
+## Impact
+
+- OHLC, `close_usd` and therefore `price_usd_series*` (views over the candle
+  tables) are wrong for every contract-token asset, over its whole history.
+- Base volume in token units is inflated by 10^(d − 7). USD volume is right,
+  because the price and quantity errors cancel.
+- An asset quoted *in* a contract token gets a correct USD price (the two
+  errors multiply out), but its price in that token's units is wrong.
+- 18-decimal tokens: a price near 1e-11 keeps only 3–4 significant digits in
+  `Decimal(38,14)`. A token under about $0.001 falls below 1e-14 and its fills
+  are classified non-price-forming (`price_survives_column_scale`). Rescaling
+  stored rows can recover neither case, so history needs a re-ingest, not an
+  `UPDATE`.
+- `price_forming_i128` classifies the raw integer legs before scaling, so it
+  is unaffected.
+
+## Design: where decimals come from (accepted 2026-10-06)
+
+**Source: the token's SEP-41 `decimals()`, read once via RPC `simulateTransaction`.**
+This is the only universal source. Swap events carry raw i128 only. Instance
+storage layout depends on the implementation (soroban-token-sdk `METADATA`,
+OpenZeppelin, custom tokens). The live ingest also never sees an old token's
+instance entry in ledger meta. A SAC is 7 without a call. A SAC we still hold
+as a Contract identity ([[0242]]) answers 7 over RPC anyway, so it needs no
+special case. Decimals are fixed at deploy for every real token, which is the
+same "absence, not staleness" rule [[0210]] applies to `prices.asset_symbol`:
+fetch once, never refresh.
+
+**Store:** a new `prices.asset_decimals (contract_address, decimals, fetched_at)`,
+ReplacingMergeTree. Live ingest and backfills read the same value.
+
+**Resolve in the ingest on a cache miss, not in asset-discovery.** The price is
+fixed at write time, and asset-discovery runs hourly, so a new token's first
+swaps would land before its decimals do. That leaves a guessed price or a hole
+to re-price by hand for every new token. Load the table at run start (it holds
+tens of rows). A miss costs one RPC call with the existing 5 s timeout and is
+persisted for every later run. Reuse `build_simulate_envelope` from
+asset-discovery, which is already generic over the function name, by moving it
+into a shared crate. Lambdas have egress (no VPC), and `SOROBAN_RPC_URL` is
+already the convention.
+
+**On failure, or decimals > 28 (rust_decimal's maximum scale): never fall back
+to 7.** Drop the tick, record it next to `prices.unresolved_pools`, and repair
+with `events-backfill` once the token resolves. A wrong price is worse than a
+missing one.
+
+Rejected:
+- **Hard-coded map of the 7 tokens.** Every new token is mispriced or unpriced
+  until a PR lands. Since the RPC code exists, the map is barely smaller.
+- **Asset-discovery only.** Leaves an hourly gap and a manual re-price per new
+  token.
+- **Instance storage from ledger meta.** Layout varies by implementation, and
+  old tokens never appear in the meta.
+
+## Plan
+
+1. Shared simulate helper and a `decimals()` resolver with the three-way
+   outcome from `symbols.rs`.
+2. `prices.asset_decimals` DDL.
+3. `amm_trade_to_tick` scales each leg by its own decimals: SAC = 7, unresolved
+   → drop and record. This is the only production call site of the scale.
+4. Backfills (`events-backfill` and the soroban path of `sdex-backfill`) share
+   the same resolver.
+5. **History rides [[0286]] phase 3 if timing allows.** Stages B/C re-ingest the
+   AMM era through `events-backfill`. If this fix is on `fishuser-hero` before
+   stage C reaches the months these tokens traded, nothing extra runs.
+   Otherwise, a targeted `events-backfill` plus pre-roll over those pools'
+   range. Coordinate with the phase-3 operator.
+6. Tell Karol (SBE) when prices are correct.
+
+## Acceptance Criteria
+
+- [ ] Unit test: an 8-, 18- and 6-decimal leg against a 7-decimal leg gives the
+      true price and the true base volume.
+- [ ] A token whose decimals are unresolved never produces a price.
+- [ ] After deploy, all six priced tokens are within a few percent of an
+      external reference.
+- [ ] History of the affected assets re-ingested; `price_usd_series*` right over
+      the full range, with significant digits restored for the 18-decimal
+      tokens.
+- [ ] `amm-trades-schema.md` §3 closed; the `AMM_AMOUNT_SCALE` constant removed.
