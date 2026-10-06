@@ -11,7 +11,7 @@ deletes what is left.
 Observability stacks.
 
 **Read first:** [`0286-reingest-history.md`](0286-reingest-history.md) (phase 3,
-its stages and its orchestrator) and lore task 0242 (decisions D1–D8, PC3, PC6,
+its stages and its orchestrator) and lore task 0242 (decisions D1–D9, PC3, PC6,
 PC9).
 
 ---
@@ -45,13 +45,13 @@ runbook heals the past.
 
 ## 1. Order of events
 
-| #   | Step                                                                                                                                                                                                                    | When                                                                                       | Section |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------- |
-| 1   | Seed the 29 classic identities. Works with the `events-backfill` already on ch-prod-01 (D4)                                                                                                                             | After phase-3 stage B (202402–202404), before stage C                                      | §3      |
-| 2   | Re-plan phase 3 to 202609, run stage C with `--to-month 202609` (D4; the plan ended at 202608)                                                                                                                          | After the seed                                                                             | §4a–§4d |
-| 3   | Deploy the PR: Compute (live ledger processor + API), then EventBridge (probe). Not Observability (D8). Swap `events-backfill` on ch-prod-01 only between phase-3 stages, never while a month is at its `amm` step (D7) | Once merged. Independent of phase 3 (D4: phase 3 is not held for the code)                 | §4e     |
-| 4   | Residual cleanup (D3)                                                                                                                                                                                                   | After stage D (`finish`) AND after the live slice is deployed with at least one cold start | §5      |
-| 5   | Deploy Observability with the `SacContractIdentities` alarm actions on (D6, D8)                                                                                                                                         | After §5's post-checks are green                                                           | §6      |
+| #   | Step                                                                                                                                                                                                                    | When                                                                                          | Section |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------- |
+| 1   | Seed the 29 classic identities. Works with the `events-backfill` already on ch-prod-01 (D4)                                                                                                                             | After phase-3 stage B (202402–202404), before stage C                                         | §3      |
+| 2   | Re-plan phase 3 to 202609, run stage C with `--to-month 202609` (D4; the plan ended at 202608)                                                                                                                          | After the seed                                                                                | §4a–§4d |
+| 3   | Deploy the PR: Compute (live ledger processor + API), then EventBridge (probe). Not Observability (D8). Swap `events-backfill` on ch-prod-01 only between phase-3 stages, never while a month is at its `amm` step (D7) | After stage D (`finish`) and before §5 (D9: the API alias needs the classic history in place) | §4e     |
+| 4   | Residual cleanup (D3)                                                                                                                                                                                                   | After stage D (`finish`) AND after the live slice is deployed with at least one cold start    | §5      |
+| 5   | Deploy Observability with the `SacContractIdentities` alarm actions on (D6, D8)                                                                                                                                         | After §5's post-checks are green                                                              | §6      |
 
 Step 4 waits for the live deploy because until then a warm container that predates
 the seed, or a SAC the seed does not cover, can still mint a contract identity
@@ -232,6 +232,9 @@ CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --start 51500460 --end 51500460 \
 
 A 0242 binary prints `unproven sac swaps:` followed by a count; a binary built
 before 0242 prints nothing. Both are fine for stage C once the seed is in (PC6).
+A month run on a pre-0242 binary carries the note `printed no unproven sac swaps:
+line`. Once a month of the state has printed the line, a later month without it
+is a STOP: the host binary went back to a pre-0242 build (review of 0242).
 
 **Post-check: U3's candles are back under the classic ids.** Once 202609 is done
 (CH shell):
@@ -361,9 +364,19 @@ A STOP on the write pass is step 4's last case.
 
 ### 4e. Deploy the PR
 
+**When: after stage D (`finish`), before §5 (D9).** The API alias answers a SAC
+address as its classic. Until stage C has rebuilt a SAC's months under the
+classic id, that classic holds only part of the history, while the `Contract`
+row still holds the rest. Deployed earlier, `GET /v1/assets/{C…}/ohlcv` would
+lose the pre-heal AMM series. Group B is the visible case: its classics were
+seeded on 2026-10-06 and fill month by month as stage C runs. §5 still needs the
+live slice deployed with one cold start, so the deploy goes between the two.
+
 **Pre-check before the live deploy: `prices_writer` can read BE's SAC set.** The
-live Lambda loads `default.soroban_contracts` at cold start as `prices_writer`
-and fails Init when it cannot (PC3): live ingest would stop.
+live Lambda loads `default.soroban_contracts` at cold start as `prices_writer`.
+When it cannot, it does not fail Init (PC3, reversed in review): it ingests with
+no SAC candidates, so an unproven SAC mints a `Contract` identity, and every run
+publishes `SacCandidatesUnavailable`. Deploy with the read working.
 
 ```bash
 chq <<'SQL'
@@ -386,7 +399,8 @@ curl -sS --fail-with-body --cert ~/prices-mtls/prices_writer.crt --key ~/prices-
   --data-binary "SELECT count() FROM (SELECT DISTINCT contract_id FROM default.soroban_contracts WHERE is_sac)"
 ```
 
-About 4,042 (M13b). An error or `0`: **do not deploy Compute**; fix the grant first.
+About 4,042 (M13b). An error or `0`: **do not deploy Compute**; fix the grant
+first. The deploy would not stop ingest, but it would run without candidates.
 
 **Record what runs now** (AWS shell), for the rollback:
 
@@ -412,24 +426,28 @@ that holds this PR creates them, so tell the team: no
 `make deploy-production-observability` from `develop` until §6. A deploy that
 cannot wait shows the red tile; its description says it is expected.
 
-Until §6 no alarm watches `SacUnprovenSkipped`. Read it by hand after the cold
-start and at least daily until §6:
+Until §6 no alarm watches `SacUnprovenSkipped` or `SacCandidatesUnavailable`.
+Read both by hand after the cold start and at least daily until §6:
 
 ```bash
-aws cloudwatch get-metric-statistics --namespace Prices/Ingest --metric-name SacUnprovenSkipped \
-  --dimensions Name=Environment,Value=production \
-  --start-time "$(date -u -d '-1 day' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
-  --period 3600 --statistics Sum
+for M in SacUnprovenSkipped SacCandidatesUnavailable; do
+  echo "== $M"
+  aws cloudwatch get-metric-statistics --namespace Prices/Ingest --metric-name "$M" \
+    --dimensions Name=Environment,Value=production \
+    --start-time "$(date -u -d '-1 day' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+    --period 3600 --statistics Sum
+done
 ```
 
-No datapoints is healthy: the metric is published only when trades were
-skipped. Any datapoint: §9.
+No datapoints is healthy: both are published only when something is wrong.
+Any datapoint: §9.
 
 **Post-checks.**
 
 - The live Lambda cold-started on the new build: `/aws/lambda/prices-production-ledger-processor`
   shows `loaded the is_sac contract set` with `sac_contracts` ≈ 4,042, then
-  `resumed cursor from ClickHouse`. No Init error.
+  `resumed cursor from ClickHouse`. No Init error, and no WARN
+  `is_sac contract set unreadable`.
 - The probe: `aws lambda invoke --function-name prices-production-rollup-freshness-probe ~/heal-0242/probe.json`,
   then `jq '.asset_id_uniqueness | {sac_contract_rows, sac_contract_scanned, be_sac_contracts}' ~/heal-0242/probe.json`.
   `sac_contract_rows` = 36 (the baseline until §5), `be_sac_contracts` ≈ 4,042.
@@ -779,9 +797,10 @@ from the same identity. Keep the `bak_0242_*` tables until 0242 is closed; then
 
 ## 6. Deploy Observability with the alarm on (D6, D8)
 
-Observability was held back in §4e (D8), so this deploy creates both 0242
-alarms, `prices-production-ledger-processor-sac-unproven` and
-`prices-production-sac-contract-identities`, the second with its actions on.
+Observability was held back in §4e (D8), so this deploy creates the three 0242
+alarms: `prices-production-ledger-processor-sac-unproven`,
+`prices-production-ledger-processor-sac-candidates-unavailable` and
+`prices-production-sac-contract-identities`, the last with its actions on.
 
 **Pre-check.** §5g is green and `SacContractIdentities` reads `0` for at least
 two periods (30 min):
@@ -808,16 +827,17 @@ cd infra && make deploy-production-observability
 ```bash
 aws cloudwatch describe-alarms \
   --alarm-names prices-production-sac-contract-identities prices-production-ledger-processor-sac-unproven \
+    prices-production-ledger-processor-sac-candidates-unavailable \
   --query 'MetricAlarms[].[AlarmName,ActionsEnabled,StateValue]' --output text
 ```
 
-Both alarms print `True`, then `OK` (`INSUFFICIENT_DATA` until the first
-evaluation). The `INSUFFICIENT_DATA` → `OK` transition sends one OK
-notification: expected.
+All three print `True`, then `OK` (`INSUFFICIENT_DATA` until the first
+evaluation). The `INSUFFICIENT_DATA` → `OK` transitions send OK notifications:
+expected.
 
 **Rollback.** The same key back to `false` and the same deploy turns the
 actions off. Redeploying Observability from a commit without this PR removes
-both alarms.
+all three alarms.
 
 ---
 
@@ -854,8 +874,10 @@ each SAC now resolves to one classic row.
 - **Known residual risk.** The live processor reads BE's `is_sac` set once per
   cold start. A SAC deployed after it, traded with no SAC event in the same
   transaction, is not a candidate yet and still mints a `Contract` identity; so
-  does a SAC BE does not flag. The in-band proof missed 0 of 338,601 sampled
-  legs, so this should stay rare. `SacContractIdentities` counts it, §9.
+  does a SAC BE does not flag, and so does every unproven SAC of a container
+  whose cold start could not read the set (`SacCandidatesUnavailable`). The
+  in-band proof missed 0 of 338,601 sampled legs, so this should stay rare.
+  `SacContractIdentities` counts it, §9.
 
 ---
 
@@ -869,6 +891,14 @@ in the same transaction proved. Those trades have no candle. The WARN
 as in §4c step 2. A real SAC: seed its classic as §3 did; the next cold start
 resolves it. The skipped minutes stay without those trades until a re-ingest of
 their month.
+
+**`prices-production-ledger-processor-sac-candidates-unavailable`** (live,
+after §6). A container cold-started without BE's `is_sac` set. The WARN
+`is_sac contract set unreadable` carries the error: usually the grant of §4e's
+pre-check, a renamed table or a BE migration. Ingest is running. Fix the read,
+then force a cold start (any configuration change of
+`prices-production-ledger-processor`, or wait for the container to recycle).
+Any SAC minted meanwhile shows in `SacContractIdentities`: treat it as below.
 
 **`prices-production-sac-contract-identities`** (after §6). A contract row of
 `assets` is a SAC again. The alarm's description holds the query that names it.
