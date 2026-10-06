@@ -2,7 +2,7 @@
 id: "0139"
 title: "current_price_usd returns duplicate rows — assets is keyed on natural identity, not asset_id"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0072", "0061", "0067", "0144", "0150", "0129"]
@@ -11,6 +11,18 @@ tags:
 milestone: 2
 links: []
 history:
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      Closed. The window ran 2026-10-02 (swap 12:46 UTC), PR #382 merged as
+      44809656, W14 gap-verify and the W16 next-day checks all green. PR #387
+      (phase-3 preflight on live tiers) merged. Checked read-only on prod
+      2026-10-06: assets FINAL 211,103 rows = 211,103 distinct asset_ids;
+      current_price_usd 3,736 rows = current_prices 3,736; 0129's join
+      cross-check 94,907,504 = 94,907,504. Still owed at close: the second
+      pass over months ≤ 202202, dropping the __pre0139 tables after it,
+      W17 period-close after 2026-11-02, and the note to BE.
   - date: "2026-10-02"
     status: active
     who: akot
@@ -553,8 +565,11 @@ stopgap. Spawn accordingly.
 - [x] Determined whether the 3,275 duplicated `asset_id`s are ID collisions or
       superseded natural-identity rows, with the measurement recorded.
       **2026-09-30: all 3,315 are collisions, 0 superseded.**
-- [ ] `current_price_usd` returns exactly one row per `current_prices` row.
-- [ ] Every other view in `views.sql` audited for the same join defect.
+- [x] `current_price_usd` returns exactly one row per `current_prices` row.
+      *Prod 2026-10-06: 3,736 = 3,736.*
+- [x] Every other view in `views.sql` audited for the same join defect.
+      *Fixed at the source instead: `assets` is unique on `asset_id`, so no
+      join on it can fan out (`asset_id_schema_it.rs`).*
 - [x] **O2 — the XLM-native and USDC `asset_id`s checked against the 3,279
       duplicates** (one query; see the open section above). **2026-09-30: XLM
       (4), USDC (3) and USDT (111) are clean; no foreign candle is admitted.**
@@ -563,15 +578,21 @@ stopgap. Spawn accordingly.
       the pivot tier's `xlm_usd` — invisibly, because uniform duplication leaves
       the weighted value unchanged. Low prior, but it must not be assumed.
       Raised by [[0144]] while answering BE's `volume_base` question.
-- [ ] A test fails if the fan-out reappears.
-- [ ] BE informed of the resolution.
+- [x] A test fails if the fan-out reappears.
+      *`current_price_usd_returns_one_row_per_current_prices_row` in
+      `asset_id_schema_it.rs`.*
+- [ ] BE informed of the resolution. *Not sent at close; owed.*
 
 Carried from [[0129]] when it closed into this task (2026-09-24) — they check
 the allocator, not the view, so a view-only dedupe does not satisfy them:
 
-- [ ] `SELECT count(), countDistinct(asset_id) FROM prices.assets FINAL` returns
-      equal values in production.
-- [ ] 0129's two-query cross-check (its §Evidence) agrees to the row.
-- [ ] An invariant test or probe guards `asset_id` uniqueness going forward.
+- [x] `SELECT count(), countDistinct(asset_id) FROM prices.assets FINAL` returns
+      equal values in production. *Prod 2026-10-06: 211,103 = 211,103.*
+- [x] 0129's two-query cross-check (its §Evidence) agrees to the row.
+      *Prod 2026-10-06, `price_ohlcv_1h` 2024-02…2026-07, `volume_quote > 0`:
+      94,907,504 without the join = 94,907,504 with it.*
+- [x] An invariant test or probe guards `asset_id` uniqueness going forward.
+      *`rollup-freshness-probe/src/asset_id_uniqueness.rs` and its alarm.*
 - [ ] `GET /assets` verified to emit no duplicate asset across a full cursor
-      walk (extends 0074's pagination test).
+      walk (extends 0074's pagination test). *No full walk was run. It cannot
+      emit a duplicate while `asset_id` is unique on prod (above).*
