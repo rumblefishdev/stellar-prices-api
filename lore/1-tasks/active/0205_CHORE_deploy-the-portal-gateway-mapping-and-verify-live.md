@@ -2,7 +2,7 @@
 id: '0205'
 title: 'Deploy the portal gateway mapping and verify it live — three deploys 0184 merged but never shipped'
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ['0184', '0183', '0185', '0186', '0194', '0141']
 tags:
@@ -69,6 +69,14 @@ history:
       both Cache-Control headers, the per-verb throttles, cookie-free access
       logs, /api-tokens/api/config and [[0185]]'s decision 13 still have no
       evidence. What remains is the live re-measurement, no deploy expected.
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: >
+      Activated for the live re-measurement. The portal has since moved twice
+      ([[0194]]: backend on prices-api.sorobanscan…/api/, [[0326]]: bundle at
+      sorobanscan…/prices-api/), so each criterion is measured against what
+      replaced it.
 ---
 
 # Deploy the portal gateway mapping and verify it live
