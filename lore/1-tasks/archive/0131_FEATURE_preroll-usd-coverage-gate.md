@@ -2,15 +2,26 @@
 id: "0131"
 title: "0088 step-3 pre-roll: gate/warn when 1m USD coverage for the span is below a threshold"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0114", "0088", "0144", "0147", "0145"]
+related_tasks: ["0114", "0088", "0144", "0147", "0145", "0286"]
 tags: [clickhouse, enrichment, backfill, pre-roll, guard, priority-low, effort-small]
 links:
   - "../../../packages/prices-clickhouse/schema/preroll-incremental.sql"
   - "../../../docs/runbooks/continue-soroban-backfill.md"
 history:
-  - date: 2026-07-24
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      Closed as superseded by [[0286]]. The flow this guard was for is gone:
+      `preroll-incremental.sql` is marked HISTORICAL, DO NOT RUN, and fails on
+      the post-0286 column count. Phase 3 pre-rolls coarse tiers from
+      re-ingested 1m that carries close_usd = 0 by design. The coarse re-price
+      (re-ingest runbook §7b-2) then fixes them, and 0286's AC checks
+      `reachable_left` ~0 per tier. Nothing was built and there are no
+      follow-ups.
+  - date: "2026-07-24"
     status: backlog
     who: okarcz
     note: "Spawned from 0114 future work — the last 0114 AC; belongs in 0088's step-3 pre-roll flow, which hasn't run yet."
@@ -81,3 +92,5 @@ exercised once that pre-roll runs — which is why it doesn't fit as a 0114 bloc
 - [ ] Below-threshold coverage **warns loudly** (hard-refuse opt-in), and the
       expected-low pre-Soroban tail does not spuriously block the recovery.
 - [ ] Documented in the 0088 pre-roll runbook.
+
+*None built: superseded by [[0286]] (see history, 2026-10-06).*
