@@ -8,7 +8,7 @@
 //! PR. The parser is pinned offline in `decimals.rs` and `soroban_rpc.rs`; this
 //! proves the two ends meet against real tokens.
 
-use prices_ingest_core::decimals::decimals_of;
+use prices_ingest_core::decimals::{Decimals, decimals_of};
 use prices_ingest_core::soroban_rpc::{http_client, rpc_url_from_env};
 
 #[tokio::test]
@@ -34,14 +34,18 @@ async fn reads_the_decimals_sbe_checked_on_chain() {
         ),
     ] {
         let got = decimals_of(&http_client(), &rpc_url_from_env(), contract).await;
-        assert_eq!(got, Some(want), "{name} ({contract})");
+        assert_eq!(got, Decimals::Known(want), "{name} ({contract})");
     }
 }
 
 #[tokio::test]
 #[ignore = "requires public network — third-party uptime; never gates a PR"]
-async fn a_contract_that_was_never_deployed_has_no_decimals() {
+async fn a_contract_that_was_never_deployed_is_absent() {
     let never_deployed = stellar_strkey::Contract([3u8; 32]).to_string();
     let got = decimals_of(&http_client(), &rpc_url_from_env(), &never_deployed).await;
-    assert_eq!(got, None);
+    assert_eq!(
+        got,
+        Decimals::Absent,
+        "a fact about the contract, not a retry"
+    );
 }
