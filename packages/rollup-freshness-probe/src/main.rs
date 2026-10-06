@@ -29,6 +29,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, describe, drift_metrics, publish_drift,
         visible_objects_query,
     };
+    use rollup_freshness_probe::ohlc_band::{
+        OHLC_BAND_TIERS, OhlcBandCounts, ohlc_band_detail, ohlc_band_metric, ohlc_band_queries,
+        ohlc_band_totals,
+    };
     use rollup_freshness_probe::reconcile_mismatch::{
         MISMATCH_MIN_READ_SECS, MISMATCH_RESERVE, MismatchCount, mismatch_metric, mismatch_queries,
         mismatch_read_bound, publish_mismatch,
@@ -86,6 +90,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // deadline, and a read that would get under 2 s is skipped and recorded as
     // a failure — see `reconcile_mismatch` (review WR-04).
     let mismatch_queries = Arc::new(mismatch_queries());
+    let ohlc_band_queries = Arc::new(ohlc_band_queries());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -105,6 +110,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let orphan_candles_query = orphan_candles_query.clone();
         let refresh_waits_query = refresh_waits_query.clone();
         let mismatch_queries = mismatch_queries.clone();
+        let ohlc_band_queries = ohlc_band_queries.clone();
         let environment = environment.clone();
         let deadline = event.context.deadline();
         async move {
@@ -361,7 +367,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
             //
-            // Late on purpose (only 5b and the mismatch reads, 6, come after it). It is the one unscoped read here: `timestamp` is the
+            // Late on purpose (only 5b, 5c and the mismatch reads, 6, come after it). It is the one unscoped read here: `timestamp` is the
             // fourth sort-key column, so the 48 h window prunes only to the monthly
             // partition, which is then merged `FINAL` across every pair. Measured on
             // production 2026-09-18 it is cheap (0.04 s, 650k rows read) — but it
@@ -445,6 +451,89 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 }
                 Err(e) => failures.push(format!("asset-id-orphans read: {e}")),
             }
+
+            // ---- 5c. Stored-candle OHLC band + positive prices, all seven tiers (task 0236) ---
+            //
+            // Late, for the reason block 5 gives: these reads grow with the
+            // tables. Before the mismatch reads (6), which stay last because
+            // their budget is what is left of the invocation. Measured on
+            // production 2026-10-06 the seven reads together are cheap: 0.29 s
+            // of server time, 3.7 M rows read.
+            //
+            // Seven INDEPENDENT reads, not one `UNION ALL`: a statement fails as a
+            // unit, so one dropped tier or lost grant would hide the other six
+            // counts, and the alarm is `NOT_BREACHING` on missing data. A failed
+            // tier is recorded and the others still count.
+            //
+            // Run in parallel, each under the bound block 6 uses: `min(10 s,
+            // time left - 5 s reserve)`, server-side and client-side. A stalled
+            // tier (a `FINAL` during a merge, a busy box during a re-ingest)
+            // is then a recorded failure, not a hard timeout that loses block 6
+            // and the summary line. The block costs the slowest read, not the sum.
+            //
+            // Independent of block 5, although a priced `_1m` row with
+            // `close = 0` fires both: that overlap is expected (see `ohlc_band`).
+            let mut band_readings: Vec<(&'static str, OhlcBandCounts)> = Vec::new();
+            let remaining = deadline
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default();
+            match mismatch_read_bound(remaining) {
+                None => failures.push(format!(
+                    "ohlc-band skipped: {:.1} s left of the invocation, \
+                     under the {} s reserve + {MISMATCH_MIN_READ_SECS} s a read needs",
+                    remaining.as_secs_f64(),
+                    MISMATCH_RESERVE.as_secs(),
+                )),
+                Some(bound) => {
+                    let mut reads = tokio::task::JoinSet::new();
+                    for (table, sql) in ohlc_band_queries.iter() {
+                        let bounded = prices_clickhouse::with_execution_bound((*ch).clone(), bound);
+                        let (table, sql) = (*table, sql.clone());
+                        reads.spawn(async move {
+                            let read = tokio::time::timeout(
+                                std::time::Duration::from_secs(bound + 2),
+                                bounded.query(&sql).fetch_one::<OhlcBandCounts>(),
+                            )
+                            .await;
+                            (table, read)
+                        });
+                    }
+                    while let Some(joined) = reads.join_next().await {
+                        match joined {
+                            Ok((table, Ok(Ok(counts)))) => band_readings.push((table, counts)),
+                            Ok((table, Ok(Err(e)))) => failures
+                                .push(format!("ohlc-band read {table} (bound {bound} s): {e}")),
+                            Ok((table, Err(_))) => failures.push(format!(
+                                "ohlc-band read {table}: no answer within {} s",
+                                bound + 2
+                            )),
+                            Err(e) => failures.push(format!("ohlc-band read task: {e}")),
+                        }
+                    }
+                    // Completion order is arbitrary; log in tier order.
+                    band_readings.sort_by_key(|(t, _)| {
+                        OHLC_BAND_TIERS.iter().position(|(o, _)| o == t)
+                    });
+                }
+            }
+            match ohlc_band_metric(&band_readings) {
+                Ok(metric) => {
+                    if let Err(e) =
+                        publish_sanity(&cw, &environment, std::slice::from_ref(&metric)).await
+                    {
+                        failures.push(format!("ohlc-band publish: {e}"));
+                    }
+                }
+                Err(refusal) => failures.push(format!("ohlc-band: {refusal}")),
+            }
+            // Totals only for a complete run: a partial sum logged as a number
+            // would read as the whole chain. The detail names each tier.
+            let band_totals = ohlc_band_totals(&band_readings);
+            let band_scanned_1m = band_readings
+                .iter()
+                .find(|(t, _)| *t == OHLC_BAND_TIERS[0].0)
+                .map(|(_, c)| c.scanned);
+            let band_detail = ohlc_band_detail(&band_readings);
 
             // ---- 6. Coarse buckets disagreeing with their source (0203) ---
             //
@@ -548,6 +637,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 mv_drift_critical = %reading(drift_critical, drift_missing),
                 mv_drift = %reading(drift_count, drift_missing),
                 mv_visible_objects = %reading(visible_objects, FAILED),
+                ohlc_band_violations = %reading(band_totals.map(|t| t.0), FAILED),
+                ohlc_band_band = %reading(band_totals.map(|t| t.1), FAILED),
+                ohlc_band_nonpositive = %reading(band_totals.map(|t| t.2), FAILED),
+                ohlc_band_scanned_1m = %reading(band_scanned_1m, FAILED),
+                ohlc_band_tiers_read = band_readings.len(),
+                ohlc_band_detail = %band_detail,
                 mv_detail = %drift_detail,
                 mv_refresh_waiting = %reading(refresh_waiting, refresh_missing),
                 mv_refresh_disabled = %reading(refresh_disabled, refresh_missing),
@@ -592,6 +687,18 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "ids": id_counts.map(|c| c.ids),
                     "orphan_candles": orphan_counts.map(|c| c.orphans),
                     "orphan_scanned": orphan_counts.map(|c| c.scanned),
+                },
+                "ohlc_band": {
+                    "violations": band_totals.map(|t| t.0),
+                    "tiers": band_readings
+                        .iter()
+                        .map(|(t, c)| serde_json::json!({
+                            "tier": t,
+                            "band": c.band,
+                            "nonpositive": c.nonpositive,
+                            "scanned": c.scanned,
+                        }))
+                        .collect::<Vec<_>>(),
                 },
                 "mv_drift": {
                     "critical": drift_critical,

@@ -3,7 +3,7 @@ id: "0011"
 title: "`base_currency` on the read surfaces is a DENOMINATION, not a quote-leg pair filter"
 status: accepted
 deciders: [okarcz, stkrolikiewicz]
-related_tasks: ["0170", "0178", "0120", "0127", "0128", "0211", "0165", "0114", "0201", "0116", "0212"]
+related_tasks: ["0170", "0178", "0120", "0127", "0128", "0211", "0165", "0114", "0201", "0116", "0212", "0236"]
 related_adrs: ["0003", "0004", "0008"]
 tags: [api, read-surface, contract, usd, denomination, provenance, milestone-M2]
 links:
@@ -239,6 +239,68 @@ exactly on `low` or `high` for the same reason. That is the intended outcome. `o
 as the extremes, and scaling by one positive factor is monotonic, so
 `low <= open <= high` holds within a row and survives `min`/`max` across rows.
 Only the exact/derived boundary was ever at risk.
+
+#### ✅ AMENDED 2026-09-28 — the clamp is CONFIRMED; stored-row consistency is asserted at the source
+
+Task [[0236]]. **The 0229 clamp stays: it is the right behaviour for the read
+path.** A read API's job is to return well-formed candles, and a consumer cannot
+act on `high < close` except by breaking. The alternative the 0229 review floated
+— bounding the clamp so only ulp-sized crossings are repaired — would buy a
+detection signal by **serving a malformed candle to every consumer** whenever a
+source row is genuinely corrupt. That is paying in the wrong currency.
+
+🔑 **It is safe because stored-row consistency is now asserted at the source,
+with ZERO tolerance.** Before 0229 a corrupt stored row leaked into `/ohlcv`,
+where [[0120]]'s conformance suite could stumble over it; the clamp removed that
+accidental detector, so it was moved to where it belongs.
+`rollup-freshness-probe` reads every tier, on a schedule —
+[`packages/rollup-freshness-probe/src/ohlc_band.rs`](../../packages/rollup-freshness-probe/src/ohlc_band.rs):
+
+- **predicate**, per priced row (`pf_trade_count > 0`): `low > least(open, close)
+  OR high < greatest(open, close) OR low > high OR` any of the four prices `<= 0`.
+  Exact `Decimal` comparisons, no epsilon — `min`/`max`/`argMin`/`argMax` copy
+  stored values bit for bit, so any crossing in storage is a real defect;
+- **scope**: all seven tiers `price_ohlcv_{1m,15m,1h,4h,1d,1w,1M}`, `FINAL`, a
+  48 h window on bucket start widened by one bucket length per tier (a flat 48 h
+  would never see a `_1w`/`_1M` bucket);
+- **signal**: metric `Prices/Rollup` `CandleBandViolations`, alarms
+  `prices-{env}-ohlc-band-{1,100,10000}`, first rung pinned at 1.
+
+⚠️ **The as-stored `Denomination::QuoteLeg` arm does NOT clamp O/H/L** — only
+`vwap` (`packages/prices-api/src/assets/queries_ch.rs`, the `QuoteLeg` arm, ~L1714).
+It applies no rate, so the four prices are the stored decimals and cannot cross
+unless the stored row itself is corrupt — which is exactly what the detector
+above sees. On that path a corrupt row still reaches the consumer as-is.
+
+**Baseline, measured on prod 2026-09-28** (read-only, without `FINAL`, every
+row of every tier):
+
+- **Band violations: 0** on every tier, every source, since 2015 — before and
+  after [[0286]].
+- **Priced rows with a price `<= 0`**: every one an exact zero (none negative),
+  mostly `low = 0` beside a positive `close`, and **all written before the 0286
+  rollout (2026-09-22 12:00 UTC); 0 after it**:
+
+  | tier | before 2026-09-22 12:00 UTC | after |
+  |---|---:|---:|
+  | `_1m` | 7,651 | 0 |
+  | `_15m` | 3,041 | 0 |
+  | `_1h` | 15,003 | 0 |
+  | `_4h` | 12,326 | 0 |
+  | `_1d` | 9,382 | 0 |
+  | `_1w` | 5,010 | — |
+  | `_1M` | 4,350 | — |
+
+  These are **upper bounds** — read without `FINAL`, so superseded versions are
+  included (`_1m` 2026-09 reads 143 without `FINAL`, 52 with it). They are
+  pre-0286 residue that 0286 phase 3 re-ingests, and they sit outside the
+  detector's window by construction. The healthy reading is therefore exactly 0.
+
+⚠️ **No API clamp metric, on purpose.** The only crossing the clamp repairs in
+normal operation is the structural ulp between the exact `close_usd` and the
+rate-derived extremes — the 1.343e-11 BTC 1h measurement above. Counting it would
+page on arithmetic, not on data, and the read path has no per-request metric
+path worth adding for it. A corrupt stored row is caught at the source instead.
 
 ### 4. Provenance reuses [[0165]]'s vocabulary
 
