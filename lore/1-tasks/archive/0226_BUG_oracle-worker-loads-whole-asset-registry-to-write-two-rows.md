@@ -2,7 +2,7 @@
 id: "0226"
 title: "The oracle worker loads all 620,615 assets into memory to write 2 rows, sits at its 256 MB ceiling and OOMs several times a day"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0223", "0222", "0167", "0112", "0132", "0256", "0241", "0140"]
@@ -113,6 +113,15 @@ history:
       prod: 256 → 52 MB, 7–8 s → 0.75 s, 0 errors and 0 OOM since. ACs 1, 2,
       3 and 5 met; AC 4 (a week without an OOM) ends 2026-10-09 12:44 UTC,
       close after it. [[0140]] closed the same day.
+  - date: "2026-10-07"
+    status: completed
+    who: akot
+    note: >
+      Closed before AC 4's week ended (2026-10-09 12:44 UTC), on the
+      operator's decision: 0 OOM and 0 errors from the first new-code run
+      (2026-10-02 12:44 UTC) to the 2026-10-06 measurement; not re-checked
+      since. Fixed by [[0139]], no code here. ACs 1, 2, 3 and 5 met; no
+      follow-up tasks.
 ---
 
 # The oracle worker reads the entire asset registry on every run
@@ -372,8 +381,8 @@ code, 12:44 UTC on a cold container, used **51 MB in 1.4 s**. No
 `sink.rs:72`), `prices-ledger-processor/src/sink/mod.rs:103` (cold start,
 `main.rs:92`; `bin/cli.rs:86`).
 
-**Still open:** AC 4. The week without an OOM runs from the first new-code run
-to **2026-10-09 12:44 UTC**; close after checking it.
+**AC 4 not completed:** the week without an OOM would have ended **2026-10-09
+12:44 UTC**. The task was closed on 2026-10-07, after four clean days.
 
 ## Acceptance Criteria
 
@@ -388,6 +397,8 @@ to **2026-10-09 12:44 UTC**; close after checking it.
       listed above.
 - [ ] `prices-production-oracle-errors` shows **zero** `Runtime.OutOfMemory` for
       a full week after the change.
+      Closed early, 2026-10-07: zero through the 2026-10-06 check (four of
+      the seven days); the rest of the week was not checked.
 - [x] If the deploy touches `eventbridge-stack.ts`, `describe-rule` output for
       `prices-production-cleanup` is recorded **before and after** — not
       touched (no `memorySize` change); the rule reads `DISABLED` on 2026-10-06.
