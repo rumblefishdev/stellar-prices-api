@@ -136,10 +136,12 @@ pub fn sanitize_symbol(raw: &str) -> Option<String> {
 /// the caller has to make. The line between the two is
 /// [`prices_ingest_core::soroban_rpc::simulate`]'s.
 pub async fn resolve_symbol(http: &reqwest::Client, rpc_url: &str, contract: &str) -> Outcome {
-    match simulate(http, rpc_url, contract, "symbol").await {
+    match simulate(http, rpc_url, contract, "symbol", None).await {
         Simulated::Value(v) => symbol_outcome(&v, contract),
         Simulated::Absent => Outcome::Absent,
-        Simulated::Transient => Outcome::Transient,
+        // `as_of` is None, so this arm is unreachable in practice; retrying is
+        // the safe reading either way.
+        Simulated::Transient | Simulated::Behind => Outcome::Transient,
     }
 }
 

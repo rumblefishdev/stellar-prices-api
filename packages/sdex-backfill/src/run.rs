@@ -153,7 +153,7 @@ pub async fn execute(
     if mode == ExtractMode::Combined {
         sink.load_decimals(&mut registry).await?;
     }
-    let mut decimals = DecimalsResolver::from_env();
+    let mut decimals = DecimalsResolver::backfill_from_env();
     // Venue / pool registries. Preloaded from the persisted `pool_registry`
     // artifact (decision #4) so a window starting after activation still
     // resolves earlier-created pools; empty on a fresh full run. Then grown

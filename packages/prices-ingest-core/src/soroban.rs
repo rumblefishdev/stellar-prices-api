@@ -897,10 +897,14 @@ fn amm_trade_to_tick(
         return None;
     }
 
+    // Checked: with per-token scales the quotient carries a factor of up to
+    // 10^28 (a 28-decimal leg against a 0-decimal one), past `Decimal::MAX`,
+    // and the plain `/` panics on overflow. A price no `Decimal` can hold is
+    // not one the candle columns could store either, so the trade is dropped.
     let (price, volume_base, volume_quote) = if pair.inverted {
-        (amount_in / amount_out, amount_out, amount_in)
+        (amount_in.checked_div(amount_out)?, amount_out, amount_in)
     } else {
-        (amount_out / amount_in, amount_in, amount_out)
+        (amount_out.checked_div(amount_in)?, amount_in, amount_out)
     };
 
     // The bound clears a fill whose two legs are both enormous and says nothing
@@ -2435,6 +2439,203 @@ mod tests {
                 "{decimals} decimals"
             );
         }
+    }
+
+    /// The mirror of the case above: USDC sold for the token, so the pair is
+    /// inverted (`amount_in / amount_out`, base volume from `amount_out`). A
+    /// swapped `decimals_in` / `decimals_out` would hide in this branch.
+    #[test]
+    fn the_inverted_branch_scales_each_leg_by_its_own_decimals() {
+        for (decimals, usdc_per_token) in [(8u32, 86_055i128), (18, 1), (6, 2)] {
+            let mut assets = AssetRegistry::from_existing(vec![]);
+            assets.set_decimals(SOLVBTC.to_string(), decimals);
+            let sell = sell_for_usdc(&assets, SOLVBTC, 0, 0);
+            let buy = extractors_core::TradeRow {
+                token_in: sell.token_out.clone(),
+                token_out: SOLVBTC.to_string(),
+                amount_in: usdc_per_token * 10_000_000,
+                amount_out: 10i128.pow(decimals),
+                ..sell
+            };
+
+            let tick = amm_trade_to_tick(&buy, 0, 1_700_000_000, &mut assets, &mut Vec::new())
+                .unwrap_or_else(|| panic!("{decimals}-decimal leg prices"));
+
+            assert_eq!(tick.base, AssetIdentity::Contract(SOLVBTC.to_string()));
+            assert_eq!(
+                tick.price,
+                Decimal::from(usdc_per_token),
+                "{decimals} decimals"
+            );
+            assert_eq!(tick.volume_base, Decimal::ONE, "{decimals} decimals");
+            assert_eq!(
+                tick.volume_quote,
+                Decimal::from(usdc_per_token),
+                "{decimals} decimals"
+            );
+        }
+    }
+
+    /// Review of PR #395: per-token scales can push the quotient past
+    /// `Decimal::MAX`. One raw unit of a 28-decimal token for 9.07e7 stroops is
+    /// ~9.07e28 XLM per token; the plain `/` panicked there and halted ingest
+    /// on that ledger for good. It must drop the trade instead.
+    #[test]
+    fn a_price_past_decimal_max_drops_the_trade_instead_of_panicking() {
+        const DUST28: &str = "CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO";
+        const WHOLE0: &str = "CB7OOP3VSAWBZOOTOG2YEFANVU45GVWYUUM5HI32DKLHVKUDOFVQ37XP";
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        assets.set_decimals(DUST28.to_string(), 28);
+        assets.set_decimals(WHOLE0.to_string(), 0);
+        let xlm_sac = assets
+            .sac_address_of(&AssetIdentity::Native)
+            .expect("XLM has a SAC");
+        let swap = |token_in: &str, token_out: &str, amount_out: i128| extractors_core::TradeRow {
+            venue: Venue::Soroswap,
+            contract_id: "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI".to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: 100,
+            first_event_index: 0,
+            token_in: token_in.to_string(),
+            token_out: token_out.to_string(),
+            amount_in: 1,
+            amount_out,
+            fee: None,
+            trader: None,
+        };
+
+        // (28, 7): one raw unit in, ~9.07 XLM out.
+        let t = swap(DUST28, &xlm_sac, 90_700_000);
+        assert!(amm_trade_to_tick(&t, 0, 1_700_000_000, &mut assets, &mut Vec::new()).is_none());
+        // (28, 0), both directions. Which leg lands in the denominator is the
+        // pair's canonical order, so only the call returning is asserted.
+        for (token_in, token_out) in [(DUST28, WHOLE0), (WHOLE0, DUST28)] {
+            let t = swap(token_in, token_out, 9);
+            let _ = amm_trade_to_tick(&t, 0, 1_700_000_000, &mut assets, &mut Vec::new());
+        }
+    }
+
+    // ---- decode_resolving: the step every caller runs around a decode -------
+
+    /// Answers every request with `answer` and records what it was asked.
+    struct FakeResolver {
+        answer: Vec<crate::DecimalsRow>,
+        asked: Vec<(Vec<String>, u32)>,
+    }
+
+    impl crate::decimals::ResolveDecimals for FakeResolver {
+        async fn resolve(&mut self, missing: &[String], ledger: u32) -> Vec<crate::DecimalsRow> {
+            self.asked.push((missing.to_vec(), ledger));
+            self.answer.clone()
+        }
+    }
+
+    fn decode_seam(reg: &mut Registries, assets: &mut AssetRegistry) -> LedgerSoroban {
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            &[seam_swap("tx-a", 0, 0)],
+            reg,
+            assets,
+            &mut out,
+        );
+        out
+    }
+
+    #[tokio::test]
+    async fn a_resolved_token_is_persisted_then_recorded_then_priced() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let row = crate::DecimalsRow {
+            contract_address: SEAM_T1.to_string(),
+            decimals: 8,
+        };
+        let mut fake = FakeResolver {
+            answer: vec![row.clone()],
+            asked: Vec::new(),
+        };
+        let mut persisted = Vec::new();
+
+        let out = crate::decimals::decode_resolving(
+            &mut fake,
+            &mut assets,
+            SEAM_SEQ,
+            |assets| decode_seam(&mut reg, assets),
+            async |rows: &[crate::DecimalsRow]| {
+                persisted.extend_from_slice(rows);
+                Ok::<(), ()>(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fake.asked, vec![(vec![SEAM_T1.to_string()], SEAM_SEQ)]);
+        assert_eq!(persisted, vec![row]);
+        assert_eq!(
+            assets.decimals_of(&AssetIdentity::Contract(SEAM_T1.to_string())),
+            Some(8)
+        );
+        assert_eq!(out.amm_ticks.len(), 1, "the second decode prices the swap");
+        assert_eq!(out.trades_missing_decimals, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_token_is_counted_and_nothing_is_persisted() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut fake = FakeResolver {
+            answer: Vec::new(),
+            asked: Vec::new(),
+        };
+        let mut persisted: Vec<crate::DecimalsRow> = Vec::new();
+
+        let out = crate::decimals::decode_resolving(
+            &mut fake,
+            &mut assets,
+            SEAM_SEQ,
+            |assets| decode_seam(&mut reg, assets),
+            async |rows: &[crate::DecimalsRow]| {
+                persisted.extend_from_slice(rows);
+                Ok::<(), ()>(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fake.asked.len(), 1);
+        assert!(persisted.is_empty());
+        assert!(out.amm_ticks.is_empty());
+        assert_eq!(out.trades_missing_decimals, 1, "the lost trade is counted");
+    }
+
+    #[tokio::test]
+    async fn a_failed_persist_records_nothing() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut fake = FakeResolver {
+            answer: vec![crate::DecimalsRow {
+                contract_address: SEAM_T1.to_string(),
+                decimals: 8,
+            }],
+            asked: Vec::new(),
+        };
+
+        let got = crate::decimals::decode_resolving(
+            &mut fake,
+            &mut assets,
+            SEAM_SEQ,
+            |assets| decode_seam(&mut reg, assets),
+            async |_: &[crate::DecimalsRow]| Err("insert failed"),
+        )
+        .await;
+
+        assert_eq!(got.err(), Some("insert failed"));
+        assert_eq!(
+            assets.decimals_of(&AssetIdentity::Contract(SEAM_T1.to_string())),
+            None,
+            "recorded only after a durable write, so the next run asks again"
+        );
     }
 
     /// A pure Soroban token whose decimals are unknown is never guessed at 7:

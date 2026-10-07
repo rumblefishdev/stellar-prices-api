@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, DecimalsResolver, OhlcvCandle, Registries, TradeTick,
-    UnresolvedPoolSwap, extract_trades, ledger_sequence, offer_lookup_counts, process_ledger,
-    raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, DecimalsResolver, DecimalsRow, OhlcvCandle, Registries,
+    TradeTick, UnresolvedPoolSwap, decode_resolving, extract_trades, ledger_sequence,
+    offer_lookup_counts, process_ledger, raw_trade_to_tick,
 };
 
 use crate::error::BackfillError;
@@ -407,21 +407,17 @@ pub async fn index_partition(
             // Only in Combined mode — pre-Soroban ledgers carry no Soroban
             // events, so SdexOnly skips the decode entirely.
             if mode == ExtractMode::Combined {
-                let mut sob = process_ledger(lcm, reg, registry);
                 // Task 0329: a trade naming a token whose decimals are unknown
-                // was dropped, not guessed. Resolve, persist, decode again —
-                // the same step as the live processor.
-                if !sob.missing_decimals.is_empty() {
-                    let rows = decimals.resolve(&sob.missing_decimals).await;
-                    if !rows.is_empty() {
-                        sink.write_decimals(&rows).await?;
-                        for row in &rows {
-                            row.record(registry);
-                        }
-                        sob = process_ledger(lcm, reg, registry);
-                    }
-                    stats.trades_missing_decimals += sob.trades_missing_decimals as usize;
-                }
+                // is dropped, not guessed — the same step as the live processor.
+                let sob = decode_resolving(
+                    decimals,
+                    registry,
+                    ledger_sequence(lcm),
+                    |assets| process_ledger(lcm, reg, assets),
+                    async |rows: &[DecimalsRow]| sink.write_decimals(rows).await,
+                )
+                .await?;
+                stats.trades_missing_decimals += sob.trades_missing_decimals as usize;
                 for (source, tick) in sob.amm_ticks {
                     accs.merge_amm(source, tick);
                     stats.amm_ticks += 1;

@@ -46,7 +46,7 @@ pub mod writer;
 
 pub use bucket::{CandleAccumulator, OhlcvCandle};
 pub use canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
-pub use decimals::{DecimalsResolver, DecimalsRow};
+pub use decimals::{DecimalsResolver, DecimalsRow, ResolveDecimals, decode_resolving};
 pub use decode::{decode_object, ledger_close_time, ledger_sequence};
 pub use error::IngestError;
 pub use filter::{

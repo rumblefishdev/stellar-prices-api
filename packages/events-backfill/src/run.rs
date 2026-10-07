@@ -21,9 +21,9 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, DEFAULT_BACKOFF_MS, DecimalsResolver, LedgerSoroban,
-    OhlcvCandle, OhlcvWriter, RawSorobanEvent, Registries, UnresolvedPool, UnresolvedPoolSwap,
-    process_soroban_event_rows, retry_with_backoff,
+    AssetRegistry, CandleAccumulator, DEFAULT_BACKOFF_MS, DecimalsResolver, DecimalsRow,
+    LedgerSoroban, OhlcvCandle, OhlcvWriter, RawSorobanEvent, Registries, UnresolvedPool,
+    UnresolvedPoolSwap, decode_resolving, process_soroban_event_rows, retry_with_backoff,
 };
 
 use crate::cli::Cli;
@@ -65,22 +65,23 @@ async fn decode_ledger(
     writer: &OhlcvWriter,
     dry_run: bool,
 ) -> Result<LedgerSoroban, EventsBackfillError> {
-    let mut out = LedgerSoroban::default();
-    process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
-    if !out.missing_decimals.is_empty() {
-        let rows = decimals.resolve(&out.missing_decimals).await;
-        if !rows.is_empty() {
-            if !dry_run {
-                retry_write(|| async { writer.write_decimals(&rows).await }).await?;
-            }
-            for row in &rows {
-                row.record(assets);
-            }
-            out = LedgerSoroban::default();
+    decode_resolving(
+        decimals,
+        assets,
+        ledger,
+        |assets| {
+            let mut out = LedgerSoroban::default();
             process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
-        }
-    }
-    Ok(out)
+            out
+        },
+        async |rows: &[DecimalsRow]| {
+            if dry_run {
+                return Ok(());
+            }
+            retry_write(|| async { writer.write_decimals(rows).await }).await
+        },
+    )
+    .await
 }
 
 /// Merge one decoded ledger's ticks into the **run-level** per-source
@@ -218,7 +219,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     let existing_assets = writer.load_assets().await?;
     let mut assets = AssetRegistry::from_existing(existing_assets);
     writer.load_decimals(&mut assets).await?;
-    let mut decimals = DecimalsResolver::from_env();
+    let mut decimals = DecimalsResolver::backfill_from_env();
     let mut reg = reprice_registry(writer.load_pool_registry().await?)?;
 
     // Every AMM pool has a `venue` entry (the registry superset); its strkeys are

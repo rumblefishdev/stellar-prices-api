@@ -33,7 +33,7 @@ async fn reads_the_decimals_sbe_checked_on_chain() {
             6,
         ),
     ] {
-        let got = decimals_of(&http_client(), &rpc_url_from_env(), contract).await;
+        let got = decimals_of(&http_client(), &rpc_url_from_env(), contract, 1).await;
         assert_eq!(got, Decimals::Known(want), "{name} ({contract})");
     }
 }
@@ -42,7 +42,7 @@ async fn reads_the_decimals_sbe_checked_on_chain() {
 #[ignore = "requires public network — third-party uptime; never gates a PR"]
 async fn a_contract_that_was_never_deployed_is_absent() {
     let never_deployed = stellar_strkey::Contract([3u8; 32]).to_string();
-    let got = decimals_of(&http_client(), &rpc_url_from_env(), &never_deployed).await;
+    let got = decimals_of(&http_client(), &rpc_url_from_env(), &never_deployed, 1).await;
     assert_eq!(
         got,
         Decimals::Absent,

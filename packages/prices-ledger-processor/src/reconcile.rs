@@ -63,9 +63,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, DecimalsResolver, OfferLookupCounts, OracleSample,
-    PoolRegistryRow, Registries, decode_object, extract_trades_with_counts, ledger_close_time,
-    ledger_sequence, process_ledger, raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, DecimalsResolver, DecimalsRow, OfferLookupCounts,
+    OracleSample, PoolRegistryRow, Registries, decode_object, decode_resolving,
+    extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
+    raw_trade_to_tick,
 };
 use tokio::sync::Mutex;
 use tracing::info;
@@ -168,7 +169,7 @@ fn initial_state(assets: AssetRegistry, mut registries: Registries) -> Processin
         assets,
         registries,
         persisted_pools,
-        decimals: DecimalsResolver::from_env(),
+        decimals: DecimalsResolver::live_from_env(),
     }
 }
 
@@ -198,6 +199,13 @@ where
             sink,
             state: Mutex::new(initial_state(assets, registries)),
         }
+    }
+
+    /// Replace the decimals resolver (task 0329). Tests point it at an address
+    /// that refuses connections, so no test can reach a public RPC.
+    pub fn with_decimals_resolver(mut self, resolver: DecimalsResolver) -> Self {
+        self.state.get_mut().decimals = resolver;
+        self
     }
 
     /// One reconcile run for a LONG-RUNNING caller (the Lambda). Minutes the
@@ -290,22 +298,18 @@ where
                 for trade in trades {
                     sdex.merge(raw_trade_to_tick(&trade, &mut state.assets));
                 }
-                // Soroban AMM trades + oracle samples.
-                let mut sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
-                // Task 0329: a trade naming a token whose decimals are not known
-                // yet was dropped, not guessed. Resolve, persist, and decode the
-                // ledger again — decoding is deterministic, and the first
-                // result is discarded whole, so nothing is counted twice.
-                if !sob.missing_decimals.is_empty() {
-                    let rows = state.decimals.resolve(&sob.missing_decimals).await;
-                    if !rows.is_empty() {
-                        self.sink.write_decimals(&rows).await?;
-                        for row in &rows {
-                            row.record(&mut state.assets);
-                        }
-                        sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
-                    }
-                }
+                // Soroban AMM trades + oracle samples. Task 0329: a trade naming a
+                // token whose decimals are not known yet is dropped, not guessed;
+                // `decode_resolving` resolves it, persists it, and decodes again.
+                let registries = &mut state.registries;
+                let sob = decode_resolving(
+                    &mut state.decimals,
+                    &mut state.assets,
+                    ledger_sequence(lcm),
+                    |assets| process_ledger(lcm, registries, assets),
+                    async |rows: &[DecimalsRow]| self.sink.write_decimals(rows).await,
+                )
+                .await?;
                 for (source, tick) in sob.amm_ticks {
                     amm.entry(source).or_default().merge(tick);
                 }

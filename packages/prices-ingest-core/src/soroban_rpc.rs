@@ -94,6 +94,10 @@ pub enum Simulated {
     /// No answer about the contract: transport failure, JSON-RPC error,
     /// archived state, an empty body. Ask again later.
     Transient,
+    /// The contract errored, but the node has not yet reached the ledger the
+    /// caller asked about, so a contract deployed since may simply be invisible
+    /// to it. Ask again on the next ledger.
+    Behind,
 }
 
 #[derive(serde::Deserialize)]
@@ -116,6 +120,9 @@ struct RpcResult {
     /// a live contract, not one that lacks the function.
     #[serde(default, rename = "restorePreamble")]
     restore_preamble: Option<serde_json::Value>,
+    /// The newest ledger the node had applied when it simulated.
+    #[serde(default, rename = "latestLedger")]
+    latest_ledger: Option<u32>,
 }
 #[derive(serde::Deserialize)]
 struct RpcInvokeResult {
@@ -123,13 +130,18 @@ struct RpcInvokeResult {
 }
 
 /// Call the zero-argument `func()` on `contract` by simulation and classify
-/// the result. Never returns an error: every failure is Absent or Transient,
-/// which is exactly the decision a caller has to make.
+/// the result. Never returns an error: every failure is Absent, Transient or
+/// Behind, which is exactly the decision a caller has to make.
+///
+/// `as_of` is the ledger at which the caller needs the contract to exist (the
+/// one it is decoding). A contract error from a node that has not reached it is
+/// [`Simulated::Behind`], not a fact. `None` skips that check.
 pub async fn simulate(
     http: &reqwest::Client,
     rpc_url: &str,
     contract: &str,
     func: &str,
+    as_of: Option<u32>,
 ) -> Simulated {
     let Some(envelope) = build_simulate_envelope(contract, func) else {
         tracing::warn!(contract, func, "not a well-formed contract address");
@@ -160,7 +172,7 @@ pub async fn simulate(
         }
     };
     match resp.json::<RpcResponse>().await {
-        Ok(r) => classify(r, contract, func),
+        Ok(r) => classify(r, contract, func, as_of),
         Err(err) => {
             tracing::warn!(contract, func, error = %err, "simulate rpc body unparseable");
             Simulated::Transient
@@ -176,7 +188,7 @@ pub async fn simulate(
 /// state, an empty body — we learned nothing, so it is Transient. A wrong
 /// Transient costs a repeated call; a wrong Absent can make a caller give up
 /// on a contract for good.
-fn classify(resp: RpcResponse, contract: &str, func: &str) -> Simulated {
+fn classify(resp: RpcResponse, contract: &str, func: &str, as_of: Option<u32>) -> Simulated {
     // Arrives with HTTP 200, so `error_for_status` cannot see it.
     if let Some(err) = resp.error {
         tracing::warn!(contract, func, error = %err, "simulate returned a json-rpc error");
@@ -191,8 +203,22 @@ fn classify(resp: RpcResponse, contract: &str, func: &str) -> Simulated {
         return Simulated::Transient;
     }
     // The simulation ran and the contract itself errored — deterministic, so a
-    // fact. This is the one arm that stays permanent.
+    // fact. This is the one arm that stays permanent, unless the node is still
+    // behind the ledger the caller is decoding: a contract deployed in between
+    // does not exist for it yet (task 0329 review).
     if let Some(err) = result.error {
+        if let (Some(needed), Some(tip)) = (as_of, result.latest_ledger)
+            && tip < needed
+        {
+            tracing::debug!(
+                contract,
+                func,
+                tip,
+                needed,
+                "node behind the ledger being decoded"
+            );
+            return Simulated::Behind;
+        }
         tracing::debug!(contract, func, error = %err, "contract errored in simulation");
         return Simulated::Absent;
     }
@@ -220,10 +246,15 @@ mod tests {
     use super::*;
 
     fn classify_json(body: &str) -> Simulated {
+        classify_json_as_of(body, None)
+    }
+
+    fn classify_json_as_of(body: &str, as_of: Option<u32>) -> Simulated {
         classify(
             serde_json::from_str(body).expect("test body parses"),
             "C_TEST",
             "symbol",
+            as_of,
         )
     }
 
@@ -263,6 +294,20 @@ mod tests {
             classify_json(r#"{"result":{"results":[],"error":"HostError: missing symbol"}}"#),
             Simulated::Absent,
         );
+    }
+
+    #[test]
+    fn a_contract_error_from_a_node_behind_the_ledger_is_not_a_fact() {
+        let body = r#"{"result":{"results":[],"error":"contract not found","latestLedger":100}}"#;
+        // The node is at 100 and the caller decodes 101: the contract may have
+        // been deployed in 101.
+        assert_eq!(classify_json_as_of(body, Some(101)), Simulated::Behind);
+        // At or past the ledger, the error is a fact again.
+        assert_eq!(classify_json_as_of(body, Some(100)), Simulated::Absent);
+        assert_eq!(classify_json_as_of(body, None), Simulated::Absent);
+        // A node that does not report its tip cannot be judged behind.
+        let no_tip = r#"{"result":{"results":[],"error":"contract not found"}}"#;
+        assert_eq!(classify_json_as_of(no_tip, Some(101)), Simulated::Absent);
     }
 
     #[test]
