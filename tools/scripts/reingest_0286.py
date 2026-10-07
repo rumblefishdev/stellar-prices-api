@@ -947,12 +947,13 @@ def run_month(a, ch, st, m, pw):
             else:
                 marker = mdir / "amm.done"
                 note(f"{m}: waiting for the host run —  read -rs CH_PW; CLICKHOUSE_PASSWORD=\"$CH_PW\" {base}"
-                     f"   then: reingest_0286.py amm-done {m} --fallbacks <negative apply order>")
+                     f"   then: reingest_0286.py amm-done {m} --fallbacks <negative apply order> "
+                     "--decimals <trades dropped (decimals)>")
                 while not marker.exists():
                     DASH["step"] = "waiting for amm-done"
                     RERENDER()
                     time.sleep(15)
-                ms["fallbacks"] = int(marker.read_text().strip() or 0)
+                ms["fallbacks"], ms["decimals"] = read_amm_done(marker)
         done()
 
     if step("reconcile"):
@@ -1095,7 +1096,17 @@ def cmd_status(a, ch, st):
 
 def cmd_amm_done(a, ch, st):
     (st.dir / str(a.month)).mkdir(exist_ok=True)
-    (st.dir / str(a.month) / "amm.done").write_text(str(a.fallbacks))
+    (st.dir / str(a.month) / "amm.done").write_text(f"{a.fallbacks} {a.decimals}")
+
+
+def read_amm_done(marker):
+    """(fallbacks, decimals) from an `amm.done`. A marker without the decimals
+    count predates task 0329 and is refused rather than read as zero."""
+    parts = marker.read_text().split()
+    if len(parts) < 2:
+        raise Stop(f"{marker} carries no `trades dropped (decimals)` count — re-record it with "
+                   "`amm-done <month> --fallbacks N --decimals N` from the run's summary")
+    return int(parts[0]), int(parts[1])
 
 
 def cmd_finish(a, ch, st):
@@ -1183,6 +1194,8 @@ def build_parser():
     p.add_argument("--yes", action="store_true")
     p.add_argument("--accept", action="append", help="YYYYMM whose failed reconciliation is understood and recorded")
     p.add_argument("--fallbacks", type=int, default=0)
+    p.add_argument("--decimals", type=int,
+                   help="amm-done: the run's `trades dropped (decimals)` line (task 0329)")
     p.add_argument("--ack-phase1-measured", action="store_true")
     p.add_argument("--ack-0285", action="store_true")
     p.add_argument("--ack-0300-binary", action="store_true",
@@ -1227,6 +1240,8 @@ def main():
     a = p.parse_args()
     if a.command in ("amm-done", "rollback", "release") and not a.month:
         p.error(f"{a.command} needs a month")
+    if a.command == "amm-done" and a.decimals is None:
+        p.error("amm-done needs --decimals: the run's `trades dropped (decimals)` line (task 0329)")
     if a.min_excluded_rows and not a.second_pass:
         p.error("--min-excluded-rows applies to --second-pass only")
     global LOG

@@ -482,7 +482,8 @@ A pure Soroban token's legs are scaled by its `decimals()`, read over Soroban
 RPC the first time the run meets it and kept in `prices.asset_decimals`.
 **Anything but `0` means a token did not resolve and its trades are NOT in the
 month's candles.** The run WARNs naming the contract. Re-run the month once it
-resolves. The binary needs outbound HTTPS to `SOROBAN_RPC_URL` (default
+resolves. With `--amm wait`, pass the line to `amm-done … --decimals N`: the
+script refuses an `amm.done` without it and marks a non-zero count DEFECT. The binary needs outbound HTTPS to `SOROBAN_RPC_URL` (default
 `https://mainnet.sorobanrpc.com`), and `prices.asset_decimals` must exist.
 
 ---

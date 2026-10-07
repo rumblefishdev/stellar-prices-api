@@ -340,6 +340,15 @@ class Reconcile(unittest.TestCase):
         with self.assertRaisesRegex(r.Stop, "trades dropped"):
             r.amm_summary(text.replace("trades dropped (decimals): 2\n", ""), "log")
 
+    def test_amm_done_carries_the_decimals_count(self):
+        st = state([202201], self.tmp.name)
+        r.cmd_amm_done(args("amm-done", "202201", "--fallbacks", "1", "--decimals", "40"), None, st)
+        marker = Path(self.tmp.name) / "202201" / "amm.done"
+        self.assertEqual(r.read_amm_done(marker), (1, 40))
+        marker.write_text("0")  # written before task 0329
+        with self.assertRaisesRegex(r.Stop, "decimals"):
+            r.read_amm_done(marker)
+
     def test_pre0139_reconciles_unrestricted(self):
         ms, ch, _ = self.run_reconcile(SUMS_COPIED, ids="u32", width="UInt32")
         self.assertEqual(ms["result"]["verdict"], "DEFECT")  # +10 % on the unrestricted sums
