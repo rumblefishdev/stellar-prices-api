@@ -166,11 +166,14 @@ Rejected:
    `TradesMissingDecimals`, alarmed like `UnregisteredPoolEvents`. Both
    backfills print `trades dropped (decimals)`, and `reingest_0286.py` marks a
    month with a non-zero count DEFECT. Added after review (PR #395).
-2. **Absent is terminal per process, Transient retries after 10 minutes.** A
+2. **Absent is terminal per process; Transient depends on the caller.** A
    contract that answered with no usable scale is not asked again until a cold
-   start, and is never persisted as a sentinel. A contract that gave no answer
-   is retried after 10 minutes. Calls run concurrently, so one ledger costs one
-   RPC timeout at worst.
+   start, and is never persisted as a sentinel. Exception: a node behind the
+   ledger being decoded (`latestLedger` from the simulate response) gives
+   `Behind`, which is asked again on the next trade. A contract that gave no
+   answer is parked for 10 minutes live; a backfill retries it inline
+   (1/5/20 s) and then on the next trade. Calls run concurrently, so one ledger
+   costs one RPC timeout at worst. Refined after Adam's review (PR #395).
 3. **Decode again rather than a two-phase tick.** Decoding is deterministic and
    the registry inserts are idempotent map writes, so the first result is
    discarded whole.
@@ -184,6 +187,12 @@ Rejected:
    `reingest_0286.py` compares volumes on the other candles only and trades on
    all of them. A "before" read without that scope compares trades only, as a
    FINDING. Added after review (PR #395).
+8. **A price past `Decimal::MAX` drops the trade.** Per-token scales can carry
+   a factor of up to 10^28, so the quotient uses `checked_div`. Before the
+   review a plain `/` would panic and stall ingest on that ledger for good.
+9. **One `decode_resolving` for all three callers**, generic over a
+   `ResolveDecimals` trait so its persist-then-record order is tested with a
+   fake.
 
 ### Deploy order
 

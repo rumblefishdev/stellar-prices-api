@@ -1507,9 +1507,12 @@ no row, the decode drops that trade rather than guessing a scale. The caller
 asks `decimals()` over Soroban RPC, writes the row, and decodes the ledger
 again. **Read by:** the same three, in full, at startup.
 
-> **Only answers are stored.** A token whose call got no answer has no row and
-> is asked again after ten minutes. One that answered with no usable scale is
-> not asked again until the process restarts. Until it resolves, its trades are
+> **Only answers are stored.** A token whose call got no answer has no row. The
+> live processor asks again after ten minutes; a backfill retries on the spot
+> (1 s, 5 s, 20 s) and then on the token's next trade. A token that answered
+> with no usable scale is not asked again until the process restarts, unless
+> the node was still behind the ledger being decoded, in which case it is asked
+> again on the next trade. Until it resolves, its trades are
 > not priced. The live processor publishes them as `TradesMissingDecimals`
 > (alarmed), and both backfills print them as `trades dropped (decimals)`.
 > Rows are never refreshed, because decimals are fixed at deploy.
