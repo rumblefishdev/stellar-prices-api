@@ -16,6 +16,18 @@ history:
     status: active
     who: stkrolikiewicz
     note: >
+      Observability stack deployed (alarm OK). First post-deploy prices are
+      right: SolvBTC 82 512 $, 1.2 % under CoinGecko; deJTRSY 1.027 $. Seeded
+      prices.asset_decimals for all 46 historical contract tokens (7 → 53).
+      Swapped the Hetzner `~/events-backfill` for the #395 build, so 0286 phase
+      3 picks it up at its next AMM step. Affected tokens trade only from
+      2025-07, and phase 3 stands at 2024-09, so no month it already did needs
+      a redo; Oskar must restart on the new reingest_0286.py before 2025-07.
+      Recent-window repair (2026-09-01 → deploy) under way.
+  - date: "2026-10-07"
+    status: active
+    who: stkrolikiewicz
+    note: >
       PR #395 merged (24e07cc0). prices.asset_decimals created on prod and
       seeded with the 7 tokens. Only the ledger-processor was deployed, through
       `update-function-code` rather than `make deploy-production-compute`: the
@@ -254,6 +266,47 @@ Rejected:
   cdk-hnb659fds-assets-750702271865-eu-central-1 --s3-key
   8df901778d1c4aaf4384269fc0d085ea512d0e30e6c9934e201f95afdd2c7cd4.zip` (the
   package deployed on 2026-10-05).
+- **Observability.** `make deploy-production-observability` ran at 08:06 UTC:
+  the new alarm `prices-production-ledger-processor-trades-missing-decimals`
+  and the dashboard strip (76 → 77). The diff also listed 39 alarm description
+  changes. They were mangled-character repairs in the diff's view only:
+  CloudFormation updated just the alarm, the dashboard and the metadata. The
+  alarm went to OK, and `TradesMissingDecimals` has never been published.
+- **First prices after the deploy.** deJTRSY (18 decimals) read 1.027 $ at
+  08:43 UTC, where it had read 1.03e-11 $. SolvBTC (8 decimals) read 82 512 $
+  at 09:42 UTC, where it had read 8 326 $; CoinGecko said 83 538 $ (−1.2 %).
+- **Seed of the whole history.** 46 contract tokens had a 1d candle and no
+  decimals row. 45 were read on mainnet; the public RPC answered 13 of them
+  with 429 at first, and they succeeded on retry. The 46th,
+  `CDPV3H7C…QTMW` (Axelar USD Coin), fails every call with "Missing Entry
+  __InterchainTokenMigrationData", so its 6 comes from SBE's
+  `default.soroban_contract_metadata`. The table went from 7 to 53 rows, by
+  decimals: 6 → 5, 7 → 39, 8 → 2, 9 → 1, 18 → 6. Besides the first seven,
+  five more tokens are not 7-decimal: two USDT variants and Axelar USDC at 6,
+  so their prices were 10× too high; STBL_USST and two test tokens at 18.
+- **events-backfill on Hetzner.** Built from `develop @ 63b7661c` for x86_64
+  (cargo-lambda/zig; needs glibc ≥ 2.30, the box has 2.39), sha256
+  `10872b2393961c056c5dd959900ca509766f1c82c2ea0afe835c825170d70ca8`.
+  Uploaded as `~/events-backfill-0329`, smoke-tested with `--help`, then put
+  in place as `~/events-backfill` while no events-backfill process ran. The
+  old binary (`ee992dd9…`) is kept as `~/events-backfill.pre0329`; rollback
+  is `mv ~/events-backfill.pre0329 ~/events-backfill`. The box reaches Soroban
+  RPC (`getHealth` healthy).
+- **0286 phase 3.** It stands at 2024-09: the SDEX step ended 2026-10-06
+  23:09 UTC and the AMM step has not run since. Candles of tokens with
+  decimals other than 7 exist only from 2025-07, so no month phase 3 has done
+  needs a redo. From 2024-09 on it uses the new binary. The running
+  orchestrator still holds the old reingest_0286.py in memory, so Oskar must
+  restart it on the new one before 2025-07. Otherwise months with 18-decimal
+  tokens stop as DEFECT on the volume drop, and nothing reads `trades dropped
+  (decimals)`.
+- **Recent-window repair.** Scripts are in a local `repair-0329/`, not
+  committed. The window runs from ledger 64216185 (2026-09-01 00:00) to
+  64814771 (minute 07:53, the last ledger the old code processed), with t_e
+  `2026-10-07 07:54:00`. Only rows of tokens with decimals other than 7 are
+  replaced, and only after a backup: delete, then events-backfill, then
+  enrichment, then the affected-only pre-roll. Lightweight `DELETE FROM` is
+  used because the corrected rows tie the stale ones on `version`.
 
 ## Acceptance Criteria
 
