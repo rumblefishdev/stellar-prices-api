@@ -12,6 +12,18 @@ links:
   - "../../../packages/asset-discovery/src/symbols.rs"
   - "../../../docs/database-schema/amm-trades-schema.md"
 history:
+  - date: "2026-10-07"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      PR #395 merged (24e07cc0). prices.asset_decimals created on prod and
+      seeded with the 7 tokens. Only the ledger-processor was deployed, through
+      `update-function-code` rather than `make deploy-production-compute`: the
+      Compute stack would also have shipped #373's prices-api (0274,
+      `price_basis`), whose schema is not on prod, and that breaks every
+      price/list/batch request. Live and healthy. See "Rollout log". Still
+      open: the first post-deploy price, the observability stack, the history
+      repair, and the reply to SBE.
   - date: "2026-10-06"
     status: active
     who: stkrolikiewicz
@@ -206,6 +218,42 @@ Rejected:
    new candles for 24 h, and a `carried` price keeps the old candle. Run
    `events-backfill` + pre-roll at least over a recent window, and the full
    range via 0286 phase 3 if stage C has not passed these months yet.
+
+### Rollout log (2026-10-07)
+
+- **Schema and seed.** Done before the merge (07:40 UTC) by the operator on
+  `deploy@ch-prod-01`, applying only the `CREATE TABLE` from init.sql. Before:
+  `EXISTS TABLE` returned 0. After: 7 rows (6, 8, 8, 9, 18, 18, 18), matching
+  the mainnet reads. `prices_writer` holds `SELECT, INSERT … ON prices.*`.
+- **Why not the Compute stack.** `develop` carries #373 (0274) besides this
+  task. Its rollout order is binding: ALTER `current_prices.price_basis`, then
+  views.sql, then current.sql, then prices-api. On prod all three schema
+  checks returned 0 (the column, `current_price_usd`, `mv_current_prices`).
+  `cdk diff Prices-production-Compute` showed both the ledger-processor and
+  the api-handler code changing.
+- **Ledger-processor only.** Built with `make build-lambdas` from `develop @
+  24e07cc0`, 12 bootstraps verified, rustc 1.97.1 / cargo-lambda 1.9.1.
+  Bootstrap sha256 (base64) `b+M4AVx6wL5PZAqZ/oMc3OoUNry3PZ/6SCoyn7u6Mlc=`.
+  It carries `prices.asset_decimals`, `TradesMissingDecimals` and
+  `simulateTransaction`. Zipped (bootstrap only) and uploaded with `aws lambda
+  update-function-code` at 07:54:51 UTC. `CodeSha256
+  aMzmQuGWzyLcyExHr57QA2sB2AB7eReo/X//uYTaZIU=`, arm64, Successful/Active. The
+  SQS mapping targets `$LATEST` and there are no aliases.
+- **Verified.** Cold start at 07:54:55 logged `loaded soroban token decimals
+  {tokens: 7}`. 12 invocations a minute before and after, 0 errors, 0
+  throttles, max duration about 2.4 s. The first run wrote 113 rows (cursor
+  64814771 → 64814783). No resolver warnings, no panics.
+- **Not yet verified.** A correct price in the API needs a swap after the
+  deploy: SolvBTC still read 8 326 $ with `as_of 06:11Z`.
+- **Drift, until the next Compute deploy.** The CloudFormation template still
+  names the old ledger-processor asset. The next `make
+  deploy-production-compute` reconciles it, but it must come after 0274's
+  schema rollout; Adam has been told. api-handler is untouched (pre-#373).
+- **Rollback.** `aws lambda update-function-code --function-name
+  prices-production-ledger-processor --s3-bucket
+  cdk-hnb659fds-assets-750702271865-eu-central-1 --s3-key
+  8df901778d1c4aaf4384269fc0d085ea512d0e30e6c9934e201f95afdd2c7cd4.zip` (the
+  package deployed on 2026-10-05).
 
 ## Acceptance Criteria
 
