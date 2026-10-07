@@ -65,6 +65,10 @@ impl AssetIdentity {
 /// symbol resolves to the same identity used as a trade quote.
 pub(crate) use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
+/// Decimals of every classic asset, and so of every SAC: fixed by the protocol
+/// (stroops). A pure Soroban token has its own, read from `decimals()`.
+pub const CLASSIC_DECIMALS: u32 = 7;
+
 /// Mainnet (Public) network passphrase. A SAC contract id is **network-scoped**:
 /// it is `sha256(HashIdPreimage::ContractId { network_id, asset })`, and
 /// `network_id = sha256(passphrase)`. So the passphrase decides which network's
@@ -168,6 +172,10 @@ pub struct AssetRegistry {
     /// intern order. Replaces the id watermark (task 0139): a set of
     /// identities says "new" without assuming ids are handed out in order.
     pending: Vec<AssetIdentity>,
+    /// `decimals()` of each pure Soroban token resolved so far, by contract
+    /// address (`prices.asset_decimals`, task 0329). Classic identities need
+    /// no entry — see [`CLASSIC_DECIMALS`].
+    decimals: HashMap<String, u32>,
 }
 
 impl AssetRegistry {
@@ -180,6 +188,7 @@ impl AssetRegistry {
             network_id: mainnet_network_id(),
             sac_index: HashMap::new(),
             pending: Vec::new(),
+            decimals: HashMap::new(),
         };
         // Pre-seed the canonical quote SACs so an AMM-via-SAC USDC/USDT/XLM
         // collapses even before that asset's first classic (SDEX) sighting in the
@@ -240,6 +249,22 @@ impl AssetRegistry {
     /// classic identity, not under the SAC address.
     pub fn sac_address_of(&self, identity: &AssetIdentity) -> Option<String> {
         identity_to_asset(identity).and_then(|asset| sac_address(&asset, &self.network_id))
+    }
+
+    /// The decimals an AMM leg in `identity` is scaled by, or `None` for a pure
+    /// Soroban token whose `decimals()` is not known yet. Never a guess: the
+    /// fixed 7 this replaced priced every non-7-decimal token off by
+    /// 10^(7 − decimals) (task 0329).
+    pub fn decimals_of(&self, identity: &AssetIdentity) -> Option<u32> {
+        match identity {
+            AssetIdentity::Contract(addr) => self.decimals.get(addr).copied(),
+            AssetIdentity::Native | AssetIdentity::Credit { .. } => Some(CLASSIC_DECIMALS),
+        }
+    }
+
+    /// Record a Soroban token's resolved `decimals()`.
+    pub fn set_decimals(&mut self, contract: String, decimals: u32) {
+        self.decimals.insert(contract, decimals);
     }
 
     pub fn assets(&self) -> impl Iterator<Item = &AssetIdentity> {

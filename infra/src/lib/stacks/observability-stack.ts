@@ -339,6 +339,7 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
   public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
+  public readonly ledgerProcessorTradesMissingDecimalsAlarm: cloudwatch.Alarm;
   /**
    * Task 0100: the weekly coverage sweep found swap/trade emitters in neither
    * `pool_registry` nor the committed allow-list (layer 3).
@@ -1475,6 +1476,36 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorUnregisteredPoolAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorUnregisteredPoolAlarm.addOkAction(snsAction);
+
+    // Task 0329 — live dropped trades whose Soroban token decimals did not
+    // resolve. The ingest scales each AMM leg by its token's `decimals()`, read
+    // over RPC on first sight, and never guesses: until the call answers, the
+    // token's trades produce no candle. Published only when non-zero.
+    this.ledgerProcessorTradesMissingDecimalsAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorTradesMissingDecimalsAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-trades-missing-decimals`,
+        alarmDescription:
+          'The ledger-processor dropped AMM trades because a Soroban token\'s decimals() did not resolve over RPC (task 0329). Those trades produce no candle. Either the RPC (SOROBAN_RPC_URL, default mainnet.sorobanrpc.com) was failing, in which case the token is asked again after 10 minutes, or the token has no usable decimals(), in which case it is not asked again until a cold start. The WARN "dropped AMM trades whose token decimals did not resolve" lists the contracts. Fix: once decimals() answers, reprice the dropped minutes with events-backfill. If it never will, insert the row into prices.asset_decimals by hand AND force a cold start (any configuration update of the ledger-processor function, e.g. aws lambda update-function-configuration --description): a warm processor reads that table only at cold start and keeps dropping the token until then. Reprice after the cold start.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'TradesMissingDecimals',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were dropped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorTradesMissingDecimalsAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorTradesMissingDecimalsAlarm.addOkAction(snsAction);
 
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage

@@ -250,12 +250,13 @@ class Reconcile(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_reconcile(self, after_copied, ids="u64", width="UInt64", accept=()):
+    def run_reconcile(self, after_copied, ids="u64", width="UInt64", accept=(), **month):
         st = state([202201], self.tmp.name)
         ms = st.month(202201)
         ms.update(step=r.STEPS.index("reconcile"), ref="1m", ids=ids,
                   before={"sdex": {"candles": 9, "trades": 1000, "vb": "40", "vq": "50"}},
-                  outside_before={})
+                  outside_before={}, vol_scope=r.VOL_SCOPE)
+        ms.update(month)
 
         def sums(sql):
             return after_copied if RESTRICT in sql else SUMS_ALL
@@ -305,6 +306,48 @@ class Reconcile(unittest.TestCase):
         ms, _, err = self.run_reconcile(SUMS_COPIED, ids="u32", accept=[202201])
         self.assertIsNone(err)
         self.assertEqual(ms["result"]["verdict"], "OK")
+
+    # ---- task 0329: per-token decimals move contract-token volumes by design ----
+
+    def test_volumes_leave_out_contract_token_candles_and_trades_do_not(self):
+        sql = " ".join(r.SUMS.format(tier="1m", m=202201, restrict="").split())
+        self.assertIn("sum(trade_count)", sql)
+        no_contract = ("asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != '') "
+                       "AND quote_asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != '')")
+        self.assertIn(f"sumIf(volume_base, {no_contract})", sql)
+        self.assertIn(f"sumIf(volume_quote, {no_contract})", sql)
+
+    def test_lower_scoped_volume_is_still_a_defect(self):
+        ms, _, err = self.run_reconcile([["sdex", "9", "1000", "39", "50"]])
+        self.assertEqual(ms["result"]["verdict"], "DEFECT")
+        self.assertRegex(str(err), "reconciliation failed")
+
+    def test_a_before_read_without_the_scope_compares_trades_not_volumes(self):
+        ms, _, err = self.run_reconcile([["sdex", "9", "1000", "39", "50"]], vol_scope=None)
+        self.assertIsNone(err)
+        self.assertEqual(ms["result"]["verdict"], "FINDING")
+        self.assertTrue(any("volumes are NOT compared" in n for n in r.DASH["notes"]))
+
+    def test_trades_dropped_for_decimals_are_a_defect(self):
+        ms, _, err = self.run_reconcile(SUMS_COPIED, decimals=3)
+        self.assertEqual(ms["result"]["verdict"], "DEFECT")
+        self.assertTrue(any("3 AMM trades dropped" in n for n in r.DASH["notes"]))
+
+    def test_the_summary_needs_the_decimals_line(self):
+        text = ("negative apply order:      0\nswaps dropped (unresolved):0\n"
+                "trades dropped (decimals): 2\n")
+        self.assertEqual(r.amm_summary(text, "log"), {"fallbacks": 0, "dropped": 0, "decimals": 2})
+        with self.assertRaisesRegex(r.Stop, "trades dropped"):
+            r.amm_summary(text.replace("trades dropped (decimals): 2\n", ""), "log")
+
+    def test_amm_done_carries_the_decimals_count(self):
+        st = state([202201], self.tmp.name)
+        r.cmd_amm_done(args("amm-done", "202201", "--fallbacks", "1", "--decimals", "40"), None, st)
+        marker = Path(self.tmp.name) / "202201" / "amm.done"
+        self.assertEqual(r.read_amm_done(marker), (1, 40))
+        marker.write_text("0")  # written before task 0329
+        with self.assertRaisesRegex(r.Stop, "decimals"):
+            r.read_amm_done(marker)
 
     def test_pre0139_reconciles_unrestricted(self):
         ms, ch, _ = self.run_reconcile(SUMS_COPIED, ids="u32", width="UInt32")

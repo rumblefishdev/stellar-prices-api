@@ -218,6 +218,7 @@ fn an_aquarius_self_trade_yields_no_tick_and_no_error() {
     let mut reg = Registries::new();
     reg.venue.insert(AQUA.to_string(), Venue::Aquarius);
     let mut assets = AssetRegistry::from_existing(vec![]);
+    assets.set_decimals(TOKEN.to_string(), 7);
     let out = run(
         62_078_348,
         std::slice::from_ref(&trade),

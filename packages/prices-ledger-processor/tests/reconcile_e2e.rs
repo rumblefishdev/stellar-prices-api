@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OracleSample, PoolRegistryRow, Registries};
+use prices_ingest_core::{
+    AssetRegistry, DecimalsResolver, OhlcvCandle, OracleSample, PoolRegistryRow, Registries,
+};
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
     object_fetcher::LocalDiskFetcher,
@@ -58,6 +60,7 @@ fn reconciler(
         AssetRegistry::from_existing(Vec::new()),
         Registries::new(),
     )
+    .with_decimals_resolver(DecimalsResolver::live("http://127.0.0.1:1/".to_string()))
 }
 
 /// Fault-injecting sink: fails the first `write_new_assets` call, succeeds after.
@@ -117,7 +120,8 @@ async fn assets_from_a_failed_run_are_written_on_the_next_run() {
         sink.clone(),
         AssetRegistry::from_existing(Vec::new()),
         Registries::new(),
-    );
+    )
+    .with_decimals_resolver(DecimalsResolver::live("http://127.0.0.1:1/".to_string()));
 
     // Run 1: interns new assets, then the (first) asset write fails → the run
     // errors and the cursor is never advanced (the doorbell would redeliver).

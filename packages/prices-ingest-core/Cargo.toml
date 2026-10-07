@@ -11,6 +11,14 @@ path = "src/lib.rs"
 [dependencies]
 stellar-xdr = { workspace = true }
 stellar-strkey = { workspace = true }
+# Task 0329: `decimals()` over Soroban RPC `simulateTransaction` (moved here
+# from asset-discovery's symbol stage, which now shares it). Same feature list
+# as asset-discovery and oracle-worker.
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "json",
+] }
 sha2 = { workspace = true }
 xdr-parser = { workspace = true }
 clickhouse = { workspace = true }

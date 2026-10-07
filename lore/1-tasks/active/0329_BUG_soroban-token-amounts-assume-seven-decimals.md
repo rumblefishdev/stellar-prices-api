@@ -141,14 +141,82 @@ Rejected:
    range. Coordinate with the phase-3 operator.
 6. Tell Karol (SBE) when prices are correct.
 
+## Implementation (branch `fix/0329_soroban-token-amounts-assume-seven-decimals`)
+
+- `prices_ingest_core::soroban_rpc`: the `simulateTransaction` envelope and the
+  Absent/Transient boundary, moved from asset-discovery's `symbols.rs`, which now
+  delegates to it and re-exports the old names.
+- `AssetRegistry::decimals_of`: classic identities and SACs → 7, a `Contract`
+  → its resolved decimals or `None`. `amm_trade_to_tick` scales each leg by its
+  own decimals. An unknown leg yields no tick, interns nothing, and lands in
+  `LedgerSoroban::missing_decimals`.
+- `prices.asset_decimals` + `OhlcvWriter::{load,write}_decimals` +
+  `DecimalsResolver` (`decimals()` must be a `U32` ≤ 28).
+- Callers decode, resolve what was missing, persist it, record it, and decode
+  that ledger again: the live reconcile loop, `events-backfill`, and
+  `sdex-backfill` in `combined` mode.
+
+### Design decisions
+
+#### Emerged
+
+1. **Dropped trades are counted, not recorded in a table.** `unresolved_pools`
+   is keyed by pool, so there is no row for a token. Instead the live processor
+   counts them on `RunStats`, WARNs with the contracts, and publishes
+   `TradesMissingDecimals`, alarmed like `UnregisteredPoolEvents`. Both
+   backfills print `trades dropped (decimals)`, and `reingest_0286.py` marks a
+   month with a non-zero count DEFECT. Added after review (PR #395).
+2. **Absent is terminal per process; Transient depends on the caller.** A
+   contract that answered with no usable scale is not asked again until a cold
+   start, and is never persisted as a sentinel. Exception: a node behind the
+   ledger being decoded (`latestLedger` from the simulate response) gives
+   `Behind`, which is asked again on the next trade. A contract that gave no
+   answer is parked for 10 minutes live; a backfill retries it inline
+   (1/5/20 s) and then on the next trade. Calls run concurrently, so one ledger
+   costs one RPC timeout at worst. Refined after Adam's review (PR #395).
+3. **Decode again rather than a two-phase tick.** Decoding is deterministic and
+   the registry inserts are idempotent map writes, so the first result is
+   discarded whole.
+4. **`CandleSink::write_decimals` defaults to a no-op.** Only `ClickHouseSink`
+   persists. The test sinks need no change.
+5. **`sdex-backfill` reads the table only in `combined` mode.** The 0286 phase-3
+   `sdex-only` runs therefore do not need the table to exist.
+6. **An `events-backfill` dry-run resolves but does not persist.**
+7. **Phase-3 volume reconcile leaves out contract-token candles.** Their volume
+   moves by design (an 18-decimal token's base volume falls by 10^11), so
+   `reingest_0286.py` compares volumes on the other candles only and trades on
+   all of them. A "before" read without that scope compares trades only, as a
+   FINDING. Added after review (PR #395).
+8. **A price past `Decimal::MAX` drops the trade.** Per-token scales can carry
+   a factor of up to 10^28, so the quotient uses `checked_div`. Before the
+   review a plain `/` would panic and stall ingest on that ledger for good.
+9. **One `decode_resolving` for all three callers**, generic over a
+   `ResolveDecimals` trait so its persist-then-record order is tested with a
+   fake.
+
+### Deploy order
+
+1. Apply `init.sql` on the box: it creates `prices.asset_decimals`. The live
+   processor's init fails without it.
+2. Optional pre-seed, so the first cold start needs no RPC call (the Lambda has
+   a 60 s budget):
+   `INSERT INTO prices.asset_decimals (contract_address, decimals) VALUES ('CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN', 8), ('CBI7UCH5KGSVQRO5H4SUCZUTZABCITZLRHQQZTWL2TK4RZ72TAR6IHRV', 18), ('CB7OOP3VSAWBZOOTOG2YEFANVU45GVWYUUM5HI32DKLHVKUDOFVQ37XP', 6), ('CC2RBGYNCFBCVENIDL5BFBWPH4OUZM2UA3OD2K2N54GLMWCC4KWPVAGO', 9), ('CC64WBDGS6QQP22QTTIACYIXT3WF7BBQEYOQPLTP7GTKYY7PZ74QYGSL', 18), ('CCT4ZYIYZ3TUO2AWQFEOFGBZ6HQP3GW5TA37CK7CRZVFRDXYTHTYX7KP', 18), ('CAUP7NFABXE5TJRL3FKTPMWRLC7IAXYDCTHQRFSCLR5TMGKHOOQO772J', 8)`
+3. Deploy the ledger processor.
+4. Repair history right away. Until it is repaired, `vwap_24h` blends old and
+   new candles for 24 h, and a `carried` price keeps the old candle. Run
+   `events-backfill` + pre-roll at least over a recent window, and the full
+   range via 0286 phase 3 if stage C has not passed these months yet.
+
 ## Acceptance Criteria
 
-- [ ] Unit test: an 8-, 18- and 6-decimal leg against a 7-decimal leg gives the
-      true price and the true base volume.
-- [ ] A token whose decimals are unresolved never produces a price.
+- [x] Unit test: an 8-, 18- and 6-decimal leg against a 7-decimal leg gives the
+      true price and the true base volume
+      (`each_leg_is_scaled_by_its_own_tokens_decimals`).
+- [x] A token whose decimals are unresolved never produces a price
+      (`a_leg_with_unknown_decimals_prices_nothing_and_is_reported`).
 - [ ] After deploy, all six priced tokens are within a few percent of an
       external reference.
 - [ ] History of the affected assets re-ingested; `price_usd_series*` right over
       the full range, with significant digits restored for the 18-decimal
       tokens.
-- [ ] `amm-trades-schema.md` §3 closed; the `AMM_AMOUNT_SCALE` constant removed.
+- [x] `amm-trades-schema.md` §3 closed; the `AMM_AMOUNT_SCALE` constant removed.

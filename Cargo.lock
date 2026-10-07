@@ -158,7 +158,6 @@ dependencies = [
 name = "asset-discovery"
 version = "0.1.0"
 dependencies = [
- "base64",
  "clickhouse",
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
@@ -2918,6 +2917,7 @@ name = "prices-ingest-core"
 version = "0.1.0"
 dependencies = [
  "aquarius-extractor",
+ "base64",
  "clickhouse",
  "comet-extractor",
  "extractors-core",
@@ -2925,6 +2925,7 @@ dependencies = [
  "ledger-processor",
  "phoenix-extractor",
  "prices-clickhouse",
+ "reqwest",
  "rust_decimal",
  "serde",
  "serde_json",

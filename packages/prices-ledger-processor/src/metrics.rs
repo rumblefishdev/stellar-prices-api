@@ -63,6 +63,12 @@ pub const FORCED_PARTIAL_FLUSH: &str = "ForcedPartialFlushes";
 /// factory, or a factory event missed before a cold start.
 pub const UNREGISTERED_POOL_EVENTS: &str = "UnregisteredPoolEvents";
 
+/// AMM trades a reconcile run dropped because a leg's Soroban token decimals
+/// did not resolve over RPC (task 0329) — the RPC was down, or the token has no
+/// usable `decimals()`. Emitted ONLY when non-zero, like
+/// [`UNREGISTERED_POOL_EVENTS`].
+pub const TRADES_MISSING_DECIMALS: &str = "TradesMissingDecimals";
+
 /// `PutMetricData` accepts at most 150 entries in a datum's `Values` array, so
 /// a run with more INSERTs than that spills into further datums of the same
 /// metric rather than being truncated (or, worse, aggregated back into
@@ -170,6 +176,19 @@ pub fn unregistered_pool_event_metrics(total: u64) -> Vec<Metric> {
     }]
 }
 
+/// The dropped-for-decimals datapoint for one run (task 0329), or nothing when
+/// the run dropped none.
+pub fn trades_missing_decimals_metrics(total: u64) -> Vec<Metric> {
+    if total == 0 {
+        return Vec::new();
+    }
+    vec![Metric {
+        name: TRADES_MISSING_DECIMALS,
+        unit: Unit::Count,
+        values: vec![total as f64],
+    }]
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
 /// `Environment` dimension. One `PutMetricData` call for the whole batch.
 ///
@@ -240,6 +259,16 @@ mod tests {
     #[test]
     fn a_run_that_dropped_no_unregistered_trades_publishes_no_datapoint() {
         assert!(unregistered_pool_event_metrics(0).is_empty());
+    }
+
+    /// Task 0329: same absent-while-healthy contract.
+    #[test]
+    fn trades_missing_decimals_publish_only_when_some_were_dropped() {
+        assert!(trades_missing_decimals_metrics(0).is_empty());
+        let m = trades_missing_decimals_metrics(3);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].name, TRADES_MISSING_DECIMALS);
+        assert_eq!(m[0].values, vec![3.0]);
     }
 
     #[test]

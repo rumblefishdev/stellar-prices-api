@@ -11,8 +11,8 @@
 use std::future::Future;
 
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, PoolRegistryRow,
-    Registries, retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, DecimalsRow, OhlcvCandle, OhlcvWriter, OracleSample,
+    PoolRegistryRow, Registries, retry_with_backoff,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +52,16 @@ pub trait CandleSink {
         &self,
         rows: &[PoolRegistryRow],
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
+
+    /// Persist Soroban token decimals a run resolved over RPC (task 0329). A
+    /// no-op by default: a sink that drops them only costs an RPC call per
+    /// token at the next cold start, because the registry keeps them warm.
+    fn write_decimals(
+        &self,
+        _rows: &[DecimalsRow],
+    ) -> impl Future<Output = Result<(), SinkError>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// ClickHouse sink backed by the shared [`OhlcvWriter`]. Works against either a
@@ -101,7 +111,14 @@ impl ClickHouseSink {
     /// identity (task 0139), so live and backfill ids agree by construction.
     pub async fn load_registry(&self) -> Result<AssetRegistry, SinkError> {
         let existing = self.writer.load_assets().await.map_err(redact)?;
-        Ok(AssetRegistry::from_existing(existing))
+        let mut registry = AssetRegistry::from_existing(existing);
+        // Task 0329: the AMM path scales a pure Soroban token's legs by its
+        // `decimals()`; loading the resolved ones here saves an RPC call each.
+        self.writer
+            .load_decimals(&mut registry)
+            .await
+            .map_err(redact)?;
+        Ok(registry)
     }
 
     /// Preload the discovered AMM pool registry from `prices.pool_registry` so the
@@ -158,6 +175,17 @@ impl CandleSink for ClickHouseSink {
             &DEFAULT_BACKOFF_MS,
             |_| true,
             || async { self.writer.write_pool_rows(rows).await.map_err(redact) },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn write_decimals(&self, rows: &[DecimalsRow]) -> Result<(), SinkError> {
+        // Idempotent (RMT on contract_address) → retried like the other writes.
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_decimals(rows).await.map_err(redact) },
         )
         .await
         .map(|_| ())
