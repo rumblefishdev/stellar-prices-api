@@ -23,6 +23,11 @@
 //! mTLS env (same as sdex-backfill): CH_DOMAIN, MTLS_CERT_PATH, MTLS_KEY_PATH,
 //! MTLS_CA_PATH. Revert a partition from its FREEZE snapshot with
 //! `SYSTEM UNFREEZE WITH NAME '<snapshot_name>'` + `ALTER TABLE … ATTACH`.
+//!
+//! `price_ohlcv_1m` is accepted too, for a whole-history drain (task 0286 §7b):
+//! the hourly Lambda prices at most 200 k rows an hour, which is months for a
+//! re-ingested history. Only the fill-the-zeros mode is allowed there — no
+//! `--reset-*` — and only with `--skip-snapshot`, see [`check_table`].
 
 use std::path::PathBuf;
 
@@ -69,7 +74,8 @@ struct Args {
     #[arg(long, env = "MTLS_CA_PATH")]
     mtls_ca_path: Option<PathBuf>,
 
-    /// Coarse table to repair (e.g. `price_ohlcv_1h`). One table per run.
+    /// Table to repair (e.g. `price_ohlcv_1h`). One table per run.
+    /// `price_ohlcv_1m` takes only the fill-the-zeros mode (see `check_table`).
     #[arg(long)]
     table: String,
 
@@ -264,6 +270,46 @@ fn validate_month(label: &str, m: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Which tables this tool may write, and how.
+///
+/// The coarse rollups take every mode. `price_ohlcv_1m` is the live base table
+/// the hourly Lambda owns, so it takes only the fill-the-zeros mode, which is
+/// exactly what the Lambda runs: it writes rows still at zero and discards
+/// nothing, so it can run beside the Lambda (task 0286 §7b). A reset there
+/// would discard prices every other tier is rolled from, so it is refused.
+/// FREEZE is refused too: `prices_writer` cannot take it, and a 1m snapshot
+/// protects nothing in a mode that only fills zeros.
+fn check_table(
+    table: &str,
+    resetting: bool,
+    skip_snapshot: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    if !table.starts_with("price_ohlcv_") {
+        return Err(format!(
+            "--table {table} is not an OHLCV table (expected price_ohlcv_1m, _15m … _1M)"
+        ));
+    }
+    if table != "price_ohlcv_1m" {
+        return Ok(());
+    }
+    if resetting {
+        return Err(
+            "--reset-* is refused on price_ohlcv_1m: a reset discards prices every \
+             coarse tier is rolled from. On 1m only the fill-the-zeros mode runs."
+                .into(),
+        );
+    }
+    if !skip_snapshot && !dry_run {
+        return Err(
+            "price_ohlcv_1m needs --skip-snapshot: prices_writer cannot FREEZE, and \
+             the fill-the-zeros mode discards nothing a snapshot would protect."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -284,16 +330,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    if !args.table.starts_with("price_ohlcv_") || args.table == "price_ohlcv_1m" {
-        // The driver targets the coarse rollups; 1m is the live base table the
-        // scheduled Lambda owns and has live writers. Refuse it outright.
-        return Err(format!(
-            "--table {} is not a coarse OHLCV table (expected price_ohlcv_15m … _1M; \
-             price_ohlcv_1m is the live base table and is off-limits here)",
-            args.table
-        )
-        .into());
-    }
+    check_table(
+        &args.table,
+        args.reset_quote_asset_id.is_some(),
+        args.skip_snapshot,
+        args.dry_run,
+    )?;
 
     // Reset mode is the only path here that discards data, so its two footguns
     // are refused rather than warned about.
@@ -487,7 +529,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     driver.preflight().await?;
 
-    if args.skip_snapshot && !args.dry_run {
+    if args.skip_snapshot && !args.dry_run && args.table == "price_ohlcv_1m" {
+        info!("snapshot disabled on price_ohlcv_1m: fill-the-zeros mode, nothing is discarded");
+    } else if args.skip_snapshot && !args.dry_run {
         warn!(
             "snapshot DISABLED (--skip-snapshot): partitions will be repaired with no FREEZE \
              backup — only safe when the 1m source can rebuild this coarse table"
@@ -605,4 +649,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_table;
+
+    #[test]
+    fn coarse_tables_take_every_mode() {
+        assert!(check_table("price_ohlcv_1h", true, false, false).is_ok());
+        assert!(check_table("price_ohlcv_1M", false, true, false).is_ok());
+    }
+
+    #[test]
+    fn a_non_ohlcv_table_is_refused() {
+        assert!(check_table("assets", false, true, false).is_err());
+    }
+
+    #[test]
+    fn one_minute_takes_the_fill_the_zeros_mode_without_a_snapshot() {
+        assert!(check_table("price_ohlcv_1m", false, true, false).is_ok());
+        assert!(check_table("price_ohlcv_1m", false, false, true).is_ok());
+    }
+
+    #[test]
+    fn one_minute_refuses_a_reset_even_in_a_dry_run() {
+        assert!(check_table("price_ohlcv_1m", true, true, false).is_err());
+        assert!(check_table("price_ohlcv_1m", true, true, true).is_err());
+    }
+
+    #[test]
+    fn one_minute_refuses_a_real_run_with_a_snapshot() {
+        assert!(check_table("price_ohlcv_1m", false, false, false).is_err());
+    }
 }
