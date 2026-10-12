@@ -2,7 +2,7 @@
 id: "0330"
 title: "The XDR watch reports BEHIND because stellar-xdr 30 counts as a crate for protocol 29"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0325", "0319", "0098"]
 tags: [ci, resilience, ingestion, priority-medium, effort-small]
@@ -13,6 +13,8 @@ links:
   - "https://github.com/rumblefishdev/stellar-prices-api/issues/398"
   - "https://github.com/stellar/rs-stellar-xdr/releases/tag/v30.0.0"
   - "https://github.com/stellar/stellar-core/pull/5478"
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/399"
+  - "https://github.com/rumblefishdev/stellar-prices-api/actions/runs/38240193493"
 history:
   - date: "2026-10-12"
     status: active
@@ -32,6 +34,15 @@ history:
       18/18 pass. The pre-fix script fails 5 of them, exactly the new cases.
       Live run against mainnet 29 and crates.io 30.0.0 exits 0 with
       "WAITING: no stellar-xdr 29" in both --watch and PR mode.
+  - date: "2026-10-12"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      PR #399 merged to develop as 78765f9e at 11:02:55 UTC. 4 files,
+      +82 −23. 18 tier cases, 5 of them new. CI 4/4 green. A manual
+      xdr-protocol-watch run on master (38240193493, 11:03 UTC) was green and
+      reported "WAITING: no stellar-xdr 29 is published yet". It closed #398
+      with the "Closed as not actionable yet" comment.
 ---
 
 # The XDR watch reports BEHIND because stellar-xdr 30 counts as a crate for protocol 29
@@ -96,10 +107,56 @@ LAGGING). The crates.io mock serves `versions`. Update the runbook's
 - [x] Current pin+1, core pin+2, crate pin+2 → LAGGING (exit 1 under `--watch`).
 - [x] All existing tier cases still pass, and the pre-fix script fails the new
       WAITING case.
-- [ ] After merge to `develop`, a manual watch run on `master` is green and
+- [x] After merge to `develop`, a manual watch run on `master` is green and
       closes #398 as "not actionable yet".
 
-## Notes
+## Implementation Notes
 
-No workflow change on `master` is needed: the workflow checks out `develop`
-for the script.
+- `publishedCrate()` returns `releases`: the stable, unyanked versions from
+  the `versions` array of the crate document. The `major` field is gone.
+- `bumpTarget(crate, protocol)` returns the newest release with
+  `pin < major ≤ protocol`.
+- The tier check asks `bumpTarget` for mainnet (BEHIND) and then for core
+  (LAGGING). WAITING when both are empty.
+- The BEHIND report names the target (`bump to …`). The LAGGING report names
+  the target instead of `max_stable_version`.
+- No workflow change on `master` was needed: the workflow checks out
+  `develop` for the script.
+
+**Modified tests:** the `published()` mock now also serves `versions`. No
+existing case changed.
+
+## Design Decisions
+
+### From Plan
+
+1. **Ask mainnet and core separately.** Mainnet can sit on a crate-less
+   protocol (29) while core supports the next one, which has a crate (30).
+   That reading is LAGGING, not WAITING.
+2. **Keep the WAITING wording.** `— WAITING: no stellar-xdr` is what
+   master's workflow matches to close the issue.
+
+### Emerged
+
+3. **A range, not an exact major.** The target is `pin < major ≤ N`, not
+   `major == N`. In chat I first described it as "exactly 29". The range also
+   covers a pin two protocols behind (pin 27, mainnet 29, only 28 published:
+   BEHIND, bump to 28). An exact check would call that WAITING.
+4. **Same request, `versions` from the crate document.** No call to the
+   paginated `/versions` endpoint. A document without `versions` is
+   unreadable, which is the `cannot read` path (red run, no issue).
+5. **Yanked versions do not count.** No test covers this.
+6. **The WAITING report explains a later major.** When the newest crate is
+   above the needed protocol, the report says it carries a later protocol's
+   XDR and is not a bump target.
+
+## Issues Encountered
+
+- **`lore_set-task` could not find 0330** (TASK_NOT_FOUND) from the
+  `issue-398-review` worktree. The MCP server seems to resolve tasks in the
+  main checkout. The task was never set as the session's current task.
+- **The pre-push hook took 3 of 4 nx tasks from cache.** It is unclear
+  whether the infra `test` target re-ran the changed test file locally. The
+  test was run directly (18/18), and CI ran it on the PR.
+- **Prettier re-padded the whole tier table** in the runbook, which made
+  the runbook diff larger than the change.
