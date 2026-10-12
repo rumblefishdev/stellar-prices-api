@@ -1135,8 +1135,9 @@ def cmd_finish(a, ch, st):
         print(f"acceptance 2 — OHLC order on {t}: {bad} violations", flush=True)
     print("""
 Not automatic, by design (runbook §7b-7e, §8):
-  7b  the enrichment worker now re-prices the whole history on its own (hours). Capture
-      POST_RUN_0228_VERSION_BEFORE_1W / _1M BEFORE it starts.
+  7b  drain 1m with coarse-repair from this machine (days); the hourly Lambda alone takes
+      months. Then 7b-2, coarse-repair on 15m..1M. Capture
+      POST_RUN_0228_VERSION_BEFORE_1W / _1M BEFORE either starts.
   7c  cargo test -p enrichment-worker --test post_run_0228_it -- --ignored
   7e  the USDT-peg read (USDT by identity, runbook §7e): peg_written = 0, pivot_written > 0, on 1m and 1h
   8.3 XLM/USDC 1d closes on the seven dust days within 5 % of Bitstamp
