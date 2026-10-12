@@ -22,6 +22,16 @@ history:
       2026-10-09 and reports BEHIND (pin 28, mainnet 29, newest crate 30.0.0).
       Nothing is broken: protocol 29 kept the XDR of 28 (0325), and every
       production rollup-freshness and ledger-processor alarm is OK.
+  - date: "2026-10-12"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implemented on fix/0330_xdr-watch-reads-a-later-major-as-the-missing-crate.
+      A bump target for protocol N is now the newest stable, unyanked version
+      with pin < major ≤ N, asked for mainnet and core separately. Tier test:
+      18/18 pass. The pre-fix script fails 5 of them, exactly the new cases.
+      Live run against mainnet 29 and crates.io 30.0.0 exits 0 with
+      "WAITING: no stellar-xdr 29" in both --watch and PR mode.
 ---
 
 # The XDR watch reports BEHIND because stellar-xdr 30 counts as a crate for protocol 29
@@ -81,10 +91,10 @@ LAGGING). The crates.io mock serves `versions`. Update the runbook's
 
 ## Acceptance Criteria
 
-- [ ] Live run against mainnet 29 and crates.io 30.0.0 exits 0 with
+- [x] Live run against mainnet 29 and crates.io 30.0.0 exits 0 with
       `— WAITING: no stellar-xdr 29`, in PR and `--watch` mode.
-- [ ] Current pin+1, core pin+2, crate pin+2 → LAGGING (exit 1 under `--watch`).
-- [ ] All existing tier cases still pass, and the pre-fix script fails the new
+- [x] Current pin+1, core pin+2, crate pin+2 → LAGGING (exit 1 under `--watch`).
+- [x] All existing tier cases still pass, and the pre-fix script fails the new
       WAITING case.
 - [ ] After merge to `develop`, a manual watch run on `master` is green and
       closes #398 as "not actionable yet".

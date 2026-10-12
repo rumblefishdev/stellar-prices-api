@@ -1,5 +1,5 @@
 // Tier matrix for tools/scripts/verify-xdr-protocol-gap.mjs (tasks 0319,
-// 0325), run against a local mock of Horizon and crates.io so it needs no
+// 0325, 0330), run against a local mock of Horizon and crates.io so it needs no
 // network. Every case is relative to the real pin in Cargo.toml, so a
 // stellar-xdr bump needs no edit here.
 //
@@ -45,6 +45,7 @@ const net = (current, supported) => ({
 });
 const published = (stable, max = stable) => ({
   crate: { max_stable_version: stable, max_version: max },
+  versions: [...new Set([max, stable])].map((num) => ({ num, yanked: false })),
 });
 
 // Async, not spawnSync: the mock lives in this process and must keep serving.
@@ -78,6 +79,11 @@ const cases = [
   ['BEHIND, crate published, watch', net(p + 1, p + 1), published(`${p + 1}.0.0`), true, 1, 'is BEHIND mainnet protocol'],
   ['BEHIND, crate published, PR', net(p + 1, p + 1), published(`${p + 1}.0.0`), false, 1, 'is BEHIND mainnet protocol'],
   ['BEHIND, crate for mainnet but not core', net(p + 1, p + 2), published(`${p + 1}.0.0`), true, 1, 'is BEHIND mainnet protocol'],
+  ['voted, only a later crate (#398), watch', net(p + 1, p + 1), published(`${p + 2}.0.0`), true, 0, `— WAITING: no stellar-xdr ${p + 1}`],
+  ['voted, only a later crate (#398), PR', net(p + 1, p + 1), published(`${p + 2}.0.0`), false, 0, 'not\na bump target'],
+  ['before the vote, only a later crate', net(p, p + 1), published(`${p + 2}.0.0`), true, 0, '— WAITING: no stellar-xdr'],
+  ['voted without a crate, core next with one', net(p + 1, p + 2), published(`${p + 2}.0.0`), true, 1, `${p + 2}.0.0 is published — the bump is possible now`],
+  ['crates.io lists no versions, watch', net(p + 1, p + 1), { crate: { max_stable_version: `${p + 1}.0.0` } }, true, 1, 'error: cannot read'],
   ['voted, crates.io down, watch', net(p + 1, p + 1), null, true, 1, 'error: cannot read'],
   ['voted, crates.io down, PR', net(p + 1, p + 1), null, false, 0, 'crate availability not checked'],
   ['Horizon down, watch', null, published(`${p}.0.1`), true, 1, 'error: cannot reach'],
