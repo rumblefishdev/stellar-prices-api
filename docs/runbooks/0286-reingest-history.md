@@ -534,8 +534,24 @@ One month per command keeps each month's enumeration to a single partition, and
 a re-run skips what is already priced. Each batch scans the whole partition, so
 a bigger batch costs little more than a small one: measured on 202205, a 10 k
 batch took ~3.8 s, which models the range at ~2 days with 50 k and ~6–8 days
-with the default 10 k. Time the first month and re-plan from it. If a statement
-fails on memory, lower `--batch-size` and re-run from the month that stopped.
+with the default 10 k. Time the first month and re-plan from it.
+
+Memory follows the rows a statement reads, not the batch: ~70 MB per million
+rows read, ~2 GiB on 202205 (2026-10-12, `system.query_log`). The 2022-12 …
+2023-05 partitions are 2.5× that, and each priced row adds a version that
+`FINAL` reads until the merge, so they can reach the writer's ~7.5 GiB cap. On
+`Code: 241` (`MEMORY_LIMIT_EXCEEDED`), collapse the month's versions as
+`prices_admin`, then re-run the loop from that month:
+
+```bash
+chadmin "OPTIMIZE TABLE prices.price_ohlcv_1m PARTITION $M FINAL"
+```
+
+`--batch-size 20000` trims only the written part of the statement.
+
+The cluster is shared with the block explorer, and the loop keeps it busy
+around the clock. Check the explorer's latency while it runs. `Ctrl-C` is a
+safe pause at any point.
 
 **7b-2. Re-price the coarse tiers. The drain above never reaches them.** The
 enrichment worker prices `price_ohlcv_1m` and nothing else
