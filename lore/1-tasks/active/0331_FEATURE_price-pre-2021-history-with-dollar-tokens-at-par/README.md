@@ -2,7 +2,8 @@
 id: "0331"
 title: "No USD price before 2021-02 — price that history by counting every dollar token at par ($1)"
 type: FEATURE
-status: backlog
+status: active
+assignee: stkrolikiewicz
 related_adr: []
 related_tasks: ["0286", "0201", "0172", "0212", "0267", "0294"]
 tags: [layer-backend, priority-high, effort-medium, enrichment, clickhouse, data-correctness]
@@ -12,6 +13,12 @@ links:
   - "../../../../packages/prices-clickhouse/schema/current.sql"
   - "../../../../docs/scf/milestone-3-evidence.md"
 history:
+  - date: "2026-10-13"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated to implement the pre-2021 par mode in coarse-repair on a
+      branch, for Adam to review and run after 0286 §7b (~2026-10-16).
   - date: "2026-10-13"
     status: backlog
     who: stkrolikiewicz
