@@ -74,6 +74,12 @@ everything quoted in XLM is converted through.
    a bucket stays unpriced when no dollar-token market traded within the pivot window.
 3. **History only.** The change lives in the repricing pass run from fishuser-hero. The
    live path and the USDC-only rule for 2021-02 onward stay as they are.
+4. **Amended the same day after the pre-run report (Stanisław):** every dollar token
+   except four off-peg ones, excluded by identity (`--par-exclude`, its default):
+   USDT `GC2PJ6J3`, USD `GD3LHBHY`, USDT `GC3YRTJQ`, USD `GA5O7NTU`. USDT `GC2PJ6J3`
+   holds most of the volume on 19 days and is then the median itself, which no
+   threshold can fix. With the four out, 1 day of 2018–2020 is more than 10 % off
+   Binance, against ~20 with all of them. Threshold `--par-max-dev 0.25`.
 
 ## Safeguards
 
@@ -93,13 +99,8 @@ Anyone can issue a token called `USD`, so "every dollar token" needs these:
 
 - Which codes make a dollar token: `USD`, `USDT`, `USDC`, others?
 - `method` label: the existing `assumed-par`, or a new one?
-- The outlier threshold. The report finds 0.10 and 0.25 give the same days; 0.25
-  keeps the honest small markets that sit 3–4 % off.
-- **Per-token exclusion** (from the [pre-run report](notes/R-pre-run-report-dollar-tokens-before-2021.md)).
-  USDT `GC2PJ6J3` is ~10x off every other market but holds most of the volume on 19
-  days, so it becomes the median and the filter cannot drop it: ~20 days of XLM/USD
-  ~10x wrong in 2019–2020 with every dollar token, 1 day with four off-peg tokens left
-  out. Keep "every dollar token", or exclude by list or by a per-token rule?
+- ~~The outlier threshold~~ and ~~per-token exclusion~~: decided, Decision 4, from the
+  [pre-run report](notes/R-pre-run-report-dollar-tokens-before-2021.md).
 - Coverage: before 2018 there is no usable reference (one token, $31 in two years).
   Priced history starts in August 2018 (AnchorUSD) and is daily from 2019.
 - Coverage ceiling: `canonical.rs` ranks quotes USDC > USDT > XLM, so XLM's own daily
