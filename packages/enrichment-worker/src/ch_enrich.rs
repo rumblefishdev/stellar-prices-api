@@ -475,22 +475,42 @@ pub const PAR_BEFORE_MAX: u32 = 1_612_137_600;
 ///    issue a token called `USD`, and this is what keeps a thin one from setting
 ///    the reference.
 ///
-/// "Dollar token" is an asset code in `codes`, any issuer, classic only.
+/// "Dollar token" is an asset code in `codes`, any issuer, classic only, minus
+/// the identities in `exclude`. The median cannot drop a token that holds most
+/// of a bucket's volume, because then it IS the median: the 0331 pre-run report
+/// found one off-peg `USDT` doing that on 19 days. Such tokens are excluded by
+/// identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParSpec {
     /// Exclusive epoch (unix seconds). At most [`PAR_BEFORE_MAX`].
     pub before: u32,
     /// Asset codes counted as $1, e.g. `USD`, `USDT`, `USDC`.
     pub codes: Vec<String>,
+    /// `(code, issuer)` identities never counted as $1, even with a code in
+    /// `codes`.
+    pub exclude: Vec<(String, String)>,
     /// Largest accepted deviation of a market's XLM/USD from the bucket's median,
     /// as a fraction (0.25 = 25 %).
     pub max_dev: f64,
 }
 
+fn is_asset_code(c: &str) -> bool {
+    !c.is_empty() && c.len() <= 12 && c.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+/// A classic issuer's shape: a 56-character `G…` strkey over the base32
+/// alphabet. The checksum is not verified; this is the SQL injection guard.
+fn is_issuer(i: &str) -> bool {
+    i.len() == 56
+        && i.starts_with('G')
+        && i.chars()
+            .all(|ch| ch.is_ascii_uppercase() || ('2'..='7').contains(&ch))
+}
+
 impl ParSpec {
     /// Refuse a spec that would reach into the USDC era, name nothing, or carry
-    /// a code that is not a Stellar asset code. The codes are inlined into SQL,
-    /// so the character check is also the injection guard.
+    /// a code or issuer that is not a Stellar one. Both are inlined into SQL, so
+    /// the character checks are also the injection guard.
     pub fn validate(&self) -> Result<(), ChEnrichError> {
         if self.before == 0 || self.before > PAR_BEFORE_MAX {
             return Err(ChEnrichError::ParSpecInvalid(format!(
@@ -505,11 +525,18 @@ impl ParSpec {
                 "no dollar-token codes given".into(),
             ));
         }
-        if let Some(bad) = self.codes.iter().find(|c| {
-            c.is_empty() || c.len() > 12 || !c.chars().all(|ch| ch.is_ascii_alphanumeric())
-        }) {
+        if let Some(bad) = self.codes.iter().find(|c| !is_asset_code(c)) {
             return Err(ChEnrichError::ParSpecInvalid(format!(
                 "'{bad}' is not a Stellar asset code (1-12 ASCII letters or digits)"
+            )));
+        }
+        if let Some((code, issuer)) = self
+            .exclude
+            .iter()
+            .find(|(c, i)| !is_asset_code(c) || !is_issuer(i))
+        {
+            return Err(ChEnrichError::ParSpecInvalid(format!(
+                "exclusion '{code}:{issuer}' is not a CODE:G… classic identity"
             )));
         }
         if !(self.max_dev > 0.0 && self.max_dev <= 1.0) {
@@ -2229,20 +2256,7 @@ impl ChEnrichmentPass {
         &self,
         spec: &ParSpec,
     ) -> Result<(Option<u64>, Vec<u64>), ChEnrichError> {
-        let codes = spec
-            .codes
-            .iter()
-            .map(|c| format!("'{c}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT toUInt64(asset_id) AS asset_id, asset_code, issuer_address \
-             FROM {db}.assets FINAL \
-             WHERE contract_address = '' \
-               AND ((asset_code = 'XLM' AND issuer_address = '') \
-                 OR (issuer_address != '' AND asset_code IN ({codes})))",
-            db = self.cfg.database,
-        );
+        let sql = par_ids_sql(&self.cfg.database, spec);
         let rows = self.client.query(&sql).fetch_all::<RefAssetRow>().await?;
         let mut xlm = None;
         let mut dollar_ids = Vec::new();
@@ -2270,6 +2284,7 @@ impl ChEnrichmentPass {
         info!(
             xlm = ?xlm,
             dollar_tokens = dollar_ids.len(),
+            excluded = spec.exclude.len(),
             before = spec.before,
             max_dev = spec.max_dev,
             table = %self.cfg.table,
@@ -3262,6 +3277,37 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u64, usdc_id: u64, window: &str) -> St
          WHERE {rate} > 0 \
          ORDER BY po.timestamp \
          LIMIT ?"
+    )
+}
+
+/// XLM plus every dollar token of a [`ParSpec`]: classic assets with a code in
+/// `codes`, any issuer, minus the `exclude` identities. Codes and issuers are
+/// inlined; [`ParSpec::validate`] has already limited them to the Stellar
+/// alphabets.
+fn par_ids_sql(db: &str, spec: &ParSpec) -> String {
+    let codes = spec
+        .codes
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let exclude = if spec.exclude.is_empty() {
+        String::new()
+    } else {
+        let ids = spec
+            .exclude
+            .iter()
+            .map(|(c, i)| format!("('{c}', '{i}')"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND (asset_code, issuer_address) NOT IN ({ids})")
+    };
+    format!(
+        "SELECT toUInt64(asset_id) AS asset_id, asset_code, issuer_address \
+         FROM {db}.assets FINAL \
+         WHERE contract_address = '' \
+           AND ((asset_code = 'XLM' AND issuer_address = '') \
+             OR (issuer_address != '' AND asset_code IN ({codes}){exclude}))"
     )
 }
 
@@ -5725,8 +5771,64 @@ mod tests {
         ParSpec {
             before: PAR_BEFORE_MAX,
             codes: vec!["USD".into(), "USDT".into(), "USDC".into()],
+            exclude: vec![],
             max_dev: 0.25,
         }
+    }
+
+    const OFF_PEG: &str = "GC2PJ6J37QM3DOQ63DVGCXTRC5QOKAJUBQO2XKBXOJCWTCOCP75KWUDX";
+
+    #[test]
+    fn a_par_exclusion_must_be_a_classic_identity() {
+        let ok = ParSpec {
+            exclude: vec![("USDT".into(), OFF_PEG.into())],
+            ..par_spec()
+        };
+        assert!(ok.validate().is_ok());
+        for (code, issuer) in [
+            ("USDT", "GSHORT"),
+            (
+                "USDT",
+                "gc2pj6j37qm3doq63dvgcxtrc5qokajubqo2xkbxojcwtcocp75kwudx",
+            ),
+            (
+                "USDT",
+                "GC2PJ6J37QM3DOQ63DVGCXTRC5QOKAJUBQO2XKBXOJCWTCOCP75KW');",
+            ),
+            ("US'D", OFF_PEG),
+        ] {
+            let spec = ParSpec {
+                exclude: vec![(code.into(), issuer.into())],
+                ..par_spec()
+            };
+            assert!(spec.validate().is_err(), "{code}:{issuer} must be refused");
+        }
+    }
+
+    #[test]
+    fn par_ids_leave_out_the_excluded_identities_only() {
+        let plain = par_ids_sql("prices", &par_spec());
+        assert!(
+            plain.contains("asset_code IN ('USD', 'USDT', 'USDC')"),
+            "{plain}"
+        );
+        assert!(!plain.contains("NOT IN"), "{plain}");
+        let spec = ParSpec {
+            exclude: vec![("USDT".into(), OFF_PEG.into())],
+            ..par_spec()
+        };
+        let sql = par_ids_sql("prices", &spec);
+        assert!(
+            sql.contains(&format!(
+                "asset_code IN ('USD', 'USDT', 'USDC') AND (asset_code, issuer_address) NOT IN (('USDT', '{OFF_PEG}'))"
+            )),
+            "{sql}"
+        );
+        // XLM is resolved outside the exclusion.
+        assert!(
+            sql.contains("(asset_code = 'XLM' AND issuer_address = '')"),
+            "{sql}"
+        );
     }
 
     #[test]

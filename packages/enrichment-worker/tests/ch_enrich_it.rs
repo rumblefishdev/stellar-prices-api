@@ -1246,15 +1246,24 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
 /// is ANCHOR's 0.25, FAKE is 4,000x off it and is dropped, so XLM/USD is
 /// (1000 + 26) / (4000 + 100) = 0.25024. With FAKE kept it would be 0.372 and
 /// FOO/XLM would read 0.744 instead of 0.5005.
+///
+/// OFFPEG (a `USDT`) is the case the median cannot handle, measured on prod data
+/// by the 0331 pre-run report: 10x off, but $5,000 of the bucket's $6,526, so it
+/// IS the weighted median. Only the spec's exclusion keeps it out.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn par_prices_the_history_before_usdc_from_dollar_tokens() {
     const ANCHOR: AssetFixture = AssetFixture::new("USD", "classic", "GANCHOR", "");
     const FAKE: AssetFixture = AssetFixture::new("USD", "classic", "GFAKE", "");
+    const OFFPEG_ISSUER: &str = "GOFFPEGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const OFFPEG: AssetFixture = AssetFixture::new("USDT", "classic", OFFPEG_ISSUER, "");
     let db = "it_enrich_0331_par";
     let client = setup_scratch(db).await;
     client
-        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO, ANCHOR, FAKE]))
+        .query(&assets_insert(
+            db,
+            &[XLM, USDC, USDT, FOO, ANCHOR, FAKE, OFFPEG],
+        ))
         .execute()
         .await
         .unwrap();
@@ -1269,6 +1278,7 @@ async fn par_prices_the_history_before_usdc_from_dollar_tokens() {
              ({t}, {ANCHOR}, {XLM}, 'sdex', 4,4,4,4,                 1000, 4000, 0,0, 4,     1,1), \
              ({t}, {XLM}, {USDT},   'sdex', 0.26,0.26,0.26,0.26,     100,  26,   0,0, 0.26,  1,1), \
              ({t}, {FAKE}, {XLM},   'sdex', 0.001,0.001,0.001,0.001, 500,  0.5,  0,0, 0.001, 1,1), \
+             ({t}, {OFFPEG}, {XLM}, 'sdex', 0.4,0.4,0.4,0.4,         5000, 2000, 0,0, 0.4,   1,1), \
              ({t}, {FOO}, {XLM},    'sdex', 2,2,2,2,                 10,   20,   0,0, 2,     1,1), \
              ({t}, {FOO}, {ANCHOR}, 'sdex', 3,3,3,3,                 10,   30,   0,0, 3,     1,1), \
              ({after_epoch}, {ANCHOR}, {XLM}, 'sdex', 4,4,4,4,       1000, 4000, 0,0, 4,     1,1), \
@@ -1282,6 +1292,7 @@ async fn par_prices_the_history_before_usdc_from_dollar_tokens() {
     c.par = Some(ParSpec {
         before: PAR_BEFORE_MAX,
         codes: vec!["USD".into(), "USDT".into(), "USDC".into()],
+        exclude: vec![("USDT".into(), OFFPEG_ISSUER.into())],
         max_dev: 0.25,
     });
     ChEnrichmentPass::new(c.clone()).run().await.unwrap();
@@ -1292,7 +1303,8 @@ async fn par_prices_the_history_before_usdc_from_dollar_tokens() {
     let foo_xlm = close_usd(&client, db, FOO, XLM, t).await;
     assert!(
         approx(foo_xlm, 2.0 * xlm_usd),
-        "FOO/XLM must be 2 x {xlm_usd:.5}, got {foo_xlm}. ~0.744 means FAKE set the reference"
+        "FOO/XLM must be 2 x {xlm_usd:.5}, got {foo_xlm}. ~0.744 means FAKE set the \
+         reference, ~5.0 that OFFPEG did"
     );
     let anchor_xlm = close_usd(&client, db, ANCHOR, XLM, t).await;
     assert!(

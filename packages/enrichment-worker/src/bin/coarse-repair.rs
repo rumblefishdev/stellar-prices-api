@@ -280,11 +280,37 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_value = "USD,USDT,USDC")]
     par_codes: Vec<String>,
 
+    /// Under `--par-before`: `CODE:ISSUER` identities never counted as $1,
+    /// comma-separated. The default is the four off-peg tokens of task 0331's
+    /// pre-run report (`notes/R-pre-run-report-dollar-tokens-before-2021.md`):
+    /// USDT `GC2PJ6J3…` is ~10x off every other market and holds most of the
+    /// volume on 19 days, where the median filter cannot drop it.
+    #[arg(long, value_delimiter = ',', default_value = PAR_EXCLUDE_DEFAULT)]
+    par_exclude: Vec<String>,
+
     /// Under `--par-before`: leave out a dollar market whose XLM/USD is further
     /// than this fraction from the bucket's USD-weighted median (0.25 = 25 %).
     /// No default: the threshold is a decision recorded on task 0331.
     #[arg(long, requires = "par_before")]
     par_max_dev: Option<f64>,
+}
+
+/// The off-peg dollar tokens of task 0331's pre-run report, as `CODE:ISSUER`.
+const PAR_EXCLUDE_DEFAULT: &str = "USDT:GC2PJ6J37QM3DOQ63DVGCXTRC5QOKAJUBQO2XKBXOJCWTCOCP75KWUDX,\
+     USD:GD3LHBHY6NYJXETU6YO5OYI37F3X6L6C46ZWKBFBT35RBRKACDVMRF5K,\
+     USDT:GC3YRTJQUXVQMG5STS7MSWVF3OF3Z5MVF6NEWZLKNQAJZX5UUFLMCFMA,\
+     USD:GA5O7NTUIKYDPZSV3MNMIRFO2LCV5RJBNO7TNN7Y3MDO2IXRBSWDEO3T";
+
+/// `CODE:ISSUER` strings into pairs. The shape of each half is checked later by
+/// `ParSpec::validate`.
+fn parse_identities(raw: &[String]) -> Result<Vec<(String, String)>, String> {
+    raw.iter()
+        .map(|s| {
+            s.split_once(':')
+                .map(|(c, i)| (c.to_string(), i.to_string()))
+                .ok_or_else(|| format!("--par-exclude '{s}' is not CODE:ISSUER"))
+        })
+        .collect()
 }
 
 fn validate_month(label: &str, m: u32) -> Result<(), String> {
@@ -506,6 +532,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let spec = ParSpec {
                     before,
                     codes: args.par_codes.clone(),
+                    exclude: parse_identities(&args.par_exclude)?,
                     max_dev,
                 };
                 // Refused before a connection is opened, dry runs included.
@@ -600,6 +627,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot = !args.skip_snapshot,
         par_before = args.par_before,
         par_codes = ?args.par_before.map(|_| &args.par_codes),
+        par_exclude = ?args.par_before.map(|_| &args.par_exclude),
         par_max_dev = args.par_max_dev,
         "coarse-repair starting"
     );
@@ -695,7 +723,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, check_table};
+    use super::{Args, check_table, parse_identities};
     use clap::Parser;
 
     fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
@@ -717,6 +745,23 @@ mod tests {
         assert!(parse(&["--par-max-dev", "0.25"]).is_err());
         let args = parse(&["--par-before", "1612137600", "--par-max-dev", "0.25"]).unwrap();
         assert_eq!(args.par_codes, ["USD", "USDT", "USDC"]);
+        // The report's four off-peg tokens are excluded unless overridden.
+        let exclude = parse_identities(&args.par_exclude).unwrap();
+        assert_eq!(exclude.len(), 4);
+        assert!(
+            exclude
+                .iter()
+                .all(|(c, i)| (c == "USD" || c == "USDT") && i.len() == 56)
+        );
+        assert_eq!(
+            exclude[0].1,
+            "GC2PJ6J37QM3DOQ63DVGCXTRC5QOKAJUBQO2XKBXOJCWTCOCP75KWUDX"
+        );
+    }
+
+    #[test]
+    fn a_par_exclusion_without_an_issuer_is_refused() {
+        assert!(parse_identities(&["USDT".to_string()]).is_err());
     }
 
     #[test]
