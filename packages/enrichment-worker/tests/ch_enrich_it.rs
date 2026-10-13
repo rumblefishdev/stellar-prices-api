@@ -1247,9 +1247,10 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
 /// (1000 + 26) / (4000 + 100) = 0.25024. With FAKE kept it would be 0.372 and
 /// FOO/XLM would read 0.744 instead of 0.5005.
 ///
-/// OFFPEG (a `USDT`) is the case the median cannot handle, measured on prod data
-/// by the 0331 pre-run report: 10x off, but $5,000 of the bucket's $6,526, so it
-/// IS the weighted median. Only the spec's exclusion keeps it out.
+/// OFFPEG (a `USDT`) is the case the median cannot handle, the shape the 0331
+/// pre-run report found on Stellar data (there ~1,160x off, here 10x): far off
+/// par, but valued at $1 it is $5,000 of the bucket's $6,526, so it IS the
+/// weighted median. Only the spec's exclusion keeps it out.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn par_prices_the_history_before_usdc_from_dollar_tokens() {

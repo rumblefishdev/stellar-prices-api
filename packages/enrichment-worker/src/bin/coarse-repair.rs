@@ -283,8 +283,9 @@ struct Args {
     /// Under `--par-before`: `CODE:ISSUER` identities never counted as $1,
     /// comma-separated. The default is the four off-peg tokens of task 0331's
     /// pre-run report (`notes/R-pre-run-report-dollar-tokens-before-2021.md`):
-    /// USDT `GC2PJ6J3…` is ~10x off every other market and holds most of the
-    /// volume on 19 days, where the median filter cannot drop it.
+    /// USDT `GC2PJ6J3…` held par in mid-2019 and then lost it (its implied XLM/USD
+    /// is ~1,160x Binance's, median), yet valued at $1 it holds most of the volume
+    /// on 19 days, where it is the median itself and the filter cannot drop it.
     #[arg(long, value_delimiter = ',', default_value = PAR_EXCLUDE_DEFAULT)]
     par_exclude: Vec<String>,
 
