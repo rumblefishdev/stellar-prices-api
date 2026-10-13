@@ -64,17 +64,21 @@ null), only its volume: 21 days and 4,581 XLM in 2018, 63 days and 8,948 XLM in
   2019.
 - **Where it exists, par agrees with the market:** median 0.3–1.9 % from
   Binance by year.
-- **The median filter does not stop USDT `GC2PJ6J3`.** It is ~10x off every
-  other market, but it holds more than half the day's USD-at-par volume on **19
-  days**; there it *is* the weighted median and sets the reference. Simulated
+- **The median filter does not stop USDT `GC2PJ6J3`.** It held par in mid-2019
+  (2019-06-06: implied XLM/USD 0.1203 against Binance 0.1219) and then lost it: its
+  implied XLM/USD is a median **~1,160x** Binance's, ~346 in January 2021. Valued at
+  $1 its volume is inflated by the same factor, so it holds more than half the
+  day's USD-at-par volume on **19 days**; there it *is* the weighted median and
+  sets the reference. (The 932 % in the table is against the day's median, which
+  it skews itself.) Simulated
   with `max_dev` 0.10 and 0.25 alike: **20 days more than 10 % off Binance** in
   2018–2020 with all eleven tokens, **1 day** with the four off-peg tokens
   (bold above) left out.
 
 ## So what
 
-"Every dollar token" as decided on 2026-10-13 gives ~20 days of XLM/USD about
-10x wrong in 2019–2020, and with it every XLM-quoted price on those days. The
+"Every dollar token" as decided on 2026-10-13 gives ~20 days of XLM/USD wrong by up
+to three orders of magnitude in 2019–2020, and with it every XLM-quoted price on those days. The
 deviation threshold cannot fix it. It needs a per-token exclusion: either a
 list from this report (the four bold tokens), or a rule that drops a token whose
 median deviation over its history exceeds the threshold. `max_dev` itself barely
