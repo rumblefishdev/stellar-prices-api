@@ -89,6 +89,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // Deliberately not env-driven — an operator names the quote leg and
         // epoch explicitly, via the `coarse-repair` binary.
         usd_reset: None,
+        par: None,
     };
 
     // Cold start, mirroring the sibling workers: build and probe the mTLS client

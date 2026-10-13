@@ -69,6 +69,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // would re-zero and recompute the same rows forever. Deliberately not
         // env-driven — there is no ENRICHMENT_USD_RESET.
         usd_reset: None,
+        par: None,
     };
 
     tracing::info!(

@@ -9,7 +9,9 @@
 //! at the end, so they never touch `prices` and can run in parallel.
 
 use clickhouse::Client;
-use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, UsdResetSpec};
+use enrichment_worker::ch_enrich::{
+    ChEnrichConfig, ChEnrichError, ChEnrichmentPass, PAR_BEFORE_MAX, ParSpec, UsdResetSpec,
+};
 use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
 };
@@ -159,6 +161,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         one_shot: false,
         time_window: None,
         usd_reset: None,
+        par: None,
     }
 }
 
@@ -1223,6 +1226,104 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
     assert!(
         approx(after, 1.3),
         "second pass must leave the pivot value unchanged, got {after}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0331: before USDC, a candle quoted in a dollar token is priced at $1 and
+/// a candle quoted in XLM through the bucket's dollar-token markets, a thin
+/// market far off the USD-weighted median left out, and nothing at or after
+/// the epoch is touched.
+///
+/// The bucket holds three dollar markets. ANCHOR (a non-canonical `USD`, base
+/// against XLM) says XLM = $0.25 on $1,000. Canonical USDT (XLM base) says
+/// $0.26 on $26. FAKE (another `USD`) says $1,000 on $500. The weighted median
+/// is ANCHOR's 0.25, FAKE is 4,000x off it and is dropped, so XLM/USD is
+/// (1000 + 26) / (4000 + 100) = 0.25024. With FAKE kept it would be 0.372 and
+/// FOO/XLM would read 0.744 instead of 0.5005.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn par_prices_the_history_before_usdc_from_dollar_tokens() {
+    const ANCHOR: AssetFixture = AssetFixture::new("USD", "classic", "GANCHOR", "");
+    const FAKE: AssetFixture = AssetFixture::new("USD", "classic", "GFAKE", "");
+    let db = "it_enrich_0331_par";
+    let client = setup_scratch(db).await;
+    client
+        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO, ANCHOR, FAKE]))
+        .execute()
+        .await
+        .unwrap();
+
+    let t = 1_533_081_600u32; // 2018-08-01 00:00 UTC
+    let after_epoch = 1_614_556_800u32; // 2021-03-01 00:00 UTC
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({t}, {ANCHOR}, {XLM}, 'sdex', 4,4,4,4,                 1000, 4000, 0,0, 4,     1,1), \
+             ({t}, {XLM}, {USDT},   'sdex', 0.26,0.26,0.26,0.26,     100,  26,   0,0, 0.26,  1,1), \
+             ({t}, {FAKE}, {XLM},   'sdex', 0.001,0.001,0.001,0.001, 500,  0.5,  0,0, 0.001, 1,1), \
+             ({t}, {FOO}, {XLM},    'sdex', 2,2,2,2,                 10,   20,   0,0, 2,     1,1), \
+             ({t}, {FOO}, {ANCHOR}, 'sdex', 3,3,3,3,                 10,   30,   0,0, 3,     1,1), \
+             ({after_epoch}, {ANCHOR}, {XLM}, 'sdex', 4,4,4,4,       1000, 4000, 0,0, 4,     1,1), \
+             ({after_epoch}, {FOO}, {XLM},    'sdex', 2,2,2,2,       10,   20,   0,0, 2,     1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.par = Some(ParSpec {
+        before: PAR_BEFORE_MAX,
+        codes: vec!["USD".into(), "USDT".into(), "USDC".into()],
+        max_dev: 0.25,
+    });
+    ChEnrichmentPass::new(c.clone()).run().await.unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+    let xlm_usd = 1026.0 / 4100.0;
+
+    let foo_xlm = close_usd(&client, db, FOO, XLM, t).await;
+    assert!(
+        approx(foo_xlm, 2.0 * xlm_usd),
+        "FOO/XLM must be 2 x {xlm_usd:.5}, got {foo_xlm}. ~0.744 means FAKE set the reference"
+    );
+    let anchor_xlm = close_usd(&client, db, ANCHOR, XLM, t).await;
+    assert!(
+        approx(anchor_xlm, 4.0 * xlm_usd),
+        "ANCHOR/XLM must read ~$1 through the reference, got {anchor_xlm}"
+    );
+    let foo_anchor = close_usd(&client, db, FOO, ANCHOR, t).await;
+    assert!(
+        approx(foo_anchor, 3.0),
+        "FOO/ANCHOR must be pegged at 3.0, got {foo_anchor}"
+    );
+    let xlm_usdt = close_usd(&client, db, XLM, USDT, t).await;
+    assert!(
+        approx(xlm_usdt, 0.26),
+        "XLM/USDT must be pegged at 0.26, got {xlm_usdt}"
+    );
+
+    for (asset, quote) in [(ANCHOR, XLM), (FOO, XLM)] {
+        let v = close_usd(&client, db, asset, quote, after_epoch).await;
+        assert_eq!(
+            v, 0.0,
+            "nothing at or after the epoch may be priced by par, got {v}"
+        );
+    }
+
+    // Idempotent: a second pass finds nothing to fill and changes nothing.
+    ChEnrichmentPass::new(c).run().await.unwrap();
+    let again = close_usd(&client, db, FOO, XLM, t).await;
+    assert!(
+        approx(again, foo_xlm),
+        "second pass must not move the value, got {again}"
     );
 
     client

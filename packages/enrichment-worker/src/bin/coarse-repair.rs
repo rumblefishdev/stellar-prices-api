@@ -32,7 +32,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use enrichment_worker::ch_enrich::{ChEnrichConfig, UsdResetSpec, external_window_s};
+use enrichment_worker::ch_enrich::{ChEnrichConfig, ParSpec, UsdResetSpec, external_window_s};
 use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
 use prices_clickhouse::USDC_ORACLE_EPOCH_S;
 use tracing::{info, warn};
@@ -260,6 +260,31 @@ struct Args {
     /// the tool can make: it has no filesystem access to the CH host.
     #[arg(long)]
     snapshots_verified: bool,
+
+    /// Task 0331: price the history before USDC by counting every dollar token
+    /// (`--par-codes`, any issuer) at $1. Exclusive epoch in unix seconds, at most
+    /// 1612137600 (2021-02-01 00:00 UTC).
+    ///
+    /// Runs after every other tier, on buckets before this epoch only. A candle
+    /// quoted in a dollar token gets `close_usd = close`; one quoted in XLM gets
+    /// `close × XLM/USD` from that bucket's dollar-token markets. Fill-the-zeros
+    /// only, so it is refused together with `--reset-*`.
+    #[arg(
+        long,
+        requires = "par_max_dev",
+        conflicts_with = "reset_quote_asset_id"
+    )]
+    par_before: Option<u32>,
+
+    /// Asset codes counted as $1 under `--par-before`, comma-separated.
+    #[arg(long, value_delimiter = ',', default_value = "USD,USDT,USDC")]
+    par_codes: Vec<String>,
+
+    /// Under `--par-before`: leave out a dollar market whose XLM/USD is further
+    /// than this fraction from the bucket's USD-weighted median (0.25 = 25 %).
+    /// No default: the threshold is a decision recorded on task 0331.
+    #[arg(long, requires = "par_before")]
+    par_max_dev: Option<f64>,
 }
 
 fn validate_month(label: &str, m: u32) -> Result<(), String> {
@@ -476,6 +501,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // clap's `requires` makes the mixed cases unreachable.
             _ => None,
         },
+        par: match (args.par_before, args.par_max_dev) {
+            (Some(before), Some(max_dev)) => {
+                let spec = ParSpec {
+                    before,
+                    codes: args.par_codes.clone(),
+                    max_dev,
+                };
+                // Refused before a connection is opened, dry runs included.
+                spec.validate()?;
+                Some(spec)
+            }
+            // clap's `requires` makes the mixed cases unreachable.
+            _ => None,
+        },
     };
 
     let repair_cfg = CoarseRepairConfig {
@@ -559,6 +598,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         end_month = args.end_month,
         dry_run = args.dry_run,
         snapshot = !args.skip_snapshot,
+        par_before = args.par_before,
+        par_codes = ?args.par_before.map(|_| &args.par_codes),
+        par_max_dev = args.par_max_dev,
         "coarse-repair starting"
     );
 
@@ -653,7 +695,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_table;
+    use super::{Args, check_table};
+    use clap::Parser;
+
+    fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
+        let base = [
+            "coarse-repair",
+            "--table",
+            "price_ohlcv_1d",
+            "--start-month",
+            "201511",
+            "--end-month",
+            "202101",
+        ];
+        Args::try_parse_from(base.iter().chain(extra))
+    }
+
+    #[test]
+    fn par_needs_an_explicit_deviation_bound() {
+        assert!(parse(&["--par-before", "1612137600"]).is_err());
+        assert!(parse(&["--par-max-dev", "0.25"]).is_err());
+        let args = parse(&["--par-before", "1612137600", "--par-max-dev", "0.25"]).unwrap();
+        assert_eq!(args.par_codes, ["USD", "USDT", "USDC"]);
+    }
+
+    #[test]
+    fn par_is_refused_together_with_a_reset() {
+        assert!(
+            parse(&[
+                "--par-before",
+                "1612137600",
+                "--par-max-dev",
+                "0.25",
+                "--reset-quote-asset-id",
+                "5",
+                "--reset-not-before",
+                "1",
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn coarse_tables_take_every_mode() {

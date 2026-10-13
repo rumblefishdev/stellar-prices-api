@@ -447,6 +447,79 @@ pub enum ChEnrichError {
          until a later run."
     )]
     ResetRequiresOneShot { quote_asset_id: u64 },
+
+    /// A [`ParSpec`] that cannot be run safely (task 0331). Refused before a
+    /// connection is opened, so a dry run refuses it too.
+    #[error("par mode refused: {0}")]
+    ParSpecInvalid(String),
+}
+
+/// The latest instant a [`ParSpec`] may reach: 2021-02-01 00:00 UTC, the month
+/// canonical USDC starts trading on Stellar (first XLM/USDC candle 2021-02-01
+/// 21:00, task 0201). From there every bucket has a measured USD reference, and
+/// Stellar USDT, which par would value at $1, lost its peg in June 2022.
+pub const PAR_BEFORE_MAX: u32 = 1_612_137_600;
+
+/// Opt-in pricing of the history **before USDC exists** by counting every dollar
+/// token at $1 (task 0331). `None` on every scheduled path; only the
+/// `coarse-repair` operator CLI sets it.
+///
+/// Two statements, run after every other tier and only on buckets before
+/// `before`:
+///
+/// 1. **Peg:** a candle quoted in a dollar token gets `close_usd = close`.
+/// 2. **Pivot:** a candle quoted in XLM gets `close × XLM/USD`, where XLM/USD is
+///    read from that bucket's dollar-token markets: USD volume over XLM volume
+///    across both orientations, after dropping each market whose own rate is more
+///    than `max_dev` from the bucket's USD-volume-weighted median. Anyone can
+///    issue a token called `USD`, and this is what keeps a thin one from setting
+///    the reference.
+///
+/// "Dollar token" is an asset code in `codes`, any issuer, classic only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParSpec {
+    /// Exclusive epoch (unix seconds). At most [`PAR_BEFORE_MAX`].
+    pub before: u32,
+    /// Asset codes counted as $1, e.g. `USD`, `USDT`, `USDC`.
+    pub codes: Vec<String>,
+    /// Largest accepted deviation of a market's XLM/USD from the bucket's median,
+    /// as a fraction (0.25 = 25 %).
+    pub max_dev: f64,
+}
+
+impl ParSpec {
+    /// Refuse a spec that would reach into the USDC era, name nothing, or carry
+    /// a code that is not a Stellar asset code. The codes are inlined into SQL,
+    /// so the character check is also the injection guard.
+    pub fn validate(&self) -> Result<(), ChEnrichError> {
+        if self.before == 0 || self.before > PAR_BEFORE_MAX {
+            return Err(ChEnrichError::ParSpecInvalid(format!(
+                "before = {} must be in (0, {PAR_BEFORE_MAX}] (2021-02-01 00:00 UTC): \
+                 from there USDC is the measured reference, and Stellar USDT lost its \
+                 peg in June 2022",
+                self.before
+            )));
+        }
+        if self.codes.is_empty() {
+            return Err(ChEnrichError::ParSpecInvalid(
+                "no dollar-token codes given".into(),
+            ));
+        }
+        if let Some(bad) = self.codes.iter().find(|c| {
+            c.is_empty() || c.len() > 12 || !c.chars().all(|ch| ch.is_ascii_alphanumeric())
+        }) {
+            return Err(ChEnrichError::ParSpecInvalid(format!(
+                "'{bad}' is not a Stellar asset code (1-12 ASCII letters or digits)"
+            )));
+        }
+        if !(self.max_dev > 0.0 && self.max_dev <= 1.0) {
+            return Err(ChEnrichError::ParSpecInvalid(format!(
+                "max_dev = {} must be in (0, 1]",
+                self.max_dev
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Opt-in reset of **already-written** USD columns, so a corrected pricing tier
@@ -999,6 +1072,9 @@ pub struct ChEnrichConfig {
     /// computed value if an operator explicitly names the quote leg and epoch.
     /// See [`UsdResetSpec`].
     pub usd_reset: Option<UsdResetSpec>,
+    /// Opt-in par tier for the history before USDC (task 0331). `None` on every
+    /// scheduled path. See [`ParSpec`].
+    pub par: Option<ParSpec>,
 }
 
 impl Default for ChEnrichConfig {
@@ -1016,6 +1092,7 @@ impl Default for ChEnrichConfig {
             one_shot: false,
             time_window: None,
             usd_reset: None,
+            par: None,
         }
     }
 }
@@ -2146,6 +2223,112 @@ impl ChEnrichmentPass {
         Ok((remaining, batches))
     }
 
+    /// XLM's `asset_id` and every dollar token's for a [`ParSpec`] (task 0331):
+    /// classic assets whose code is in `spec.codes`, any issuer.
+    async fn resolve_par_ids(
+        &self,
+        spec: &ParSpec,
+    ) -> Result<(Option<u64>, Vec<u64>), ChEnrichError> {
+        let codes = spec
+            .codes
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT toUInt64(asset_id) AS asset_id, asset_code, issuer_address \
+             FROM {db}.assets FINAL \
+             WHERE contract_address = '' \
+               AND ((asset_code = 'XLM' AND issuer_address = '') \
+                 OR (issuer_address != '' AND asset_code IN ({codes})))",
+            db = self.cfg.database,
+        );
+        let rows = self.client.query(&sql).fetch_all::<RefAssetRow>().await?;
+        let mut xlm = None;
+        let mut dollar_ids = Vec::new();
+        for r in rows {
+            if r.asset_code == "XLM" && r.issuer_address.is_empty() {
+                xlm = Some(r.asset_id);
+            } else {
+                dollar_ids.push(r.asset_id);
+            }
+        }
+        dollar_ids.sort_unstable();
+        Ok((xlm, dollar_ids))
+    }
+
+    /// Tier 3 (task 0331): the [`plan_par_step`] statements, looped to a fixed
+    /// point like the tiers above. Returns the updated `(remaining, batches)`.
+    async fn run_par_tier(
+        &self,
+        spec: &ParSpec,
+        watermark: u32,
+        mut remaining: u64,
+        mut batches: u32,
+    ) -> Result<(u64, u32), ChEnrichError> {
+        let (xlm, dollar_ids) = self.resolve_par_ids(spec).await?;
+        info!(
+            xlm = ?xlm,
+            dollar_tokens = dollar_ids.len(),
+            before = spec.before,
+            max_dev = spec.max_dev,
+            table = %self.cfg.table,
+            "par tier: dollar tokens resolved"
+        );
+        let plan = plan_par_step(
+            &self.cfg.database,
+            &self.cfg.table,
+            xlm,
+            &dollar_ids,
+            spec,
+            &self.window_pred("p.timestamp"),
+            &self.window_pred("timestamp"),
+        );
+        if plan.is_empty() {
+            warn!(codes = ?spec.codes, "par tier skipped: no dollar token in prices.assets");
+            return Ok((remaining, batches));
+        }
+        for _ in 0..self.effective_max_batches() {
+            if remaining == 0 {
+                break;
+            }
+            for stmt in &plan {
+                match stmt {
+                    StepStatement::Peg { sql } => {
+                        self.client
+                            .query(sql)
+                            .bind(watermark)
+                            .bind(self.cfg.batch_size)
+                            .execute()
+                            .await?;
+                    }
+                    StepStatement::Pivot { sql, .. } => {
+                        self.client
+                            .query(sql)
+                            .bind(watermark)
+                            .bind(watermark)
+                            .bind(self.cfg.pivot_window_s)
+                            .bind(self.cfg.batch_size)
+                            .execute()
+                            .await?;
+                    }
+                }
+            }
+            let after = self.count_candidates(watermark).await?;
+            batches += 1;
+            if after >= remaining {
+                info!(
+                    remaining = after,
+                    "par tier drained — remaining candles have no dollar-token reference in window"
+                );
+                remaining = after;
+                break;
+            }
+            remaining = after;
+        }
+        Ok((remaining, batches))
+    }
+
     /// Run the bounded enrichment pass in two ordered tiers (task 0061 §12.1):
     /// the recent-window oracle tier first, then the peg-pivot deep-history tier
     /// over whatever it left at `close_usd = 0`. Each tier loops up to
@@ -2292,6 +2475,20 @@ impl ChEnrichmentPass {
                     "no USDC/USDT/XLM reference assets in prices.assets — peg-pivot tier skipped"
                 );
             }
+        }
+
+        // Tier 3 (task 0331) — par before USDC, opt-in. Last, so it only ever sees
+        // what no measured tier could price, and gated on the same
+        // `oracle_drained` flag as Tier 2.
+        if let Some(spec) = self.cfg.par.as_ref()
+            && remaining > 0
+            && oracle_drained
+        {
+            let (r, b) = self
+                .run_par_tier(spec, watermark, remaining, batches)
+                .await?;
+            remaining = r;
+            batches = b;
         }
 
         let rows_enriched = candidates_before.saturating_sub(remaining);
@@ -3064,6 +3261,144 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u64, usdc_id: u64, window: &str) -> St
              ON po.k = re.ek AND re.erts < po.bend \
          WHERE {rate} > 0 \
          ORDER BY po.timestamp \
+         LIMIT ?"
+    )
+}
+
+/// Decide which statements one par step issues (task 0331), without sending
+/// any. Pure for the same reason as [`plan_peg_pivot_step`]: the shape is a
+/// contract a unit test can hold.
+///
+/// The peg reuses [`peg_sql`] with the dollar-token ids and one extra bound,
+/// `p.timestamp < before`, appended to its window fragment. The pivot needs both
+/// XLM and at least one dollar token.
+fn plan_par_step(
+    db: &str,
+    tbl: &str,
+    xlm: Option<u64>,
+    dollar_ids: &[u64],
+    spec: &ParSpec,
+    peg_window: &str,
+    pivot_window: &str,
+) -> Vec<StepStatement> {
+    let before = spec.before;
+    let mut plan = Vec::new();
+    if let Some(sql) = peg_sql(
+        db,
+        tbl,
+        dollar_ids,
+        &format!("{peg_window} AND p.timestamp < toDateTime({before})"),
+    ) {
+        plan.push(StepStatement::Peg { sql });
+    }
+    if let Some(xlm_id) = xlm
+        && !dollar_ids.is_empty()
+    {
+        plan.push(StepStatement::Pivot {
+            sql: par_pivot_sql(db, tbl, xlm_id, dollar_ids, spec, pivot_window),
+            ref_id: xlm_id,
+        });
+    }
+    plan
+}
+
+/// Par pivot (task 0331): an XLM-quoted candle before `spec.before` is valued at
+/// `close × XLM/USD`, with XLM/USD read from the dollar-token markets of the
+/// same table.
+///
+/// A market is one `(asset_id, quote_asset_id)` pair in a bucket, summed over
+/// sources, from its price-forming fills only (`pf_volume`, `pf_price_volume`,
+/// ADR 0287). Both orientations count: `canonical.rs` makes a dollar token the
+/// base against XLM, except canonical USDT, which outranks XLM as a quote. With
+/// the dollar leg at $1 the market's USD volume and XLM volume are:
+///
+/// | orientation       | USD               | XLM               |
+/// |-------------------|-------------------|-------------------|
+/// | dollar base / XLM | `pf_volume`       | `pf_price_volume` |
+/// | XLM base / dollar | `pf_price_volume` | `pf_volume`       |
+///
+/// A market whose own rate is more than `max_dev` from the bucket's median,
+/// weighted by USD volume, is left out; the reference is the remaining USD
+/// volume over the remaining XLM volume. The inner columns are `usd_v`/`xlm_v`
+/// and not `usd`/`xlm` on purpose: ClickHouse resolves an alias before a column
+/// of the same name, so `sum(usd) AS usd` would nest an aggregate in itself.
+///
+/// Binds, in order, as [`pivot_sql`]: candidate watermark, reference watermark,
+/// pivot staleness, `LIMIT`. There is no USDC/USD rate leg — before USDC there is
+/// none, and par is the assumption that replaces it.
+fn par_pivot_sql(
+    db: &str,
+    tbl: &str,
+    xlm_id: u64,
+    dollar_ids: &[u64],
+    spec: &ParSpec,
+    window: &str,
+) -> String {
+    let ids = dollar_ids
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let before = spec.before;
+    let max_dev = spec.max_dev;
+    let columns = insert_columns();
+    format!(
+        "INSERT INTO {db}.{tbl} ({columns}) \
+         SELECT \
+             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
+             p.open, p.high, p.low, p.close, \
+             p.volume_base, p.volume_quote, \
+             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(r.usd * toFloat64(p.volume_quote) AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd, \
+             p.vwap, p.trade_count, \
+             p.version + 1 AS version, \
+             p.pf_trade_count, p.pf_volume, p.pf_price_volume \
+         FROM ( \
+             SELECT \
+                 timestamp, asset_id, quote_asset_id, source, \
+                 open, high, low, close, \
+                 volume_base, volume_quote, volume_quote_usd, vwap, \
+                 trade_count, version, \
+                 pf_trade_count, pf_volume, pf_price_volume \
+             FROM {db}.{tbl} FINAL \
+             WHERE quote_asset_id = {xlm_id} \
+               AND close_usd = 0 AND (close > 0 OR volume_quote_usd = 0) \
+               AND volume_quote > 0 \
+               AND timestamp < toDateTime({before}) \
+               AND timestamp <= toDateTime(?){window} \
+         ) AS p \
+         ASOF LEFT JOIN ( \
+             SELECT \
+                 CAST({xlm_id} AS UInt64) AS ref_asset_id, \
+                 timestamp, \
+                 sum(usd_v) / sum(xlm_v) AS usd \
+             FROM ( \
+                 SELECT \
+                     timestamp, usd_v, xlm_v, \
+                     quantileExactWeighted(0.5)(usd_v / xlm_v, toUInt64(ceil(usd_v))) \
+                         OVER (PARTITION BY timestamp) AS med \
+                 FROM ( \
+                     SELECT \
+                         timestamp, asset_id, quote_asset_id, \
+                         sum(if(quote_asset_id = {xlm_id}, toFloat64(pf_volume), toFloat64(pf_price_volume))) AS usd_v, \
+                         sum(if(quote_asset_id = {xlm_id}, toFloat64(pf_price_volume), toFloat64(pf_volume))) AS xlm_v \
+                     FROM {db}.{tbl} FINAL \
+                     WHERE ((asset_id IN ({ids}) AND quote_asset_id = {xlm_id}) \
+                         OR (asset_id = {xlm_id} AND quote_asset_id IN ({ids}))) \
+                       AND pf_volume > 0 AND pf_price_volume > 0 \
+                       AND timestamp < toDateTime({before}) \
+                       AND timestamp <= toDateTime(?) \
+                     GROUP BY timestamp, asset_id, quote_asset_id \
+                 ) \
+             ) \
+             WHERE abs(usd_v / xlm_v / med - 1) <= {max_dev} \
+             GROUP BY timestamp \
+             ORDER BY timestamp \
+         ) AS r \
+             ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp \
+         WHERE r.usd > 0 \
+           AND (p.timestamp - r.timestamp) <= ? \
+         ORDER BY p.timestamp \
          LIMIT ?"
     )
 }
@@ -5382,5 +5717,156 @@ mod tests {
             ),
             "an unresolved USDC must be refused by the epoch guard itself, got {res:?}"
         );
+    }
+
+    // ---- task 0331: par before USDC -----------------------------------------
+
+    fn par_spec() -> ParSpec {
+        ParSpec {
+            before: PAR_BEFORE_MAX,
+            codes: vec!["USD".into(), "USDT".into(), "USDC".into()],
+            max_dev: 0.25,
+        }
+    }
+
+    #[test]
+    fn a_par_spec_never_reaches_the_usdc_era() {
+        assert!(par_spec().validate().is_ok());
+        let late = ParSpec {
+            before: PAR_BEFORE_MAX + 1,
+            ..par_spec()
+        };
+        assert!(matches!(
+            late.validate(),
+            Err(ChEnrichError::ParSpecInvalid(_))
+        ));
+        let zero = ParSpec {
+            before: 0,
+            ..par_spec()
+        };
+        assert!(zero.validate().is_err());
+    }
+
+    #[test]
+    fn a_par_spec_refuses_codes_that_are_not_asset_codes() {
+        for codes in [
+            vec![],
+            vec!["".to_string()],
+            vec!["USD'); DROP TABLE x; --".to_string()],
+            vec!["TOOLONGCODE13".to_string()],
+        ] {
+            let spec = ParSpec {
+                codes: codes.clone(),
+                ..par_spec()
+            };
+            assert!(spec.validate().is_err(), "codes {codes:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_par_spec_needs_a_deviation_bound_in_zero_one() {
+        for max_dev in [0.0, -0.1, 1.5, f64::NAN] {
+            let spec = ParSpec {
+                max_dev,
+                ..par_spec()
+            };
+            assert!(
+                spec.validate().is_err(),
+                "max_dev {max_dev} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_par_issues_one_peg_and_one_pivot() {
+        let plan = plan_par_step(
+            "prices",
+            "price_ohlcv_1d",
+            Some(1),
+            &[7, 9],
+            &par_spec(),
+            "",
+            "",
+        );
+        assert_eq!(plan.len(), 2);
+        assert!(matches!(plan[0], StepStatement::Peg { .. }));
+        assert!(matches!(plan[1], StepStatement::Pivot { ref_id: 1, .. }));
+    }
+
+    #[test]
+    fn plan_par_without_xlm_pegs_only_and_without_dollar_tokens_does_nothing() {
+        let plan = plan_par_step("prices", "price_ohlcv_1d", None, &[7], &par_spec(), "", "");
+        assert_eq!(plan.len(), 1);
+        assert!(matches!(plan[0], StepStatement::Peg { .. }));
+        assert!(
+            plan_par_step(
+                "prices",
+                "price_ohlcv_1d",
+                Some(1),
+                &[],
+                &par_spec(),
+                "",
+                ""
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_par_peg_is_bounded_before_the_usdc_era() {
+        let plan = plan_par_step(
+            "prices",
+            "price_ohlcv_1d",
+            Some(1),
+            &[7, 9],
+            &par_spec(),
+            "",
+            "",
+        );
+        let StepStatement::Peg { sql } = &plan[0] else {
+            panic!("first statement must be the peg");
+        };
+        assert!(sql.contains("p.quote_asset_id IN (7, 9)"), "{sql}");
+        assert!(
+            sql.contains("AND p.timestamp < toDateTime(1612137600)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CAST(p.close AS Decimal(38, 14)) AS close_usd"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn the_par_pivot_reads_both_orientations_before_the_usdc_era() {
+        let sql = par_pivot_sql("prices", "price_ohlcv_1d", 1, &[7, 9], &par_spec(), "");
+        // The four binds of pivot_sql, in the same order, and no other.
+        assert_eq!(sql.matches('?').count(), 4, "{sql}");
+        assert!(
+            sql.contains("(asset_id IN (7, 9) AND quote_asset_id = 1)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("(asset_id = 1 AND quote_asset_id IN (7, 9))"),
+            "{sql}"
+        );
+        // Candidates and reference are both cut at the epoch.
+        assert_eq!(
+            sql.matches("timestamp < toDateTime(1612137600)").count(),
+            2,
+            "{sql}"
+        );
+        // Price-forming fills only, and the outlier bound is the spec's.
+        assert!(
+            sql.contains("pf_volume > 0 AND pf_price_volume > 0"),
+            "{sql}"
+        );
+        assert!(sql.contains("<= 0.25"), "{sql}");
+        // No aggregate over a same-named alias (see the doc comment).
+        assert!(!sql.contains("sum(usd)"), "{sql}");
+        assert!(sql.contains(&format!(
+            "INSERT INTO prices.price_ohlcv_1d ({})",
+            insert_columns()
+        )));
     }
 }
