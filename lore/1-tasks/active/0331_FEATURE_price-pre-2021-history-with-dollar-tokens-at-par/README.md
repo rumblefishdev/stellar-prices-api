@@ -17,6 +17,15 @@ history:
     status: active
     who: stkrolikiewicz
     note: >
+      Pre-run report in notes/: 11 dollar tokens traded against XLM before
+      2021-02; no usable reference before 2018-08; par agrees with Binance to
+      0.3–1.9 % median by year; an off-peg USDT sets the reference on 19 days,
+      which the median filter cannot stop. Implementation in draft PR #401
+      (coarse-repair --par-*), integration test green on CH 26.3.10.60.
+  - date: "2026-10-13"
+    status: active
+    who: stkrolikiewicz
+    note: >
       Activated to implement the pre-2021 par mode in coarse-repair on a
       branch, for Adam to review and run after 0286 §7b (~2026-10-16).
   - date: "2026-10-13"
@@ -84,14 +93,22 @@ Anyone can issue a token called `USD`, so "every dollar token" needs these:
 
 - Which codes make a dollar token: `USD`, `USDT`, `USDC`, others?
 - `method` label: the existing `assumed-par`, or a new one?
-- The outlier threshold.
+- The outlier threshold. The report finds 0.10 and 0.25 give the same days; 0.25
+  keeps the honest small markets that sit 3–4 % off.
+- **Per-token exclusion** (from the [pre-run report](notes/R-pre-run-report-dollar-tokens-before-2021.md)).
+  USDT `GC2PJ6J3` is ~10x off every other market but holds most of the volume on 19
+  days, so it becomes the median and the filter cannot drop it: ~20 days of XLM/USD
+  ~10x wrong in 2019–2020 with every dollar token, 1 day with four off-peg tokens left
+  out. Keep "every dollar token", or exclude by list or by a per-token rule?
+- Coverage: before 2018 there is no usable reference (one token, $31 in two years).
+  Priced history starts in August 2018 (AnchorUSD) and is daily from 2019.
 - Coverage ceiling: `canonical.rs` ranks quotes USDC > USDT > XLM, so XLM's own daily
   series before 2021 is the XLM/USDT market. It has candles on 21 days of 2018, 63 of
   2019 and 257 of 2020 (API, 2026-10-13). XLM's own series cannot exceed that.
 
 ## Plan
 
-1. Pre-run report → `notes/`.
+1. Pre-run report → `notes/` (done 2026-10-13, data in `data/`).
 2. Decide codes, threshold and label; record them here.
 3. Implement the par rule for buckets before 2021-02 in the repricing pass, with tests.
 4. Dry run, then run over 2015-11 → 2021-01 on all tiers. After 0286 §7b (~2026-10-16):
