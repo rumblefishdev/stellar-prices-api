@@ -80,6 +80,7 @@ everything quoted in XLM is converted through.
    holds most of the volume on 19 days and is then the median itself, which no
    threshold can fix. With the four out, 1 day of 2018–2020 is more than 10 % off
    Binance, against ~20 with all of them. Threshold `--par-max-dev 0.25`.
+   **Accepted by Marek the same day.**
 
 ## Safeguards
 
