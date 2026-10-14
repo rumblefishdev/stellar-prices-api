@@ -2919,3 +2919,54 @@ async fn ohlcv_the_usdc_peg_series_reports_no_price_forming_fields() {
 
     teardown(db).await;
 }
+
+/// A USDT leg's USD value rests on a rate nobody measures, so in a bucket that
+/// also traded against USDC its extremes must not become the candle's (lore-0332).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_a_usdt_leg_no_longer_sets_the_usd_high_and_low() {
+    let db = "it_ohlcv_usdt_band_0332";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    exec(&admin, &assets_insert(db, &[BAZ, USDT])).await;
+    // Shaped like XLM 1d 2022-06-18: USDC 96 % at the peg, USDT 4 % at 0.5449.
+    exec(
+        &admin,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2022-06-18 00:00:00', {BAZ}, {USDC}, 'sdex', 0.105, 0.1137, 0.1005, 0.11, 96, 10.56, 10.56, 0.11, 0.11, 40, 1), \
+             ('2022-06-18 00:00:00', {BAZ}, {USDT}, 'sdex', 0.2, 0.3242, 0.1496, 0.2, 4, 0.8, 0.43592, 0.10898, 0.2, 3, 1)"
+        ),
+    )
+    .await;
+
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1d&start=2022-06-18T00:00:00Z\
+         &end=2022-06-18T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "body={json}");
+    let c = &data[0];
+    let num = |k: &str| c[k].as_str().unwrap().parse::<f64>().unwrap();
+    assert!(
+        num("high") < 0.17,
+        "the USDT leg's high (0.1767) leaked in: {c}"
+    );
+    assert!(
+        num("low") > 0.09,
+        "the USDT leg's low (0.0815) leaked in: {c}"
+    );
+    approx(&c["high"], 0.1137);
+    approx(&c["low"], 0.1005);
+    approx(&c["open"], 0.105);
+    approx(&c["close"], 0.11);
+    approx(&c["volume_base"], 100.0);
+    assert_eq!(c["method"], "assumed-par", "{c}");
+
+    teardown(db).await;
+}

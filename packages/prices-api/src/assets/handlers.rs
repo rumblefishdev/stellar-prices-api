@@ -572,19 +572,21 @@ pub async fn get_ohlcv(
                     // be any candle's quote leg, so it only costs the `traded`
                     // label. A lookup ERROR still fails — that is the database
                     // misbehaving, not an absent asset.
-                    let mut pivots = Vec::new();
-                    for found in [xlm, usdt] {
-                        match found {
-                            Ok(Some(id)) => pivots.push(id),
-                            Ok(None) => tracing::debug!(
+                    let optional = |found: Result<Option<u64>, _>| match found {
+                        Ok(Some(id)) => Ok(Some(id)),
+                        Ok(None) => {
+                            tracing::debug!(
                                 "ohlcv pivot reference not tracked; rows on this leg go unlabelled"
-                            ),
-                            Err(e) => return Err(e),
+                            );
+                            Ok(None)
                         }
-                    }
+                        Err(e) => Err(e),
+                    };
+                    let (xlm, usdt) = (optional(xlm)?, optional(usdt)?);
+                    let pivots = [xlm, usdt].into_iter().flatten().collect();
                     // USDC must resolve: see UsdRefs::usdc.
                     match usdc {
-                        Ok(Some(usdc)) => Ok(queries_ch::UsdRefs { usdc, pivots }),
+                        Ok(Some(usdc)) => Ok(queries_ch::UsdRefs { usdc, xlm, pivots }),
                         Ok(None) => Err(clickhouse::error::Error::Custom(
                             "canonical USDC is not tracked".to_string(),
                         )),
@@ -643,7 +645,7 @@ pub async fn get_ohlcv(
     // alternative is that a legitimate USDC identity silently falls back to the
     // known-empty path, which is the defect this task exists to remove.
     let (peg_usdc, peg_xlm) = match &args.denomination {
-        queries_ch::Denomination::Usd(refs) => (Some(refs.usdc), refs.pivots.first().copied()),
+        queries_ch::Denomination::Usd(refs) => (Some(refs.usdc), refs.xlm),
         queries_ch::Denomination::QuoteLeg(x) => {
             match queries_ch::resolve_asset_id(state.ch(), &usdc_identifier()).await {
                 Ok(Some(u)) => (Some(u), Some(*x)),
