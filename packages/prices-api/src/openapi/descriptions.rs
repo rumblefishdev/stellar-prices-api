@@ -357,9 +357,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          price-forming mean, so a wide gap marks a thin or one-sided bucket rather than an \
          error: the close is still what it last traded at, and a poor summary of what it is \
          worth. Prefer `pf_vwap` when ranking or valuing, and `close` when charting the last \
-         price. In USD mode a gap can also come from a market that weighs into `pf_vwap` \
-         but does not set `close` — one quoted in USDT, for example.\n\n`null` when either \
-         value is `null` — nothing was compared, which is not the same as the two agreeing.",
+         price.\n\n`null` when either value is `null` — nothing was compared, which is not \
+         the same as the two agreeing.",
     ),
     (
         "Candle",
@@ -459,8 +458,7 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          `base_currency` — `vwap` with the dust left out, and the value `close_divergent` \
          compares `close` against.\n\nDenominated exactly like `close` and bounded by the \
          published `low` and `high`, so the response stays self-consistent. In USD mode it \
-         weighs every market, including ones that do not set `low` and `high` (USDT-quoted, \
-         for example), so it can sit at one of those bounds. `null` when the \
+         weighs the same markets that set those (see `/ohlcv`). `null` when the \
          bucket has no price-forming volume, and on the synthesized USDC self-series. Never \
          `0`.",
     ),
@@ -531,15 +529,14 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          weighs depends on the denomination, so the two can differ on a bucket that holds a \
          source with no usable price. With `base_currency=XLM` it is every row of the \
          bucket, as stored. With `USD` it is every row that has a usable rate to convert it \
-         with — a row whose own price is below the precision floor, or that has no USD value \
-         yet, cannot be restated in USD and is left out of the mean rather than counted at \
-         zero.\n\nBounded by the published `low` and `high` so the response stays \
+         with, on the markets that set the prices (see `/ohlcv`) — a row whose own price is \
+         below the precision floor, or that has no USD value yet, cannot be restated in USD \
+         and is left out of the mean rather than counted at zero.\n\nBounded by the \
+         published `low` and `high` so the response stays \
          self-consistent. Those come from the price-forming trades only, so on a bucket \
          where the trades that formed no price carry most of the volume the raw mean falls \
-         outside that range and the value reported is the nearer bound. In USD mode the \
-         same happens when a market that does not set `low` and `high` — one quoted in \
-         USDT, for example — traded away from the ones that do. Compare it with `pf_vwap` \
-         when the difference matters.",
+         outside that range and the value reported is the nearer bound. Compare it with \
+         `pf_vwap` when the difference matters.",
     ),
     (
         "ErrorEnvelope",
