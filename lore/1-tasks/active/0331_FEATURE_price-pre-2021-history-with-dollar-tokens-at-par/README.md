@@ -3,7 +3,7 @@ id: "0331"
 title: "No USD price before 2021-02 — price that history by counting every dollar token at par ($1)"
 type: FEATURE
 status: active
-assignee: stkrolikiewicz
+assignee: akot
 related_adr: []
 related_tasks: ["0286", "0201", "0172", "0212", "0267", "0294"]
 tags: [layer-backend, priority-high, effort-medium, enrichment, clickhouse, data-correctness]
@@ -13,6 +13,12 @@ links:
   - "../../../../packages/prices-clickhouse/schema/current.sql"
   - "../../../../docs/scf/milestone-3-evidence.md"
 history:
+  - date: "2026-10-14"
+    status: active
+    who: akot
+    note: >
+      Reassigned from stkrolikiewicz to Adam, who takes the task over
+      (PR #401 included).
   - date: "2026-10-13"
     status: active
     who: stkrolikiewicz
