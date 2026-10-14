@@ -18,6 +18,12 @@ history:
     status: active
     who: akot
     note: >
+      Decided: fallback buckets get no response flag (measured by AC 7
+      instead); ADR 0011 is not amended. Implementation branch opened.
+  - date: "2026-10-14"
+    status: active
+    who: akot
+    note: >
       Opened from Adam's analysis of USD-mode /ohlcv high/low. Methodology change
       agreed on Slack the same day: Marek ("wyklucz usdt w liczeniu high/low")
       and Oskar (same reason USDT was dropped from the USD reference). Scope is
@@ -65,11 +71,7 @@ All in `packages/prices-api/src/assets/queries_ch.rs` unless stated.
    Plus the ClickHouse-free SQL-string tests.
 4. **Contract text.** `/ohlcv` description in `handlers.rs` ~L398 ("against
    every quote asset — are merged") rewritten; `openapi.json` regenerated.
-5. **ADR 0011 amendment** under §2b/§3: the allowlist, how a token joins it, the
-   per-bucket fallback. ⚠️ §1 forbids a denomination that varies with available
-   data; the amendment must state that the fallback keeps the denomination (USD)
-   and only changes which markets set the extremes.
-6. **Measure and announce.** Read-only before/after on prod; client notice
+5. **Measure and announce.** Read-only before/after on prod; client notice
    drafted in `notes/` (sending is Adam's).
 
 ## Acceptance Criteria
@@ -84,10 +86,22 @@ All in `packages/prices-api/src/assets/queries_ch.rs` unless stated.
       deviation vs Binance recorded before/after and set against the analysis'
       step 1+2 figures.
 - [ ] Affected assets/buckets counted, including non-USDT legs the allowlist
-      also drops (the analysis' 419 counts USDT only).
+      also drops (the analysis' 419 counts USDT only), and fallback buckets
+      (no USDC/XLM market) counted separately.
 - [ ] ITs pass on CH 26.3.10.60; full ignored suite green.
-- [ ] OpenAPI description and ADR 0011 amended in the same PR as the code.
+- [ ] OpenAPI description updated in the same PR as the code.
 - [ ] Client notice drafted in `notes/`.
+
+## Decisions (2026-10-14, Adam)
+
+1. **No flag on fallback buckets.** A bucket with no USDC/XLM market is computed
+   as today and is not marked in the response: a new field changes the response
+   shape (OpenAPI, portal types, conformance suite, client notice). AC 7 counts
+   fallback buckets; a flag becomes its own task if there are many.
+2. **ADR 0011 is not amended.** The change ships as code, the `/ohlcv`
+   description and the client notice. The fallback keeps the denomination (USD)
+   and only narrows which markets set the extremes — the same kind of
+   data-dependent input choice as today's highest-volume open/close.
 
 ## Follow-ups (not spawned)
 

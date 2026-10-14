@@ -33,8 +33,8 @@ only from trades whose USD value we know.
 3. **Volume, trade counts:** every market. **vwap, pf_vwap:** every convertible
    market, clamped into the new `[low, high]`.
 4. **Read path only** (`queries_ch.rs`). No stored value changes.
-5. **Contract:** amend ADR 0011, the `/ohlcv` description, and tell clients the
-   methodology changed.
+5. **Contract:** the `/ohlcv` description and a client notice. ADR 0011 is not
+   amended (Adam, 2026-10-14). Fallback buckets carry no response flag.
 
 ## Reasoning
 
