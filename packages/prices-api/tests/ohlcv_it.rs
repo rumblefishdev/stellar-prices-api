@@ -3228,3 +3228,48 @@ async fn ohlcv_usd_prices_come_from_usdc_and_xlm_markets_when_the_bucket_has_one
 
     teardown(db).await;
 }
+
+/// Before 2021-02-01 a priced candle quoted in XLM or a dollar token took the
+/// imported XLM/USD rate, so it is labelled `external` (lore-0331).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_labels_pre_usdc_candles_external() {
+    let db = "it_ohlcv_pre_usdc_0331";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    exec(&admin, &assets_insert(db, &[USDT])).await;
+    // (day, quote, close, close_usd, method). close_usd != close: an exact-par
+    // dollar row is dropped as a peg signature.
+    let cases = [
+        ("2021-01-30", USDT, 2.0, 1.98, "external"),
+        ("2021-01-31", XLM, 10.0, 2.5, "external"),
+        ("2021-02-01", XLM, 10.0, 3.0, "traded"),
+    ];
+    for (day, quote, close, cu, _) in cases {
+        exec(
+            &admin,
+            &format!(
+                "INSERT INTO {db}.price_ohlcv_1d \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+                 VALUES ('{day} 00:00:00', {FOO}, {quote}, 'sdex', {close}, {close}, {close}, {close}, \
+                  1, {close}, {cu}, {cu}, {close}, 1, 1)"
+            ),
+        )
+        .await;
+    }
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1d&start=2021-01-30T00:00:00Z\
+         &end=2021-02-01T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), cases.len(), "body={json}");
+    for (c, (day, _, _, cu, method)) in data.iter().zip(cases) {
+        assert_eq!(c["method"], method, "{day}: {c}");
+        approx(&c["close"], cu);
+    }
+    teardown(db).await;
+}
