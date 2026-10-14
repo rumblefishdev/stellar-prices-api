@@ -447,6 +447,9 @@ pub enum ChEnrichError {
          until a later run."
     )]
     ResetRequiresOneShot { quote_asset_id: u64 },
+
+    #[error("pre-2021 XLM/USD rate mode refused: {0}")]
+    PreUsdcXlmRateRefused(String),
 }
 
 /// Opt-in reset of **already-written** USD columns, so a corrected pricing tier
@@ -999,6 +1002,9 @@ pub struct ChEnrichConfig {
     /// computed value if an operator explicitly names the quote leg and epoch.
     /// See [`UsdResetSpec`].
     pub usd_reset: Option<UsdResetSpec>,
+    /// Opt-in coarse-repair mode (task 0331), `false` on every scheduled path.
+    /// When `true` the pass runs only the pre-2021 XLM/USD step.
+    pub pre_usdc_xlm_rate: bool,
 }
 
 impl Default for ChEnrichConfig {
@@ -1016,6 +1022,7 @@ impl Default for ChEnrichConfig {
             one_shot: false,
             time_window: None,
             usd_reset: None,
+            pre_usdc_xlm_rate: false,
         }
     }
 }
@@ -1509,6 +1516,9 @@ impl ChEnrichmentPass {
     /// pivot leg's `not_before` below the table's first priced reference
     /// candle is refused, because nothing could refill the rows in between.
     pub async fn assert_reset_is_admissible(&self) -> Result<(), ChEnrichError> {
+        if self.cfg.pre_usdc_xlm_rate {
+            return self.assert_pre_usdc_admissible().await.map(|_| ());
+        }
         let Some(spec) = self.cfg.usd_reset.as_ref() else {
             return Ok(());
         };
@@ -2028,6 +2038,96 @@ impl ChEnrichmentPass {
         Ok(())
     }
 
+    /// The pre-2021 step's refusals; returns native XLM's id. The driver calls
+    /// this through [`Self::assert_reset_is_admissible`], so a dry run refuses too.
+    async fn assert_pre_usdc_admissible(&self) -> Result<u64, ChEnrichError> {
+        let refuse = |m: &str| Err(ChEnrichError::PreUsdcXlmRateRefused(m.to_string()));
+        if self.cfg.usd_reset.is_some() {
+            return refuse("it cannot be combined with a --reset-* spec");
+        }
+        let Some(xlm) = self.resolve_reference_ids().await?.xlm else {
+            return refuse("native XLM does not resolve in assets");
+        };
+        let sql = format!(
+            "SELECT count() FROM ({}) WHERE rts < toDateTime({})",
+            usd_rate_series_sql(&self.cfg.database, XLM_RATE_IDENTITY),
+            prices_clickhouse::PRE_USDC_END_S,
+        );
+        if self.client.query(&sql).fetch_one::<u64>().await? == 0 {
+            return refuse(
+                "usd_rate holds no method = 'external' XLM row before 2021-02-01 \
+                 (promote the staged series first)",
+            );
+        }
+        Ok(xlm)
+    }
+
+    fn pre_usdc_statements(&self, xlm: u64) -> (String, String) {
+        let pw = self.cfg.pivot_window_s;
+        // Bound the token-market scan to the month plus its look-back.
+        let ref_window = match self.cfg.time_window {
+            Some((s, e)) => format!(
+                " AND timestamp >= toDateTime({}) AND timestamp < toDateTime({e})",
+                s.saturating_sub(pw)
+            ),
+            None => String::new(),
+        };
+        let db = &self.cfg.database;
+        let (cand, tbl) = (self.window_pred("timestamp"), &self.cfg.table);
+        pre_usdc_sql(db, tbl, xlm, pw, &cand, &ref_window)
+    }
+
+    /// Rows a run with this config would write now (the dry-run figure).
+    pub async fn pre_usdc_pending(&self) -> Result<u64, ChEnrichError> {
+        let xlm = self.assert_pre_usdc_admissible().await?;
+        let watermark = self.watermark().await?;
+        let (_, count) = self.pre_usdc_statements(xlm);
+        Ok(self
+            .client
+            .query(&count)
+            .bind(watermark)
+            .fetch_one::<u64>()
+            .await?)
+    }
+
+    /// The pre-2021 XLM/USD step (task 0331), looped to a fixed point like
+    /// [`Self::run_external_tier`], counting with its own pending query.
+    async fn run_pre_usdc(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
+        let start = std::time::Instant::now();
+        let xlm = self.assert_pre_usdc_admissible().await?;
+        let (insert, count) = self.pre_usdc_statements(xlm);
+        let pending = || self.client.query(&count).bind(watermark).fetch_one::<u64>();
+        let before = pending().await?;
+        let (mut remaining, mut batches) = (before, 0u32);
+        for _ in 0..self.effective_max_batches() {
+            if remaining == 0 {
+                break;
+            }
+            self.client
+                .query(&insert)
+                .bind(watermark)
+                .bind(self.cfg.batch_size)
+                .execute()
+                .await?;
+            let after = pending().await?;
+            batches += 1;
+            if after >= remaining {
+                remaining = after;
+                break;
+            }
+            remaining = after;
+        }
+        info!(before, remaining, batches, table = %self.cfg.table, "pre-2021 XLM/USD step done");
+        Ok(ChPassStats {
+            batches,
+            candidates_before: before,
+            candidates_after: remaining,
+            rows_enriched: before.saturating_sub(remaining),
+            duration_ms: start.elapsed().as_millis() as u64,
+            ..Default::default()
+        })
+    }
+
     /// Tier 2 — the peg-pivot deep-history backbone, over the fixed `watermark`
     /// snapshot. Each per-batch pivot computes its volume-weighted reference/USDC
     /// rate **inline** ([`pivot_sql`]) rather than from a pre-materialized table,
@@ -2174,6 +2274,9 @@ impl ChEnrichmentPass {
     /// pin the boundary and assert that candles newer than the snapshot are
     /// deferred, not enriched, in the current pass.
     pub async fn run_through(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
+        if self.cfg.pre_usdc_xlm_rate {
+            return self.run_pre_usdc(watermark).await;
+        }
         let start = std::time::Instant::now();
 
         // Task 0182 — re-open already-written USD values so the tiers below can
@@ -2597,6 +2700,24 @@ pub fn external_window_s(table: &str) -> u32 {
     bucket_width_s(table).max(86_400)
 }
 
+/// `usd_rate` identity `(asset_kind, asset_code, issuer_address, contract_address)`.
+const USDC_RATE_IDENTITY: [&str; 4] = ["credit", "USDC", USDC_ISSUER, ""];
+const XLM_RATE_IDENTITY: [&str; 4] = ["native", "XLM", "", ""];
+
+/// The imported (`method = 'external'`) rate series of one `usd_rate` identity,
+/// as an ASOF right side keyed `k = 1`. Equality on `method`: the staged
+/// `external-candidate` rows share its prefix (`external_rate.rs`).
+fn usd_rate_series_sql(db: &str, id: [&str; 4]) -> String {
+    let [kind, code, issuer, contract] = id;
+    format!(
+        "SELECT 1 AS k, timestamp AS rts, usd_rate AS usd \
+         FROM {db}.usd_rate FINAL \
+         WHERE asset_kind = '{kind}' AND asset_code = '{code}' \
+           AND issuer_address = '{issuer}' AND contract_address = '{contract}' \
+           AND method = 'external' AND usd_rate > 0"
+    )
+}
+
 /// External statement (task 0268): a USDC-quoted candle the oracle tier left at
 /// `close_usd = 0` is priced from the MEASURED USDC/USD rate task 0267 imports
 /// into `prices.usd_rate`, instead of falling through to the peg tier's `× $1`.
@@ -2702,6 +2823,7 @@ pub fn external_window_s(table: &str) -> u32 {
 /// `external_tier_never_overwrites_a_candle_the_oracle_tier_priced` proves the
 /// `close_usd` outcome end to end.
 fn external_sql(db: &str, tbl: &str, usdc_id: u64, window: &str) -> String {
+    let series = usd_rate_series_sql(db, USDC_RATE_IDENTITY);
     let bend = bucket_end_expr(tbl, "timestamp");
     let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
     let columns = insert_columns();
@@ -2732,18 +2854,147 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u64, window: &str) -> String {
                AND timestamp < toDateTime({epoch}) \
                AND timestamp <= toDateTime(?){window} \
          ) AS p \
-         ASOF LEFT JOIN ( \
-             SELECT 1 AS k, timestamp AS rts, usd_rate AS usd \
-             FROM {db}.usd_rate FINAL \
-             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
-               AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
-               AND method = 'external' AND usd_rate > 0 \
-         ) AS r \
+         ASOF LEFT JOIN ( {series} ) AS r \
              ON r.k = p.k AND r.rts < p.bend \
          WHERE r.usd > 0 \
            AND (toUInt32(p.bend) - toUInt32(r.rts)) <= ? \
          ORDER BY p.timestamp \
          LIMIT ?"
+    )
+}
+
+/// `prices.assets` rows of a dollar token other than canonical USDC (task 0331).
+/// Keyed on code/issuer/contract, never `asset_type` (fixtures disagree on it).
+fn dollar_token_asset_pred() -> String {
+    format!(
+        "contract_address = '' AND issuer_address != '' \
+         AND asset_code IN ('USD', 'USDT', 'USDC') \
+         AND NOT (asset_code = 'USDC' AND issuer_address = '{USDC_ISSUER}')"
+    )
+}
+
+/// Rows the pre-2021 XLM/USD step may write: before [`PRE_USDC_END_S`], quoted
+/// in native XLM or a dollar token. Uncorrelated, so the driver's month
+/// enumeration, the statement and its pending count share this one string.
+///
+/// [`PRE_USDC_END_S`]: prices_clickhouse::PRE_USDC_END_S
+pub fn pre_usdc_scope_pred(db: &str) -> String {
+    format!(
+        "timestamp < toDateTime({end}) AND volume_quote > 0 \
+         AND quote_asset_id IN (SELECT asset_id FROM {db}.assets FINAL \
+             WHERE (asset_code = 'XLM' AND issuer_address = '' AND contract_address = '') \
+                OR ({dollar}))",
+        end = prices_clickhouse::PRE_USDC_END_S,
+        dollar = dollar_token_asset_pred(),
+    )
+}
+
+/// Pre-2021 step (task 0331): `close_usd = close × f × rate`, where `rate` is
+/// the newest `external` XLM/USD row before the bucket end (within
+/// [`external_window_s`]) and `f` is 1 on an XLM quote, else the dollar
+/// token's XLM price from its own XLM markets (both orientations, pf columns)
+/// at or before the bucket start, within `pivot_window_s`.
+///
+/// Writes only rows whose computed pair differs from the stored one, so the
+/// batch loop terminates, a re-run writes nothing, and a newer rate or a
+/// narrower window re-prices (an unreachable row computes 0).
+///
+/// Returns `(insert, pending_count)` from one body. Binds: the watermark, then
+/// (insert only) the `LIMIT`.
+fn pre_usdc_sql(
+    db: &str,
+    tbl: &str,
+    xlm: u64,
+    pivot_window_s: u32,
+    cand_window: &str,
+    ref_window: &str,
+) -> (String, String) {
+    let end = prices_clickhouse::PRE_USDC_END_S;
+    let bend = bucket_end_expr(tbl, "timestamp");
+    let stale = external_window_s(tbl);
+    let scope = pre_usdc_scope_pred(db);
+    let series = usd_rate_series_sql(db, XLM_RATE_IDENTITY);
+    let dollar = format!(
+        "SELECT asset_id FROM {db}.assets FINAL WHERE {}",
+        dollar_token_asset_pred()
+    );
+    // Decimal256 sums: a Decimal(38, 14) sum wraps silently, a Float64 one
+    // depends on merge order and would make the differs filter flap.
+    let amt = |a: &str, b: &str| {
+        format!("toFloat64(sum(toDecimal256(if(asset_id = {xlm}, {a}, {b}), 14)))")
+    };
+    let txlm = format!(
+        "{} / {}",
+        amt("pf_volume", "pf_price_volume"),
+        amt("pf_price_volume", "pf_volume")
+    );
+    let xr = format!(
+        "if(r.usd > 0 AND (toUInt32(pt.bend) - toUInt32(r.rts)) <= {stale}, toFloat64(r.usd), 0.)"
+    );
+    // Float64, then a NULL-on-overflow parse: a Decimal product wraps silently
+    // and an out-of-range CAST aborts the batch.
+    let usd = |col: &str| {
+        format!(
+            "ifNull(toDecimal128OrNull(toString(toFloat64(pt.{col}) * {xr} * pt.xf), 14), \
+             toDecimal128(0, 14))"
+        )
+    };
+    let (new_cu, new_vqu) = (usd("close"), usd("volume_quote"));
+    let cols = prices_clickhouse::CANDLE_COLUMNS;
+    let from = |a: &str| {
+        cols.iter()
+            .map(|c| format!("{a}.{c} AS {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (p_cols, pt_cols, x_cols) = (from("p"), from("pt"), cols.join(", "));
+    let out = cols
+        .iter()
+        .map(|c| match *c {
+            "close_usd" => "x.new_cu AS close_usd".to_string(),
+            "volume_quote_usd" => "x.new_vqu AS volume_quote_usd".to_string(),
+            "version" => "x.version + 1 AS version".to_string(),
+            c => format!("x.{c}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!(
+        "SELECT {out} \
+         FROM ( \
+             SELECT {pt_cols}, {new_cu} AS new_cu, {new_vqu} AS new_vqu \
+             FROM ( \
+                 SELECT {p_cols}, p.k AS k, p.bend AS bend, \
+                     if(p.quote_asset_id = {xlm}, 1., if(t.txlm > 0 \
+                        AND (toUInt32(p.timestamp) - toUInt32(t.tts)) <= {pivot_window_s}, \
+                        t.txlm, 0.)) AS xf \
+                 FROM ( \
+                     SELECT {x_cols}, 1 AS k, {bend} AS bend \
+                     FROM {db}.{tbl} FINAL \
+                     WHERE {scope} AND timestamp <= toDateTime(?){cand_window} \
+                 ) AS p \
+                 ASOF LEFT JOIN ( \
+                     SELECT if(asset_id = {xlm}, quote_asset_id, asset_id) AS tok, \
+                         timestamp AS tts, {txlm} AS txlm \
+                     FROM {db}.{tbl} FINAL \
+                     WHERE timestamp < toDateTime({end}){ref_window} \
+                       AND pf_trade_count > 0 AND pf_volume > 0 AND pf_price_volume > 0 \
+                       AND ((quote_asset_id = {xlm} AND asset_id IN ({dollar})) \
+                         OR (asset_id = {xlm} AND quote_asset_id IN ({dollar}))) \
+                     GROUP BY tok, tts \
+                 ) AS t \
+                     ON t.tok = p.quote_asset_id AND t.tts <= p.timestamp \
+             ) AS pt \
+             ASOF LEFT JOIN ( {series} ) AS r \
+                 ON r.k = pt.k AND r.rts < pt.bend \
+         ) AS x \
+         WHERE x.close_usd != x.new_cu OR x.volume_quote_usd != x.new_vqu"
+    );
+    (
+        format!(
+            "INSERT INTO {db}.{tbl} ({}) {body} ORDER BY x.timestamp LIMIT ?",
+            insert_columns()
+        ),
+        format!("SELECT count() FROM ({body})"),
     )
 }
 
@@ -4190,8 +4441,14 @@ mod tests {
     /// `_1M` fixtures in `ch_enrich_it.rs`. Task file, Issues 10.
     #[test]
     fn every_timezone_sensitive_expression_pins_utc() {
-        for t in ["price_ohlcv_1d", "price_ohlcv_1w", "price_ohlcv_1M"] {
-            let sql = external_sql("prices", t, 3, "");
+        let tables = ["price_ohlcv_1d", "price_ohlcv_1w", "price_ohlcv_1M"];
+        for (t, sql) in tables.iter().flat_map(|t| {
+            [
+                external_sql("prices", t, 3, ""),
+                pre_usdc_sql("prices", t, 9, 86_400, "", "").0,
+            ]
+            .map(|sql| (t, sql))
+        }) {
             for f in ["addDays(", "addWeeks(", "addMonths(", "toDate("] {
                 for (i, _) in sql.match_indices(f) {
                     let tail = &sql[i..];
@@ -4710,6 +4967,10 @@ mod tests {
                 reset_sql("prices", "price_ohlcv_1m", &spec, ""),
             ),
             ("pivot_sql", pivot_sql("prices", "price_ohlcv_1m", 5, 3, "")),
+            (
+                "pre_usdc_sql",
+                pre_usdc_sql("prices", "price_ohlcv_1m", 9, 86_400, "", "").0,
+            ),
         ]
     }
 
@@ -5382,5 +5643,63 @@ mod tests {
             ),
             "an unresolved USDC must be refused by the epoch guard itself, got {res:?}"
         );
+    }
+
+    #[test]
+    fn external_sql_reads_the_usdc_external_series() {
+        let want = format!(
+            "ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS usd \
+             FROM prices.usd_rate FINAL WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+             AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+             AND method = 'external' AND usd_rate > 0 ) AS r"
+        );
+        assert!(external_sql("prices", "price_ohlcv_1h", 3, "").contains(&want));
+    }
+
+    #[test]
+    fn pre_usdc_sql_renders_its_contract() {
+        let end = prices_clickhouse::PRE_USDC_END_S;
+        let win = |s| format!(" AND timestamp >= toDateTime({s}) AND timestamp < toDateTime(9)");
+        for (t, (cw, rw)) in GRAINS
+            .iter()
+            .flat_map(|t| [(t, (String::new(), String::new())), (t, (win(5), win(1)))])
+        {
+            let (ins, cnt) = pre_usdc_sql("prices", t, 9, 86_400, &cw, &rw);
+            let must = [
+                "asset_kind = 'native' AND asset_code = 'XLM' AND issuer_address = '' \
+                 AND contract_address = '' AND method = 'external' AND usd_rate > 0"
+                    .to_string(),
+                "r.rts < pt.bend".into(),
+                format!("{} AS bend", bucket_end_expr(t, "timestamp")),
+                format!("<= {}, toFloat64(r.usd)", external_window_s(t)),
+                "<= 86400, t.txlm".into(),
+                "if(asset_id = 9, pf_volume, pf_price_volume)".into(),
+                "if(asset_id = 9, pf_price_volume, pf_volume)".into(),
+                "pf_trade_count > 0".into(),
+                dollar_token_asset_pred(),
+                "x.close_usd != x.new_cu OR x.volume_quote_usd != x.new_vqu".into(),
+                "toDecimal128OrNull(toString(".into(),
+                "toDecimal256(".into(),
+                format!("{cw} ) AS p"),
+                format!("{end}){rw} AND pf_trade_count"),
+            ];
+            for needle in must {
+                assert!(ins.contains(&needle), "{t}: `{needle}` missing in {ins}");
+            }
+            for needle in ["LIKE", "startsWith", "candidate", &win(1)] {
+                assert_eq!(ins.contains(needle), needle == rw, "{t}: `{needle}`");
+            }
+            assert_eq!(ins.matches("method = ").count(), 1, "{ins}");
+            assert!(
+                ins.matches(&format!("timestamp < toDateTime({end})"))
+                    .count()
+                    >= 2
+            );
+            assert_eq!((ins.matches('?').count(), cnt.matches('?').count()), (2, 1));
+            let body = &cnt["SELECT count() FROM (".len()..cnt.len() - 1];
+            let head = format!("INSERT INTO prices.{t} ({}) ", insert_columns());
+            assert_eq!(ins, format!("{head}{body} ORDER BY x.timestamp LIMIT ?"));
+            assert!(cnt.starts_with("SELECT count() FROM ("));
+        }
     }
 }

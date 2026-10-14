@@ -476,6 +476,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // clap's `requires` makes the mixed cases unreachable.
             _ => None,
         },
+        pre_usdc_xlm_rate: false,
     };
 
     let repair_cfg = CoarseRepairConfig {

@@ -159,6 +159,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         one_shot: false,
         time_window: None,
         usd_reset: None,
+        pre_usdc_xlm_rate: false,
     }
 }
 
@@ -5702,6 +5703,146 @@ async fn the_epoch_is_measured_on_the_pass_s_own_table() {
         "on _4h the midnight epoch is refused against the 16:00 bucket, got {res:?}"
     );
 
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// --- Task 0331: pre-2021 candles priced from the hourly XLM/USD rate ---
+
+const USDX: AssetFixture = AssetFixture::new("USD", "classic", "GUSDX", "");
+/// 2020-06-01 00:00 UTC.
+const D0331: u32 = 1_590_969_600;
+const H1: &str = "price_ohlcv_1h";
+
+const fn h(n: u32) -> u32 {
+    D0331 + n * 3600
+}
+
+/// (ts, rate, method) of `('native','XLM','','')` rows in `usd_rate`.
+type Rate = (u32, f64, &'static str);
+/// (label, table, ts, asset, quote, close, volume_base, volume_quote, close_usd, volume_quote_usd)
+#[rustfmt::skip]
+type Leg = (&'static str, &'static str, u32, AssetFixture<'static>, AssetFixture<'static>, f64, f64, f64, f64, f64);
+
+const RATES_0331: &[Rate] = &[
+    (h(10), 0.25, "external"),
+    (h(23), 0.20, "external"),
+    (h(24), 0.50, "external"),
+];
+
+#[rustfmt::skip]
+const LEGS_0331: &[Leg] = &[
+    ("FOO/XLM 1h", H1, h(10), FOO, XLM, 10.0, 3.0, 30.0, 2.5, 7.5),
+    ("FOO/XLM 1d takes 23:00, not the next midnight", "price_ohlcv_1d", D0331, FOO, XLM, 10.0, 3.0, 30.0, 2.0, 6.0),
+    ("USDT/XLM", H1, h(10), USDT, XLM, 4.0, 10.0, 40.0, 1.0, 10.0),
+    ("XLM/USDX", H1, h(10), XLM, USDX, 0.25, 40.0, 10.0, 0.25, 10.0),
+    ("FOO/USDT via USDT/XLM", H1, h(10), FOO, USDT, 2.0, 3.0, 6.0, 2.0, 6.0),
+    ("FOO/USDX via XLM/USDX", H1, h(10), FOO, USDX, 2.0, 3.0, 6.0, 2.0, 6.0),
+];
+
+async fn seed_xlm_rate(client: &Client, db: &str, (ts, rate, method): Rate, version: u64) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, \
+              timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
+             ('native', 'XLM', '', '', {ts}, {rate}, '{method}', '', 0, {version})"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+async fn seed_leg(client: &Client, db: &str, leg: &Leg) {
+    let (_, table, ts, asset, quote, close, vb, vq, _, _) = *leg;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.{table} \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES ({ts}, {asset}, {quote}, 'sdex', {close}, {close}, {close}, {close}, \
+              {vb}, {vq}, 0, 0, {close}, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (close_usd, volume_quote_usd, version) of a leg, read FINAL.
+async fn usd_of(client: &Client, db: &str, leg: &Leg) -> (f64, f64, u64) {
+    let (_, table, ts, asset, quote, ..) = *leg;
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), toFloat64(volume_quote_usd), version \
+             FROM {db}.{table} FINAL \
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = {ts}"
+        ))
+        .fetch_one::<(f64, f64, u64)>()
+        .await
+        .unwrap()
+}
+
+async fn setup_0331(db: &str, rates: &[Rate], legs: &[Leg]) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO, USDX]))
+        .execute()
+        .await
+        .unwrap();
+    for r in rates {
+        seed_xlm_rate(&client, db, *r, 1).await;
+    }
+    for l in legs {
+        seed_leg(&client, db, l).await;
+    }
+    client
+}
+
+fn cfg_0331(db: &str, table: &str) -> ChEnrichConfig {
+    ChEnrichConfig {
+        table: table.to_string(),
+        one_shot: true,
+        pre_usdc_xlm_rate: true,
+        ..cfg(db)
+    }
+}
+
+fn written_in(table: &str) -> u64 {
+    LEGS_0331
+        .iter()
+        .filter(|l| l.1 == table && l.8 != 0.0)
+        .count() as u64
+}
+
+async fn assert_legs(client: &Client, db: &str, scale: f64) {
+    for leg in LEGS_0331 {
+        let (cu, vqu, _) = usd_of(client, db, leg).await;
+        assert!(
+            (cu - leg.8 * scale).abs() < 1e-9 && (vqu - leg.9 * scale).abs() < 1e-9,
+            "{}: got ({cu}, {vqu}), want ({}, {})",
+            leg.0,
+            leg.8 * scale,
+            leg.9 * scale
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_prices_xlm_and_dollar_quoted_legs() {
+    let db = "test_ch_enrich_pre_usdc_prices";
+    let client = setup_0331(db, RATES_0331, LEGS_0331).await;
+    for table in [H1, "price_ohlcv_1d"] {
+        let stats = ChEnrichmentPass::new(cfg_0331(db, table))
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(stats.rows_enriched, written_in(table), "{table}: {stats:?}");
+    }
+    assert_legs(&client, db, 1.0).await;
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()

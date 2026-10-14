@@ -1694,8 +1694,11 @@ pub(crate) fn usd_method_expr(usdc: u64, pivots: &[u64], granularity: Granularit
          quote_asset_id = {usdc} AND close_usd = close, 'assumed-par', \
          quote_asset_id = {usdc} AND timestamp >= toDateTime({epoch}), 'oracle', \
          quote_asset_id = {usdc}, '', \
+         timestamp < toDateTime({pre}), 'external', \
          {traded_arm}\
-         '') AS meth"
+         '') AS meth",
+        // Task 0331: a priced pre-2021 non-USDC row took the XLM/USD rate.
+        pre = prices_clickhouse::PRE_USDC_END_S,
     )
 }
 
@@ -2165,6 +2168,24 @@ mod tests {
             ext < traded,
             "the USDC arms are tested before traded: {sql}"
         );
+    }
+
+    /// Task 0331: a priced pre-2021 row outside the USDC arms is `external`,
+    /// and the arm sits after every USDC arm and before `traded`.
+    #[test]
+    fn usd_method_expr_labels_priced_pre_usdc_rows_external() {
+        let arm = format!(
+            "timestamp < toDateTime({}), 'external', ",
+            prices_clickhouse::PRE_USDC_END_S
+        );
+        for pivots in [&[7u64][..], &[]] {
+            let sql = usd_method_expr(2, pivots, Granularity::H1);
+            let at = sql.find(&arm).unwrap_or_else(|| panic!("{sql}"));
+            assert!(at > sql.find("quote_asset_id = 2, '', ").unwrap(), "{sql}");
+            if let Some(traded) = sql.find("'traded'") {
+                assert!(at < traded, "{sql}");
+            }
+        }
     }
 
     /// Task 0139: every SELECT whose id lands in a Rust u64 field casts with
