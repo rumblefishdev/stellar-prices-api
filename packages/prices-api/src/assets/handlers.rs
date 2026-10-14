@@ -371,6 +371,42 @@ pub struct OhlcvParams {
     pub base_currency: Option<BaseCurrency>,
 }
 
+/// The USD references for `/ohlcv`. A lookup ERROR fails: that is the
+/// database misbehaving, not an absent asset.
+///
+/// USDC must be tracked (see `UsdRefs::usdc`). XLM and USDT are optional: an
+/// untracked reference cannot be any candle's quote leg. A missing USDT only
+/// loses the `traded` label. A missing XLM also drops XLM from the markets that
+/// set USD prices, so the caller does not cache that result.
+async fn resolve_usd_refs(
+    state: &AppState,
+) -> Result<queries_ch::UsdRefs, clickhouse::error::Error> {
+    let (usdc_id, xlm_id, usdt_id) = (
+        usdc_identifier(),
+        AssetIdentifier::Native,
+        usdt_identifier(),
+    );
+    let (usdc, xlm, usdt) = tokio::join!(
+        queries_ch::resolve_asset_id(state.ch(), &usdc_id),
+        queries_ch::resolve_asset_id(state.ch(), &xlm_id),
+        queries_ch::resolve_asset_id(state.ch(), &usdt_id),
+    );
+    let xlm = xlm?;
+    if xlm.is_none() {
+        tracing::error!("ohlcv: XLM is untracked; USD prices come from USDC markets only");
+    }
+    let usdt = usdt?;
+    if usdt.is_none() {
+        tracing::warn!("ohlcv: USDT is untracked; its rows go unlabelled");
+    }
+    match usdc? {
+        Some(usdc) => Ok(queries_ch::UsdRefs { usdc, xlm, usdt }),
+        None => Err(clickhouse::error::Error::Custom(
+            "canonical USDC is not tracked".to_string(),
+        )),
+    }
+}
+
 /// `GET /assets/{asset_identifier}/ohlcv` — candlestick history.
 ///
 /// `base_currency` **denominates** the series; it does not select a quote leg
@@ -381,8 +417,10 @@ pub struct OhlcvParams {
 ///
 /// Price fields are **absent, not dropped**, on a bucket with no USD value.
 /// Candles merge across sources — and, in USD mode, across quote legs — per
-/// bucket. `backfill_note` appears only for `timeframe=all` while the backfill
-/// is still running.
+/// bucket; in USD mode the USDC/XLM legs set the prices and both means when one
+/// formed a price.
+/// `backfill_note` appears only for `timeframe=all` while the backfill is still
+/// running.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/ohlcv",
@@ -396,7 +434,11 @@ pub struct OhlcvParams {
      only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but \
      has no USD value yet is returned with its price fields `null`\nrather than omitted, so a \
      chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote \
-     asset — are merged per bucket, in ascending time order.\n\nThe window is `timeframe`, ending \
+     asset — are merged per bucket, in ascending time order,\nand all of them count toward the \
+     volumes and trade counts. In USD mode `open`, `high`,\n`low`, `close`, `method`, `vwap` \
+     and `pf_vwap` come only from markets quoted in USDC or\nXLM when one of them formed a \
+     price in the bucket, and from every market otherwise. If\nsuch a market has no USD value \
+     yet, those fields are `null`.\n\nThe window is `timeframe`, ending \
      now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
      rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
      historical backfill is still running.",
@@ -546,70 +588,42 @@ pub async fn get_ohlcv(
     //
     // The three references are resolved by natural identity, mirroring the
     // enrichment worker's own resolve_reference_ids so read and write cannot
-    // disagree about which USDC is canonical. All three must be tracked: their
-    // absence is a server-side data gap, not "no candles", so it stays a 503
-    // rather than being masked as an empty 200 (which looks like a healthy asset
-    // with no history).
-    let denomination =
-        match base_currency {
-            BaseCurrency::Usd => {
-                // Resolved once per AppState and shared thereafter — see
-                // AppState::usd_refs. The three identities are constants and the
-                // database derives their ids from them, so re-reading `assets
-                // FINAL` on every request is pure waste on a p95-bounded path.
-                let refs = state
-                .usd_refs()
-                .get_or_try_init(|| async {
-                    // Concurrent: they do not depend on each other.
-                    let (usdc_id, xlm_id, usdt_id) =
-                        (usdc_identifier(), AssetIdentifier::Native, usdt_identifier());
-                    let (usdc, xlm, usdt) = tokio::join!(
-                        queries_ch::resolve_asset_id(state.ch(), &usdc_id),
-                        queries_ch::resolve_asset_id(state.ch(), &xlm_id),
-                        queries_ch::resolve_asset_id(state.ch(), &usdt_id),
+    // disagree about which USDC is canonical. Only USDC must be tracked; see
+    // `resolve_usd_refs` for XLM and USDT.
+    let denomination = match base_currency {
+        BaseCurrency::Usd => {
+            // Resolved once per AppState and shared thereafter — see
+            // AppState::usd_refs. The three identities are constants and the
+            // database derives their ids from them, so re-reading `assets
+            // FINAL` on every request is pure waste on a p95-bounded path.
+            let refs = match state.usd_refs().get() {
+                Some(r) => Ok(r.clone()),
+                // Cached only once XLM resolves: a missing XLM changes
+                // prices, so it must not outlive the gap it came from.
+                None => resolve_usd_refs(&state).await.inspect(|r| {
+                    if r.xlm.is_some() {
+                        let _ = state.usd_refs().set(r.clone());
+                    }
+                }),
+            };
+            match refs {
+                Ok(r) => queries_ch::Denomination::Usd(r),
+                Err(e) => {
+                    tracing::error!(error = %e, "ohlcv reference resolution failed");
+                    return errors::service_unavailable(
+                        errors::QUOTE_UNAVAILABLE,
+                        "pricing in the requested base_currency is unavailable",
                     );
-                    // The pivots are best-effort: an untracked reference cannot
-                    // be any candle's quote leg, so it only costs the `traded`
-                    // label. A lookup ERROR still fails — that is the database
-                    // misbehaving, not an absent asset.
-                    let mut pivots = Vec::new();
-                    for found in [xlm, usdt] {
-                        match found {
-                            Ok(Some(id)) => pivots.push(id),
-                            Ok(None) => tracing::debug!(
-                                "ohlcv pivot reference not tracked; rows on this leg go unlabelled"
-                            ),
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    // USDC must resolve: see UsdRefs::usdc.
-                    match usdc {
-                        Ok(Some(usdc)) => Ok(queries_ch::UsdRefs { usdc, pivots }),
-                        Ok(None) => Err(clickhouse::error::Error::Custom(
-                            "canonical USDC is not tracked".to_string(),
-                        )),
-                        Err(e) => Err(e),
-                    }
-                })
-                .await;
-                match refs {
-                    Ok(r) => queries_ch::Denomination::Usd(r.clone()),
-                    Err(e) => {
-                        tracing::error!(error = %e, "ohlcv reference resolution failed");
-                        return errors::service_unavailable(
-                            errors::QUOTE_UNAVAILABLE,
-                            "pricing in the requested base_currency is unavailable",
-                        );
-                    }
                 }
             }
-            BaseCurrency::Xlm => {
-                match resolve_reference(state.ch(), AssetIdentifier::Native, base_currency).await {
-                    Ok(id) => queries_ch::Denomination::QuoteLeg(id),
-                    Err(resp) => return resp,
-                }
+        }
+        BaseCurrency::Xlm => {
+            match resolve_reference(state.ch(), AssetIdentifier::Native, base_currency).await {
+                Ok(id) => queries_ch::Denomination::QuoteLeg(id),
+                Err(resp) => return resp,
             }
-        };
+        }
+    };
 
     // The validated window is exactly what binds into SQL — the same eff_start
     // the point-count check measured, so there is one interpretation of the
@@ -643,7 +657,7 @@ pub async fn get_ohlcv(
     // alternative is that a legitimate USDC identity silently falls back to the
     // known-empty path, which is the defect this task exists to remove.
     let (peg_usdc, peg_xlm) = match &args.denomination {
-        queries_ch::Denomination::Usd(refs) => (Some(refs.usdc), refs.pivots.first().copied()),
+        queries_ch::Denomination::Usd(refs) => (Some(refs.usdc), refs.xlm),
         queries_ch::Denomination::QuoteLeg(x) => {
             match queries_ch::resolve_asset_id(state.ch(), &usdc_identifier()).await {
                 Ok(Some(u)) => (Some(u), Some(*x)),

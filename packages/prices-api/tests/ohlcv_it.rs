@@ -2919,3 +2919,312 @@ async fn ohlcv_the_usdc_peg_series_reports_no_price_forming_fields() {
 
     teardown(db).await;
 }
+
+/// A USDT leg's USD value rests on a rate nobody measures, so in a bucket that
+/// also traded against USDC its extremes must not become the candle's (lore-0332).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_a_usdt_leg_no_longer_sets_the_usd_high_and_low() {
+    let db = "it_ohlcv_usdt_band_0332";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    exec(&admin, &assets_insert(db, &[BAZ, USDT])).await;
+    // Shaped like XLM 1d 2022-06-18: USDC 96 % at the peg, USDT 4 % at 0.5449.
+    exec(
+        &admin,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2022-06-18 00:00:00', {BAZ}, {USDC}, 'sdex', 0.105, 0.1137, 0.1005, 0.11, 96, 10.56, 10.56, 0.11, 0.11, 40, 1), \
+             ('2022-06-18 00:00:00', {BAZ}, {USDT}, 'sdex', 0.2, 0.3242, 0.1496, 0.2, 4, 0.8, 0.43592, 0.10898, 0.2, 3, 1)"
+        ),
+    )
+    .await;
+
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1d&start=2022-06-18T00:00:00Z\
+         &end=2022-06-18T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "body={json}");
+    let c = &data[0];
+    let num = |k: &str| c[k].as_str().unwrap().parse::<f64>().unwrap();
+    assert!(
+        num("high") < 0.17,
+        "the USDT leg's high (0.1767) leaked in: {c}"
+    );
+    assert!(
+        num("low") > 0.09,
+        "the USDT leg's low (0.0815) leaked in: {c}"
+    );
+    approx(&c["high"], 0.1137);
+    approx(&c["low"], 0.1005);
+    approx(&c["open"], 0.105);
+    approx(&c["close"], 0.11);
+    approx(&c["volume_base"], 100.0);
+    assert_eq!(c["method"], "assumed-par", "{c}");
+
+    teardown(db).await;
+}
+
+/// BAZ on 2026-04-01, one 1h bucket per case. USDC legs sit at the peg (rate
+/// 1), USDT legs at rate 0.5, the XLM leg at rate 0.25.
+async fn seed_price_setting_0332(db: &str, admin: &Client) {
+    exec(admin, &assets_insert(db, &[BAZ, USDT])).await;
+    // lore-0332. 10:00 USDC + USDT; 11:00 USDT has the larger volume;
+    // 12:00 XLM + USDT; 13:00 USDT only; 14:00 USDT pulls vwap above the band;
+    // 15:00 USDC formed no price + USDT; 16:00 XLM + a larger USDT;
+    // 17:00 USDT only, overflowing; 18:00 USDC overflowing + USDT;
+    // 19:00 USDC formed a price but has no USD value yet + USDT.
+    exec(
+        admin,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-04-01 10:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 100, 105, 105, 1.1, 1.05, 10, 1), \
+             ('2026-04-01 10:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1), \
+             ('2026-04-01 11:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, 2, 1), \
+             ('2026-04-01 11:00:00', {BAZ}, {USDT}, 'sdex', 2.1, 2.2, 1.9, 2.1, 1000, 2100, 1050, 1.05, 2.1, 20, 1), \
+             ('2026-04-01 12:00:00', {BAZ}, {XLM}, 'sdex', 10, 12, 9, 10, 100, 1000, 250, 2.5, 10, 7, 1), \
+             ('2026-04-01 12:00:00', {BAZ}, {USDT}, 'sdex', 6, 8, 2, 5, 20, 100, 50, 2.5, 5, 3, 1), \
+             ('2026-04-01 13:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1), \
+             ('2026-04-01 14:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.1, 0.9, 1.0, 10, 10, 10, 1.0, 1.0, 2, 1), \
+             ('2026-04-01 14:00:00', {BAZ}, {USDT}, 'sdex', 4, 6, 2, 4, 990, 3960, 1980, 2.0, 4.0, 50, 1), \
+             ('2026-04-01 15:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1), \
+             ('2026-04-01 16:00:00', {BAZ}, {XLM}, 'sdex', 10, 12, 9, 10, 10, 100, 25, 2.5, 10, 2, 1), \
+             ('2026-04-01 16:00:00', {BAZ}, {USDT}, 'sdex', 6, 8, 2, 5, 200, 1000, 500, 2.5, 5, 9, 1), \
+             ('2026-04-01 17:00:00', {BAZ}, {USDT}, 'sdex', 1000, 1000, 1000, 0.000000000001, 10, 0.00000000001, 10, 10000000000, 1000, 3, 1), \
+             ('2026-04-01 18:00:00', {BAZ}, {USDC}, 'sdex', 1000, 1000, 1000, 0.000000000001, 10, 0.00000000001, 10, 10000000000, 1000, 3, 1), \
+             ('2026-04-01 18:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1), \
+             ('2026-04-01 19:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 0, 0, 1.1, 2, 1), \
+             ('2026-04-01 19:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1)"
+        ),
+    )
+    .await;
+    // 15:00: a USDC leg that traded only dust is not `valid`, so not `band`.
+    exec(
+        admin,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             ('2026-04-01 15:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, 2, \
+              0, 0, 0, 1)"
+        ),
+    )
+    .await;
+}
+
+/// An untracked XLM is not cached: once it is tracked, the same `AppState`
+/// lets XLM set the prices again without a restart (lore-0332, review).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_does_not_cache_an_untracked_xlm() {
+    let db = "it_ohlcv_untracked_xlm_0332";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    exec(&admin, &assets_insert(db, &[BAZ, USDT])).await;
+    // Case 3's shape: XLM sets 2.5–3.0, USDT would widen it to 1.0–4.0.
+    exec(
+        &admin,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-04-01 12:00:00', {BAZ}, {XLM}, 'sdex', 10, 12, 9, 10, 100, 1000, 250, 2.5, 10, 7, 1), \
+             ('2026-04-01 12:00:00', {BAZ}, {USDT}, 'sdex', 6, 8, 2, 5, 20, 100, 50, 2.5, 5, 3, 1)"
+        ),
+    )
+    .await;
+    exec(
+        &admin,
+        "ALTER TABLE assets DELETE WHERE asset_type = 'native' SETTINGS mutations_sync = 2",
+    )
+    .await;
+
+    let state = AppState::new(client);
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1h&start=2026-04-01T12:00:00Z\
+         &end=2026-04-01T12:00:00Z&base_currency=USD",
+        iss()
+    );
+    let high = |state: AppState| {
+        let uri = uri.clone();
+        async move {
+            let resp = app(&config(), state)
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&bytes).unwrap();
+            json["data"][0]["high"]
+                .as_str()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        }
+    };
+    // Untracked: XLM does not set the prices, so USDT widens the high.
+    assert!((high(state.clone()).await - 4.0).abs() < 1e-6);
+    exec(&admin, &assets_insert(db, &[XLM])).await;
+    // Tracked now, on the same state: XLM sets the high again.
+    assert!((high(state).await - 3.0).abs() < 1e-6);
+
+    teardown(db).await;
+}
+
+/// In USD mode USDC- and XLM-quoted rows set the prices when the bucket has
+/// one; a USDT-only bucket is priced as before (lore-0332). Before-fix values
+/// in the comments show what each case discriminates.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usd_prices_come_from_usdc_and_xlm_markets_when_the_bucket_has_one() {
+    let db = "it_ohlcv_price_setting_0332";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    seed_price_setting_0332(db, &admin).await;
+
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1h&start=2026-04-01T10:00:00Z\
+         &end=2026-04-01T19:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 10, "body={json}");
+    let at = |hour: &str| {
+        let ts = format!("2026-04-01T{hour}:00:00Z");
+        data.iter()
+            .find(|c| c["timestamp"] == ts.as_str())
+            .unwrap_or_else(|| panic!("no bucket at {ts}: {json}"))
+    };
+
+    type Case = (
+        &'static str,
+        &'static str,
+        [f64; 4],
+        &'static str,
+        f64,
+        Option<f64>,
+    );
+    let cases: [Case; 7] = [
+        // label, hour, [open, high, low, close], method, volume_base, vwap (= pf_vwap)
+        // was high 1.5, low 0.5, vwap 155/150
+        (
+            "1 usdc+usdt",
+            "10",
+            [1.0, 1.2, 0.9, 1.1],
+            "assumed-par",
+            150.0,
+            Some(1.05),
+        ),
+        // was open 1.05, close 1.05, `traded`
+        (
+            "2 usdt larger",
+            "11",
+            [1.0, 1.2, 0.9, 1.1],
+            "assumed-par",
+            1010.0,
+            None,
+        ),
+        // was high 4.0, low 1.0
+        (
+            "3 xlm+usdt",
+            "12",
+            [2.5, 3.0, 2.25, 2.5],
+            "traded",
+            120.0,
+            None,
+        ),
+        (
+            "4 usdt only",
+            "13",
+            [1.0, 1.5, 0.5, 1.0],
+            "traded",
+            50.0,
+            Some(1.0),
+        ),
+        // was high 3.0, close 2.0, vwap 1.99; then 1.1, the USDT mean clamped
+        (
+            "5 usdt mean",
+            "14",
+            [1.0, 1.1, 0.9, 1.0],
+            "assumed-par",
+            1000.0,
+            Some(1.0),
+        ),
+        // was 1.0, 1.2, 0.9, 1.1 with `band` not requiring `valid`
+        (
+            "6 usdc dust+usdt",
+            "15",
+            [1.0, 1.5, 0.5, 1.0],
+            "traded",
+            60.0,
+            None,
+        ),
+        // was open 3.0, high 4.0, low 1.0
+        (
+            "7 xlm smaller",
+            "16",
+            [2.5, 3.0, 2.25, 2.5],
+            "traded",
+            210.0,
+            None,
+        ),
+    ];
+    for (label, hour, ohlc, method, vb, vwap) in cases {
+        let c = at(hour);
+        let num = |k: &str| c[k].as_str().map(|s| s.parse::<f64>().unwrap());
+        for (field, want) in ["open", "high", "low", "close"].into_iter().zip(ohlc) {
+            let got = num(field).unwrap_or_else(|| panic!("case {label}: no {field}: {c}"));
+            assert!(
+                (got - want).abs() < 1e-6,
+                "case {label}: {field} {got} != {want}: {c}"
+            );
+        }
+        assert_eq!(c["method"], method, "case {label}: {c}");
+        assert!(
+            (num("volume_base").unwrap() - vb).abs() < 1e-6,
+            "case {label}: {c}"
+        );
+        if let Some(want) = vwap {
+            for field in ["vwap", "pf_vwap"] {
+                let got = num(field).unwrap_or_else(|| panic!("case {label}: no {field}: {c}"));
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "case {label}: {field} {got} != {want}: {c}"
+                );
+            }
+        }
+    }
+    // An extreme that overflows stays null in the fallback (8) and in the band
+    // (9, was high 3.0): the USDT leg does not stand in for the USDC one.
+    for (label, hour) in [("8 usdt overflow", "17"), ("9 usdc overflow+usdt", "18")] {
+        let c = at(hour);
+        assert!(c["high"].is_null(), "case {label}: {c}");
+        assert_eq!(c["close"], "10000000000", "case {label}: {c}");
+    }
+    // 10: a USDC leg with no USD value yet leaves the bucket unpriced rather
+    // than priced by USDT (was 1.0, 1.5, 0.5, 1.0); its volume still counts.
+    let c10 = at("19");
+    for field in ["open", "high", "low", "close", "vwap", "pf_vwap", "method"] {
+        assert!(c10[field].is_null(), "case 10: {field}: {c10}");
+    }
+    approx(&c10["volume_base"], 60.0);
+    // Case 1: the USDT leg still counts toward volume and trades.
+    let c1 = at("10");
+    approx(&c1["volume_quote_usd"], 155.0);
+    assert_eq!(c1["trade_count"], 15, "case 1: {c1}");
+    assert_eq!(c1["pf_trade_count"], 15, "case 1: {c1}");
+
+    teardown(db).await;
+}

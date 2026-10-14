@@ -346,7 +346,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of \
          this bucket, never one carried over from an earlier one. `null` when the bucket has \
          no price — see `pf_trade_count`. Exact in USD mode — the other price fields are \
-         scaled, see `derived`.",
+         scaled, see `derived`. In USD mode only markets quoted in USDC or XLM set it when \
+         one of them formed a price in the bucket; otherwise every market does.",
     ),
     (
         "Candle",
@@ -373,13 +374,17 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Candle",
         "high",
         "Highest price among this bucket's price-forming trades, in `base_currency`; `null` \
-         when the bucket has no price — see `pf_trade_count`.",
+         when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
+         quoted in USDC or XLM set it when one of them formed a price in the bucket; \
+         otherwise every market does.",
     ),
     (
         "Candle",
         "low",
         "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` \
-         when the bucket has no price — see `pf_trade_count`.",
+         when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
+         quoted in USDC or XLM set it when one of them formed a price in the bucket; \
+         otherwise every market does.",
     ),
     (
         "Candle",
@@ -415,13 +420,18 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          cases: when the price fields are `null`; always for \
          `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket \
          below the oracle epoch that carries a converted rate no imported series covers \
-         — nothing can attribute it, and a label would be a claim.",
+         — nothing can attribute it, and a label would be a claim.\n\nIn USD mode the label \
+         follows the markets that set the prices: those quoted in USDC or XLM when one of \
+         them formed a price in the bucket, otherwise every market. A bucket that traded \
+         mostly against USDT can therefore report the `assumed-par` of its USDC market.",
     ),
     (
         "Candle",
         "open",
         "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of \
-         this bucket. `null` when the bucket has no price — see `pf_trade_count`.",
+         this bucket. `null` when the bucket has no price — see `pf_trade_count`. In USD \
+         mode only markets quoted in USDC or XLM set it when one of them formed a price in \
+         the bucket; otherwise every market does.",
     ),
     (
         "Candle",
@@ -447,7 +457,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Volume-weighted average price of the bucket's price-forming trades, in \
          `base_currency` — `vwap` with the dust left out, and the value `close_divergent` \
          compares `close` against.\n\nDenominated exactly like `close` and bounded by the \
-         published `low` and `high`, so the response stays self-consistent. `null` when the \
+         published `low` and `high`, so the response stays self-consistent. In USD mode it \
+         weighs the same markets that set those (see `/ohlcv`). `null` when the \
          bucket has no price-forming volume, and on the synthesized USDC self-series. Never \
          `0`.",
     ),
@@ -518,9 +529,10 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          weighs depends on the denomination, so the two can differ on a bucket that holds a \
          source with no usable price. With `base_currency=XLM` it is every row of the \
          bucket, as stored. With `USD` it is every row that has a usable rate to convert it \
-         with — a row whose own price is below the precision floor, or that has no USD value \
-         yet, cannot be restated in USD and is left out of the mean rather than counted at \
-         zero.\n\nBounded by the published `low` and `high` so the response stays \
+         with, on the markets that set the prices (see `/ohlcv`) — a row whose own price is \
+         below the precision floor, or that has no USD value yet, cannot be restated in USD \
+         and is left out of the mean rather than counted at zero.\n\nBounded by the \
+         published `low` and `high` so the response stays \
          self-consistent. Those come from the price-forming trades only, so on a bucket \
          where the trades that formed no price carry most of the volume the raw mean falls \
          outside that range and the value reported is the nearer bound. Compare it with \

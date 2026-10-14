@@ -706,12 +706,31 @@ pub struct UsdRefs {
     /// indistinguishable from the anomalous same-signature rows on other legs
     /// and would be dropped. Its absence is a real server-side data gap.
     pub usdc: u64,
-    /// XLM and canonical USDT, the two pivot references. **Optional**: they only
-    /// select the `traded` label. An untracked reference cannot be any candle's
-    /// quote leg, so the branch simply never matches — refusing to serve the
-    /// endpoint over a missing label would turn a cosmetic dependency into an
-    /// outage.
-    pub pivots: Vec<u64>,
+    /// XLM and canonical USDT, the two pivot references. **Optional**: an
+    /// untracked reference cannot be any candle's quote leg, so its branch simply
+    /// never matches — refusing to serve the endpoint over it would turn a data
+    /// gap into an outage. XLM is also a price-setting quote and the peg series'
+    /// anchor.
+    pub xlm: Option<u64>,
+    pub usdt: Option<u64>,
+}
+
+impl UsdRefs {
+    /// The pivots that select the `traded` label.
+    pub fn pivots(&self) -> Vec<u64> {
+        self.xlm.into_iter().chain(self.usdt).collect()
+    }
+
+    /// The quote legs whose rows set a USD candle's prices. Never empty.
+    ///
+    /// ⚠️ XLM's USD value comes from the XLM/USDC pivot, which task 0286
+    /// documents as quantised on dust days (e.g. 2023-03-11) until its
+    /// re-ingest and stage-D re-enrichment finish. Until then such a bucket
+    /// takes its prices from that XLM leg alone.
+    pub fn price_setting(&self) -> Vec<u64> {
+        // A token joins here once its USD rate is reliable (lore-0332).
+        std::iter::once(self.usdc).chain(self.xlm).collect()
+    }
 }
 
 /// What `base_currency` asks for. Per [ADR 0011] it **denominates**; it does not
@@ -780,7 +799,9 @@ pub struct OhlcvArgs {
 /// no clamp: it is derived through the same `rate` as `h_x`/`l_x`, and scaling by
 /// one positive factor is monotonic, so `l_x <= o_x <= h_x` holds within a row and
 /// survives `min`/`max` across rows. Only the exact/derived boundary breaks.
-const CLOSE_EXACT: &str = "argMaxIf(c_x, (volume_base, quote_asset_id), valid)";
+fn close_exact(p: &str) -> String {
+    format!("argMaxIf(c_x, (volume_base, quote_asset_id), {p})")
+}
 
 /// The published `high` / `low`, before rendering. Named because `vw` clamps
 /// against these rather than against the raw aggregates — the response has to be
@@ -795,8 +816,50 @@ const CLOSE_EXACT: &str = "argMaxIf(c_x, (volume_base, quote_asset_id), valid)";
 /// NULL the whole expression is NULL, so `greatest(vwap, NULL)` leaves vwap
 /// unclamped on that side — which is correct: a bound we could not compute must
 /// not be used to move a value we could.
-const HIGH_PUBLISHED: &str = "if(isNull(maxIf(h_x, valid)), NULL, greatest(maxIf(h_x, valid), argMaxIf(c_x, (volume_base, quote_asset_id), valid)))";
-const LOW_PUBLISHED: &str = "if(isNull(minIf(l_x, valid)), NULL, least(minIf(l_x, valid), argMaxIf(c_x, (volume_base, quote_asset_id), valid)))";
+fn high_published(p: &str) -> String {
+    let c = close_exact(p);
+    format!("if(isNull(maxIf(h_x, {p})), NULL, greatest(maxIf(h_x, {p}), {c}))")
+}
+fn low_published(p: &str) -> String {
+    let c = close_exact(p);
+    format!("if(isNull(minIf(l_x, {p})), NULL, least(minIf(l_x, {p}), {c}))")
+}
+
+/// The USD candle's price inputs, computed once per bucket and named, so every
+/// output column and both clamps read the same values (lore-0332).
+///
+/// `_ub`: a USDC/XLM market formed a price in the bucket (`ps`). Then the
+/// prices and both means come from those markets only (`band`, `bandc`);
+/// otherwise from every market (`valid`, `convertible`), as before lore-0332.
+/// Such a market with no USD value yet (`ps` but not `band`) leaves the bucket
+/// unpriced (`_np`) rather than handing it to the other markets, and a band
+/// extreme that overflows stays NULL for the same reason.
+fn usd_with() -> String {
+    let pick = |f: &dyn Fn(&str) -> String, band: &str, all: &str| {
+        format!("if(_ub, {}, {})", f(band), f(all))
+    };
+    let open = pick(
+        &|p| format!("argMaxIf(o_x, (volume_base, quote_asset_id), {p})"),
+        "band",
+        "valid",
+    );
+    let meth = pick(
+        &|p| format!("argMaxIf(meth, (volume_base, quote_asset_id), {p})"),
+        "band",
+        "valid",
+    );
+    let high = pick(&high_published, "band", "valid");
+    let low = pick(&low_published, "band", "valid");
+    let close = pick(&close_exact, "band", "valid");
+    let vwap = pick(&vwap_raw, "bandc", "convertible");
+    let pf_vwap = pick(&pf_vwap_usd_raw, "band", "valid");
+    format!(
+        "WITH countIf(ps) > 0 AS _ub, \
+              (if(_ub, countIf(band), countIf(valid)) = 0) AS _np, \
+              {open} AS _op, {high} AS _hi, {low} AS _lo, {close} AS _cl, \
+              {meth} AS _me, {vwap} AS _vw, {pf_vwap} AS _pfvw "
+    )
+}
 
 /// The volume-weighted mean before clamping — task 0229's review, finding 1.
 ///
@@ -829,9 +892,13 @@ const LOW_PUBLISHED: &str = "if(isNull(minIf(l_x, valid)), NULL, least(minIf(l_x
 /// bucket whose dust leg carries most of the volume the clamp will move the
 /// published value to `low` or `high` — a mean of all trades cannot always sit
 /// inside the range of some of them.
-const VWAP_RAW: &str = "toDecimal128OrNull(toString( \
-                     sumIf(toFloat64(w_x) * toFloat64(volume_base), convertible) \
-                     / nullIf(sumIf(toFloat64(volume_base), convertible), 0)), 14)";
+fn vwap_raw(p: &str) -> String {
+    format!(
+        "toDecimal128OrNull(toString( \
+         sumIf(toFloat64(w_x) * toFloat64(volume_base), {p}) \
+         / nullIf(sumIf(toFloat64(volume_base), {p}), 0)), 14)"
+    )
+}
 
 /// Smallest `close` / `close_usd` a USD rate may be derived from — a
 /// **precision precondition**, not a plausibility band.
@@ -876,9 +943,13 @@ const PRECISION_FLOOR: &str = prices_clickhouse::PRICE_FLOOR_SQL;
 /// reports: before task 0286's migration the column does not exist, and its
 /// DEFAULT is `volume_quote`, which a fixture or a legacy writer may never have
 /// filled.
-const PF_VWAP_USD_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
-                     sumIf(toFloat64(pfpv_x), valid) \
-                     / nullIf(sumIf(toFloat64(pf_volume), valid), 0)), 14), 0)";
+fn pf_vwap_usd_raw(p: &str) -> String {
+    format!(
+        "nullIf(toDecimal128OrNull(toString( \
+         sumIf(toFloat64(pfpv_x), {p}) \
+         / nullIf(sumIf(toFloat64(pf_volume), {p}), 0)), 14), 0)"
+    )
+}
 
 /// The quote-leg arm's price gate, spelled once. Unlike the USD arm there is no
 /// `valid` to hang it on: that expression exists to say "this row can be
@@ -980,21 +1051,23 @@ const PF_ROWS: &str = "pf_trade_count > 0 AND close >= toDecimal128('0.000000000
 /// can read it — see [`OUTER_ALIASES`] for why the column tail is not something
 /// to maintain by hand in three places.
 fn usd_aggregates() -> String {
+    // The price inputs are the `usd_with` names, so `h`, `l`, `vw` and `pfvw`
+    // clamp against the same bounds the caller sees.
     format!(
-        "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
-                 if(countIf(valid) = 0, NULL, toString({HIGH_PUBLISHED})) AS h, \
-                 if(countIf(valid) = 0, NULL, toString({LOW_PUBLISHED})) AS l, \
-                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
+        "if(_np, NULL, toString(_op)) AS o, \
+                 if(_np, NULL, toString(_hi)) AS h, \
+                 if(_np, NULL, toString(_lo)) AS l, \
+                 if(_np, NULL, toString(_cl)) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL, \
-                    toString(least(greatest({VWAP_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS vw, \
+                 if(_np OR isNull(_vw), NULL, \
+                    toString(least(greatest(_vw, _lo), _hi))) AS vw, \
                  toUInt64(sum(trade_count)) AS tc, \
-                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
-                 if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv, \
+                 nullIf(if(_np, NULL, _me), '') AS meth, \
+                 if(_np, NULL, toUInt8(1)) AS drv, \
                  toNullable(toUInt64(sum(pf_trade_count))) AS pftc, \
-                 if(isNull({PF_VWAP_USD_RAW}), NULL, \
-                    toString(least(greatest({PF_VWAP_USD_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS pfvw, \
+                 if(_np OR isNull(_pfvw), NULL, \
+                    toString(least(greatest(_pfvw, _lo), _hi))) AS pfvw, \
                  {CLOSE_DIVERGENT_PLACEHOLDER}, \
                  {PROVENANCE_NULL_TAIL}"
     )
@@ -1009,7 +1082,9 @@ fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
     let floor = PRECISION_FLOOR;
     // The whole classification, extracted so its arm ORDER is testable
     // without a ClickHouse — see [`usd_method_expr`].
-    let meth_arm = usd_method_expr(usdc, &refs.pivots, granularity);
+    let meth_arm = usd_method_expr(usdc, &refs.pivots(), granularity);
+    let ids: Vec<String> = refs.price_setting().iter().map(|i| i.to_string()).collect();
+    let price_setting = ids.join(", ");
     // ⚠️ `pf_trade_count > 0` is a conjunct of `valid` rather than a filter on
     // the subquery: `valid` gates the PRICE expressions only, while
     // `sum(volume_base)`, `sum(volume_quote_usd)` and `sum(trade_count)`
@@ -1022,12 +1097,19 @@ fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
     // price". The prices take `valid`; `vwap` takes `convertible`, because ADR
     // 0287 §7 weighs every fill (review C2). Spelling `valid` in terms of
     // `convertible` is what keeps them one decision rather than two.
+    //
+    // lore-0332: `band` and `bandc` are the same two predicates on the USDC/XLM
+    // legs; `ps` asks only whether such a leg formed a price, so an unconverted
+    // one still claims the bucket (see `usd_with`).
     format!(
         "timestamp, volume_base, volume_quote_usd, trade_count, quote_asset_id, \
          pf_trade_count, pf_volume, \
          (close >= {floor} AND close_usd >= {floor} \
            AND (quote_asset_id = {usdc} OR close_usd != close)) AS convertible, \
          (convertible AND pf_trade_count > 0) AS valid, \
+         (pf_trade_count > 0 AND quote_asset_id IN ({price_setting})) AS ps, \
+         (valid AND ps) AS band, \
+         (convertible AND quote_asset_id IN ({price_setting})) AS bandc, \
          toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
          toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \
          toDecimal128OrNull(toString(toFloat64(high) * rate), 14) AS h_x, \
@@ -1063,7 +1145,7 @@ fn quote_leg_aggregates() -> String {
     let ql_high = format!("maxIf(high, {PF_ROWS})");
     let ql_low = format!("minIf(low, {PF_ROWS})");
     // The price-forming mean, in the stored denomination. Same zero rule as
-    // `PF_VWAP_USD_RAW`.
+    // `pf_vwap_usd_raw`.
     let pf_vwap_raw = format!(
         "nullIf(toDecimal128OrNull(toString( \
                  sumIf(toFloat64(pf_price_volume), {PF_ROWS}) \
@@ -1623,7 +1705,8 @@ pub(crate) fn usd_method_expr(usdc: u64, pivots: &[u64], granularity: Granularit
 /// Per-source rows are collapsed (`FINAL`) then merged per bucket: `high=max`,
 /// `low=min`, volumes + `trade_count` summed, `vwap` volume-weighted, and
 /// `open`/`close` from the highest-volume source (`argMax(.., volume_base)`).
-/// Ascending by timestamp.
+/// In USD mode open/high/low/close/method come from the USDC/XLM-quoted rows when
+/// the bucket has a valid one (lore-0332). Ascending by timestamp.
 ///
 /// ## 🔑 In USD mode the conversion happens BEFORE the merge, and the order is
 /// load-bearing
@@ -1717,20 +1800,21 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     // ascending for output. An ASC+LIMIT would instead return the OLDEST N and
     // silently drop the recent candles a chart actually wants. `ts` is ISO-8601
     // (`%Y-%m-%dT%H:%i:%SZ`), so lexicographic `ts ASC` == chronological order.
-    let (projection, aggregates) = match args.denomination {
+    let (projection, with, aggregates) = match args.denomination {
         Denomination::Usd(ref refs) => (
             // Per-row scaling — see the ordering note above. `valid` gates
             // both the arithmetic and the classification, so a row that
             // cannot be priced contributes to volume and trade_count but
             // never to a price or a method.
             usd_projection(refs, args.granularity),
-            // `countIf(valid) = 0` is what produces §5's price-less bucket:
+            usd_with(),
+            // `_np` is what produces §5's price-less bucket:
             // NULL across every price field, while the volume columns below
             // still aggregate over all rows.
             // `c` is EXACT (`close_usd` as stored) while `h`/`l` are derived
             // through `toFloat64`, so the two are on different scales and can
             // cross — task 0229. `least`/`greatest` pull the derived extremes
-            // back over the exact close; see the CLOSE_EXACT note above.
+            // back over the exact close; see the `close_exact` note above.
             usd_aggregates(),
         ),
         // As stored: no conversion, so nothing is derived and there is no USD
@@ -1744,6 +1828,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
              volume_quote_usd, trade_count, pf_trade_count, pf_volume, \
              pf_price_volume"
                 .to_string(),
+            String::new(),
             // ⚠️ `vw` is clamped into `[min(low), max(high)]` here too — task 0229's
             // review, finding 1. This arm applies no rate, so `o`/`h`/`l`/`c` are
             // the stored decimals and cannot cross; the merged vwap still can,
@@ -1796,7 +1881,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     // `ohlcv_and_peg_series_project_the_same_alias_tail` is the guard.
     let sql = format!(
         "SELECT {OUTER_ALIASES} FROM ( \
-           SELECT \
+           {with}SELECT \
              formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
              {aggregates} \
            FROM ( SELECT {projection} FROM {table} FINAL WHERE {conds} ) \
@@ -2889,8 +2974,58 @@ mod tests {
     fn usd_refs() -> UsdRefs {
         UsdRefs {
             usdc: 2,
-            pivots: vec![1],
+            xlm: Some(1),
+            usdt: None,
         }
+    }
+
+    /// lore-0332: a bucket where a USDC/XLM market formed a price takes its
+    /// prices and both means from those markets; any other bucket renders the
+    /// pre-0332 expressions, byte for byte.
+    #[test]
+    fn usd_prices_come_from_the_price_setting_legs_when_the_bucket_has_one() {
+        let with = usd_with();
+        assert!(with.starts_with("WITH countIf(ps) > 0 AS _ub, "), "{with}");
+        assert!(
+            with.contains("(if(_ub, countIf(band), countIf(valid)) = 0) AS _np"),
+            "an unconverted USDC/XLM leg leaves the bucket unpriced: {with}"
+        );
+        // o, h, l, c, meth, vw, pfvw.
+        assert_eq!(with.matches("if(_ub, ").count(), 8, "{with}");
+        for (band, all) in [("band", "valid"), ("bandc", "convertible")] {
+            let (b, a) = match band {
+                "band" => (high_published(band), high_published(all)),
+                _ => (vwap_raw(band), vwap_raw(all)),
+            };
+            assert!(with.contains(&format!("if(_ub, {b}, {a})")), "{with}");
+        }
+        for f in [low_published, close_exact, pf_vwap_usd_raw] {
+            assert!(
+                with.contains(&format!("if(_ub, {}, {})", f("band"), f("valid"))),
+                "{with}"
+            );
+        }
+        for before in [
+            "argMaxIf(c_x, (volume_base, quote_asset_id), valid)",
+            "if(isNull(maxIf(h_x, valid)), NULL, greatest(maxIf(h_x, valid), argMaxIf(c_x, (volume_base, quote_asset_id), valid)))",
+            "if(isNull(minIf(l_x, valid)), NULL, least(minIf(l_x, valid), argMaxIf(c_x, (volume_base, quote_asset_id), valid)))",
+            "sumIf(toFloat64(w_x) * toFloat64(volume_base), convertible)",
+            "sumIf(toFloat64(pfpv_x), valid)",
+        ] {
+            assert!(
+                with.contains(before),
+                "fallback drifted from `{before}`: {with}"
+            );
+        }
+        // The output columns read only the named inputs.
+        let agg = usd_aggregates();
+        for gone in ["countIf(", "maxIf(", "minIf(", "argMaxIf(", "sumIf("] {
+            assert!(!agg.contains(gone), "`{gone}` belongs in usd_with: {agg}");
+        }
+        let refs = usd_refs();
+        assert_eq!(refs.price_setting(), vec![2, 1]);
+        assert_eq!(refs.pivots(), vec![1]);
+        assert_eq!(UsdRefs { xlm: None, ..refs }.price_setting(), vec![2]);
     }
 
     /// A candle's prices come only from the rows that held a price-forming
@@ -2906,6 +3041,15 @@ mod tests {
         assert!(
             valid.contains("pf_trade_count > 0"),
             "`valid` must exclude a row whose bucket formed no price: {valid}"
+        );
+        assert!(
+            projection.contains(
+                ") AS valid, (pf_trade_count > 0 AND quote_asset_id IN (2, 1)) AS ps, \
+                 (valid AND ps) AS band, \
+                 (convertible AND quote_asset_id IN (2, 1)) AS bandc, "
+            ),
+            "`band`/`bandc` narrow `valid`/`convertible` to the USDC/XLM legs \
+             (lore-0332): {projection}"
         );
         // The pf columns the aggregates weigh have to reach the outer SELECT.
         for col in ["pf_trade_count", "pf_volume", "pfpv_x"] {
@@ -3097,19 +3241,18 @@ mod tests {
     #[test]
     fn the_merged_vwap_weights_every_row_including_the_ones_that_formed_no_price() {
         let usd = usd_aggregates();
+        let with = usd_with();
         assert!(
-            VWAP_RAW.contains("sumIf(toFloat64(w_x) * toFloat64(volume_base), convertible)"),
-            "the USD merge weights every row it can convert, not only the \
-             price-forming ones: {VWAP_RAW}"
-        );
-        assert!(
-            !VWAP_RAW.contains("valid"),
-            "`valid` carries `pf_trade_count > 0`, which is what this undoes: {VWAP_RAW}"
-        );
-        assert!(
-            usd.contains(&format!(
-                "if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL,"
+            with.contains(&format!(
+                "if(_ub, {}, {}) AS _vw",
+                vwap_raw("bandc"),
+                vwap_raw("convertible")
             )),
+            "the USD merge weights every row it can convert, not only the \
+             price-forming ones: {with}"
+        );
+        assert!(
+            usd.contains("if(_np OR isNull(_vw), NULL,"),
             "a bucket with no price-forming fill still publishes no vwap: {usd}"
         );
 
@@ -3160,9 +3303,16 @@ mod tests {
     /// price-forming volume to weigh: a zero here would be read as a price.
     #[test]
     fn the_price_forming_vwap_is_clamped_into_the_published_band_and_never_zero() {
-        for (name, agg) in [
-            ("Denomination::Usd", usd_aggregates()),
-            ("Denomination::QuoteLeg", quote_leg_aggregates()),
+        // The USD arm names its mean in `usd_with` and clamps it in the list.
+        let usd_mean = usd_with()
+            .split(" AS _pfvw")
+            .next()
+            .and_then(|head| head.rsplit(" AS _vw, ").next())
+            .unwrap_or_default()
+            .to_string();
+        for (name, agg, mean) in [
+            ("Denomination::Usd", usd_aggregates(), Some(usd_mean)),
+            ("Denomination::QuoteLeg", quote_leg_aggregates(), None),
         ] {
             let pfvw = agg
                 .split(" AS pfvw")
@@ -3174,6 +3324,7 @@ mod tests {
                 pfvw.contains("least(greatest("),
                 "{name}'s pf_vwap must be clamped into [low, high]: {pfvw}"
             );
+            let pfvw = mean.unwrap_or(pfvw);
             assert!(
                 pfvw.contains("nullIf("),
                 "{name}'s pf_vwap must be NULL, not 0, with no price-forming \
