@@ -380,9 +380,10 @@ pub struct OhlcvParams {
 /// filters to the native quote and returns candles as stored.
 ///
 /// Price fields are **absent, not dropped**, on a bucket with no USD value.
-/// Candles merge across sources and quote legs per bucket; in USD mode the
-/// USDC/XLM legs set the prices when the bucket has one (lore-0332). `backfill_note` appears only for `timeframe=all` while the backfill
-/// is still running.
+/// Candles merge across sources — and, in USD mode, across quote legs — per
+/// bucket; in USD mode the USDC/XLM legs set the prices when one formed a price.
+/// `backfill_note` appears only for `timeframe=all` while the backfill is still
+/// running.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/ohlcv",
@@ -395,10 +396,11 @@ pub struct OhlcvParams {
      the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` \
      only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but \
      has no USD value yet is returned with its price fields `null`\nrather than omitted, so a \
-     chart keeps its time axis. Trades from every venue and quote\nasset are merged per bucket, \
-     in ascending time order, and all of them count toward the\nvolumes and trade counts. In USD \
-     mode `open`, `high`, `low` and `close` come only from\nmarkets quoted in USDC or XLM when the \
-     bucket has one, and from every market otherwise.\n\nThe window is `timeframe`, ending \
+     chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote \
+     asset — are merged per bucket, in ascending time order,\nand all of them count toward the \
+     volumes and trade counts. In USD mode `open`, `high`,\n`low`, `close` and `method` come \
+     only from markets quoted in USDC or XLM when one of\nthem formed a price in the bucket, \
+     and from every market otherwise.\n\nThe window is `timeframe`, ending \
      now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
      rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
      historical backfill is still running.",
@@ -571,24 +573,24 @@ pub async fn get_ohlcv(
                         queries_ch::resolve_asset_id(state.ch(), &usdt_id),
                     );
                     // The pivots are best-effort: an untracked reference cannot
-                    // be any candle's quote leg, so it only costs the `traded`
-                    // label. A lookup ERROR still fails — that is the database
-                    // misbehaving, not an absent asset.
-                    let optional = |found: Result<Option<u64>, _>| match found {
+                    // be any candle's quote leg. It costs the `traded` label and,
+                    // for XLM, its place among the price-setting legs — until a
+                    // restart, as this result is cached. A lookup ERROR still
+                    // fails — that is the database misbehaving, not an absent asset.
+                    let optional = |found: Result<Option<u64>, _>, name: &str| match found {
                         Ok(Some(id)) => Ok(Some(id)),
                         Ok(None) => {
-                            tracing::debug!(
-                                "ohlcv pivot reference not tracked; rows on this leg go unlabelled"
+                            tracing::warn!(
+                                "ohlcv {name} reference untracked until restart; see UsdRefs::xlm"
                             );
                             Ok(None)
                         }
                         Err(e) => Err(e),
                     };
-                    let (xlm, usdt) = (optional(xlm)?, optional(usdt)?);
-                    let pivots = [xlm, usdt].into_iter().flatten().collect();
+                    let (xlm, usdt) = (optional(xlm, "XLM")?, optional(usdt, "USDT")?);
                     // USDC must resolve: see UsdRefs::usdc.
                     match usdc {
-                        Ok(Some(usdc)) => Ok(queries_ch::UsdRefs { usdc, xlm, pivots }),
+                        Ok(Some(usdc)) => Ok(queries_ch::UsdRefs { usdc, xlm, usdt }),
                         Ok(None) => Err(clickhouse::error::Error::Custom(
                             "canonical USDC is not tracked".to_string(),
                         )),

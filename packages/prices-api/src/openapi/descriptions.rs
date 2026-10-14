@@ -347,7 +347,7 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          this bucket, never one carried over from an earlier one. `null` when the bucket has \
          no price — see `pf_trade_count`. Exact in USD mode — the other price fields are \
          scaled, see `derived`. In USD mode only markets quoted in USDC or XLM set it when \
-         the bucket has one.",
+         one of them formed a price in the bucket; otherwise every market does.",
     ),
     (
         "Candle",
@@ -357,8 +357,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          price-forming mean, so a wide gap marks a thin or one-sided bucket rather than an \
          error: the close is still what it last traded at, and a poor summary of what it is \
          worth. Prefer `pf_vwap` when ranking or valuing, and `close` when charting the last \
-         price.\n\n`null` when either value is `null` — nothing was compared, which is not \
-         the same as the two agreeing.",
+         price. In USD mode a gap can also come from a market that weighs into `pf_vwap` \
+         but does not set `close` — one quoted in USDT, for example.\n\n`null` when either \
+         value is `null` — nothing was compared, which is not the same as the two agreeing.",
     ),
     (
         "Candle",
@@ -375,14 +376,16 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "high",
         "Highest price among this bucket's price-forming trades, in `base_currency`; `null` \
          when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
-         quoted in USDC or XLM set it when the bucket has one.",
+         quoted in USDC or XLM set it when one of them formed a price in the bucket; \
+         otherwise every market does.",
     ),
     (
         "Candle",
         "low",
         "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` \
          when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
-         quoted in USDC or XLM set it when the bucket has one.",
+         quoted in USDC or XLM set it when one of them formed a price in the bucket; \
+         otherwise every market does.",
     ),
     (
         "Candle",
@@ -418,14 +421,18 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          cases: when the price fields are `null`; always for \
          `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket \
          below the oracle epoch that carries a converted rate no imported series covers \
-         — nothing can attribute it, and a label would be a claim.",
+         — nothing can attribute it, and a label would be a claim.\n\nIn USD mode the label \
+         follows the markets that set the prices: those quoted in USDC or XLM when one of \
+         them formed a price in the bucket, otherwise every market. A bucket that traded \
+         mostly against USDT can therefore report the `assumed-par` of its USDC market.",
     ),
     (
         "Candle",
         "open",
         "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of \
          this bucket. `null` when the bucket has no price — see `pf_trade_count`. In USD \
-         mode only markets quoted in USDC or XLM set it when the bucket has one.",
+         mode only markets quoted in USDC or XLM set it when one of them formed a price in \
+         the bucket; otherwise every market does.",
     ),
     (
         "Candle",
@@ -451,7 +458,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Volume-weighted average price of the bucket's price-forming trades, in \
          `base_currency` — `vwap` with the dust left out, and the value `close_divergent` \
          compares `close` against.\n\nDenominated exactly like `close` and bounded by the \
-         published `low` and `high`, so the response stays self-consistent. `null` when the \
+         published `low` and `high`, so the response stays self-consistent. In USD mode it \
+         weighs every market, including ones that do not set `low` and `high` (USDT-quoted, \
+         for example), so it can sit at one of those bounds. `null` when the \
          bucket has no price-forming volume, and on the synthesized USDC self-series. Never \
          `0`.",
     ),
@@ -527,8 +536,10 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          zero.\n\nBounded by the published `low` and `high` so the response stays \
          self-consistent. Those come from the price-forming trades only, so on a bucket \
          where the trades that formed no price carry most of the volume the raw mean falls \
-         outside that range and the value reported is the nearer bound. Compare it with \
-         `pf_vwap` when the difference matters.",
+         outside that range and the value reported is the nearer bound. In USD mode the \
+         same happens when a market that does not set `low` and `high` — one quoted in \
+         USDT, for example — traded away from the ones that do. Compare it with `pf_vwap` \
+         when the difference matters.",
     ),
     (
         "ErrorEnvelope",

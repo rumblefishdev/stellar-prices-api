@@ -706,18 +706,21 @@ pub struct UsdRefs {
     /// indistinguishable from the anomalous same-signature rows on other legs
     /// and would be dropped. Its absence is a real server-side data gap.
     pub usdc: u64,
-    /// XLM: a price-setting quote and the peg series' anchor. Optional, like the
-    /// pivots.
+    /// XLM and canonical USDT, the two pivot references. **Optional**: an
+    /// untracked reference cannot be any candle's quote leg, so its branch simply
+    /// never matches — refusing to serve the endpoint over it would turn a data
+    /// gap into an outage. XLM is also a price-setting quote and the peg series'
+    /// anchor.
     pub xlm: Option<u64>,
-    /// XLM and canonical USDT, the two pivot references. **Optional**: they only
-    /// select the `traded` label. An untracked reference cannot be any candle's
-    /// quote leg, so the branch simply never matches — refusing to serve the
-    /// endpoint over a missing label would turn a cosmetic dependency into an
-    /// outage.
-    pub pivots: Vec<u64>,
+    pub usdt: Option<u64>,
 }
 
 impl UsdRefs {
+    /// The pivots that select the `traded` label.
+    pub fn pivots(&self) -> Vec<u64> {
+        self.xlm.into_iter().chain(self.usdt).collect()
+    }
+
     /// The quote legs whose rows set a USD candle's prices. Never empty.
     pub fn price_setting(&self) -> Vec<u64> {
         // A token joins here once its USD rate is reliable (lore-0332).
@@ -818,7 +821,8 @@ fn low_published(p: &str) -> String {
 }
 
 /// `expr` over the USDC/XLM rows (`band`) when the bucket has one, else over
-/// every valid row, as before lore-0332.
+/// every valid row, as before lore-0332. A band extreme that overflows stays
+/// NULL: the other legs do not stand in for it.
 fn banded(expr: impl Fn(&str) -> String) -> String {
     format!("if(countIf(band) > 0, {}, {})", expr("band"), expr("valid"))
 }
@@ -1041,7 +1045,7 @@ fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
     let floor = PRECISION_FLOOR;
     // The whole classification, extracted so its arm ORDER is testable
     // without a ClickHouse — see [`usd_method_expr`].
-    let meth_arm = usd_method_expr(usdc, &refs.pivots, granularity);
+    let meth_arm = usd_method_expr(usdc, &refs.pivots(), granularity);
     let ids: Vec<String> = refs.price_setting().iter().map(|i| i.to_string()).collect();
     let price_setting = ids.join(", ");
     // ⚠️ `pf_trade_count > 0` is a conjunct of `valid` rather than a filter on
@@ -2926,7 +2930,7 @@ mod tests {
         UsdRefs {
             usdc: 2,
             xlm: Some(1),
-            pivots: vec![1],
+            usdt: None,
         }
     }
 
@@ -2963,6 +2967,7 @@ mod tests {
         }
         let refs = usd_refs();
         assert_eq!(refs.price_setting(), vec![2, 1]);
+        assert_eq!(refs.pivots(), vec![1]);
         assert_eq!(UsdRefs { xlm: None, ..refs }.price_setting(), vec![2]);
     }
 
