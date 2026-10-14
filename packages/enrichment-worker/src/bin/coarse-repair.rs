@@ -118,6 +118,14 @@ struct Args {
     #[arg(long, env = "PIVOT_WINDOW_S", default_value_t = 86_400)]
     pivot_window_s: u32,
 
+    /// Before 2021-02-01 only (task 0331): price XLM-quoted candles from the
+    /// promoted `method = 'external'` XLM/USD rows, and dollar-token-quoted ones
+    /// through that token's own XLM market within `--pivot-window-s`. Writes only
+    /// rows whose values differ, so a re-run is idempotent. Refused until the
+    /// series is promoted. On `price_ohlcv_1m` it needs `--skip-snapshot`.
+    #[arg(long, conflicts_with = "reset_quote_asset_id")]
+    pre_usdc_xlm_rate: bool,
+
     /// Re-open already-written USD values for this quote `asset_id` so the
     /// corrected tiers recompute them (task 0182). Requires
     /// `--reset-not-before`.
@@ -476,7 +484,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // clap's `requires` makes the mixed cases unreachable.
             _ => None,
         },
-        pre_usdc_xlm_rate: false,
+        pre_usdc_xlm_rate: args.pre_usdc_xlm_rate,
     };
 
     let repair_cfg = CoarseRepairConfig {
@@ -589,6 +597,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             m.zeros_after,
             m.rows_reset,
             m.snapshot_name.as_deref().unwrap_or("-")
+        );
+    }
+    if args.pre_usdc_xlm_rate {
+        println!(
+            "--pre-usdc-xlm-rate: zeros_before = rows to write, enriched = rows written, \
+             zeros_after = rows still differing (> 0 after a capped run: re-run)"
         );
     }
     println!(

@@ -32,7 +32,9 @@ use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, repair_target_pred};
+use crate::ch_enrich::{
+    ChEnrichConfig, ChEnrichError, ChEnrichmentPass, pre_usdc_scope_pred, repair_target_pred,
+};
 
 /// One coarse-repair run over `[start_month, end_month]` (inclusive `YYYYMM`).
 #[derive(Debug, Clone)]
@@ -206,6 +208,12 @@ impl CoarseRepairDriver {
     /// the month's first instant; `addMonths(..., 1)` is the exclusive upper
     /// bound. Both cast to `UInt32` to match [`MonthWindow`].
     async fn months_with_zeros(&self) -> Result<Vec<MonthWindow>, ChEnrichError> {
+        let e = &self.cfg.enrich;
+        let pred = if e.pre_usdc_xlm_rate {
+            pre_usdc_scope_pred(&e.database)
+        } else {
+            repair_target_pred(&e.database, &e.table, e.usd_reset.as_ref())
+        };
         let sql = format!(
             "SELECT toYYYYMM(timestamp) AS month, \
                     toUInt32(toUnixTimestamp(toDateTime(min(toStartOfMonth(timestamp))))) AS start_ts, \
@@ -217,11 +225,6 @@ impl CoarseRepairDriver {
              GROUP BY month ORDER BY month",
             db = self.cfg.enrich.database,
             tbl = self.cfg.enrich.table,
-            pred = repair_target_pred(
-                &self.cfg.enrich.database,
-                &self.cfg.enrich.table,
-                self.cfg.enrich.usd_reset.as_ref(),
-            ),
             start = self.cfg.start_month,
             end = self.cfg.end_month,
         );
@@ -302,16 +305,31 @@ impl CoarseRepairDriver {
                 break;
             }
 
+            // Partition-bounded pass over this one month. `one_shot` decides
+            // whether it drains the month fully (manual repair) or a bounded
+            // `max_batches` chunk with overflow deferring to the next run (the
+            // recurring hourly sweep) — see [`CoarseRepairConfig::one_shot`].
+            let mut ecfg = self.cfg.enrich.clone();
+            ecfg.time_window = Some((mw.start_ts, mw.end_ts));
+            ecfg.one_shot = self.cfg.one_shot;
+            let pre_usdc = ecfg.pre_usdc_xlm_rate;
+            let pass = ChEnrichmentPass::with_client(self.client.clone(), ecfg);
+
             if self.cfg.dry_run {
+                // Task 0331: report the rows the real run writes, not scope rows.
+                let zeros = if pre_usdc {
+                    pass.pre_usdc_pending().await?
+                } else {
+                    mw.zeros
+                };
                 info!(
                     month = mw.month,
-                    zeros = mw.zeros,
-                    "coarse repair: DRY RUN — would repair"
+                    zeros, "coarse repair: DRY RUN — would repair"
                 );
                 summary.months.push(MonthRepair {
                     month: mw.month,
-                    zeros_before: mw.zeros,
-                    zeros_after: mw.zeros,
+                    zeros_before: zeros,
+                    zeros_after: zeros,
                     rows_enriched: 0,
                     rows_reset: 0,
                     snapshot_name: None,
@@ -334,16 +352,7 @@ impl CoarseRepairDriver {
                 None
             };
 
-            // Partition-bounded pass over this one month. `one_shot` decides
-            // whether it drains the month fully (manual repair) or a bounded
-            // `max_batches` chunk with overflow deferring to the next run (the
-            // recurring hourly sweep) — see [`CoarseRepairConfig::one_shot`].
-            let mut ecfg = self.cfg.enrich.clone();
-            ecfg.time_window = Some((mw.start_ts, mw.end_ts));
-            ecfg.one_shot = self.cfg.one_shot;
-            let stats = ChEnrichmentPass::with_client(self.client.clone(), ecfg)
-                .run()
-                .await?;
+            let stats = pass.run().await?;
 
             info!(
                 month = mw.month,
@@ -363,7 +372,8 @@ impl CoarseRepairDriver {
             });
             // Defensive cross-check: the enumeration count and the pass's own
             // pre-count should agree (both are the month's zero population).
-            if mw.zeros != stats.candidates_before {
+            // In the 0331 mode the pass counts rows to write, not scope rows.
+            if !pre_usdc && mw.zeros != stats.candidates_before {
                 warn!(
                     month = mw.month,
                     enumerated = mw.zeros,
