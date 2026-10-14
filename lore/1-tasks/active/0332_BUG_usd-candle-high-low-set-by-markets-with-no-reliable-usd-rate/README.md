@@ -18,6 +18,14 @@ history:
     status: active
     who: akot
     note: >
+      Code in PR #402 (5 commits, not merged). ITs green on CH 26.3.10.60:
+      ohlcv_it 45, ignored suite 318/0 over 40 targets, workspace 1437/0.
+      Step 1 measured on prod (AC 6, 7); client notice drafted (AC 10).
+      Left: merge, compute deploy, sending the notice.
+  - date: "2026-10-14"
+    status: active
+    who: akot
+    note: >
       Decided: fallback buckets get no response flag (measured by AC 7
       instead); ADR 0011 is not amended. Implementation branch opened.
   - date: "2026-10-14"
@@ -45,10 +53,12 @@ volume.
 
 - Analysis, case study, prior art: [R-usdt-legs-widen-usd-candles](notes/R-usdt-legs-widen-usd-candles.md)
 - Decision: [S-price-setting-markets-are-usdc-and-xlm](notes/S-price-setting-markets-are-usdc-and-xlm.md)
+- Measured on prod: [R-step-1-measured-on-production](notes/R-step-1-measured-on-production.md)
+- Client notice draft: [G-client-notice-usd-candle-prices](notes/G-client-notice-usd-candle-prices.md)
 
 ## Status: Active
 
-**Current state:** methodology agreed (Marek, Oskar, 2026-10-14). No code yet.
+**Current state:** PR #402 open, not merged; not deployed. Notice drafted, not sent.
 
 ## Implementation Plan
 
@@ -76,21 +86,23 @@ All in `packages/prices-api/src/assets/queries_ch.rs` unless stated.
 
 ## Acceptance Criteria
 
-- [ ] USD mode: a bucket with a valid USDC- or XLM-quoted row takes
+- [x] USD mode: a bucket with a valid USDC- or XLM-quoted row takes
       `open`/`high`/`low`/`close`/`method` from those rows only.
-- [ ] A bucket with no such row returns the same candle as before.
-- [ ] Volumes and trade counts unchanged for every bucket.
-- [ ] `vwap` and `pf_vwap` lie within the published `[low, high]`.
-- [ ] `base_currency=XLM` (`QuoteLeg` arm) unchanged.
-- [ ] XLM 1d 2022-06-18 returns high ≈ $0.1137, low ≈ $0.1005; XLM p95 high/low
+- [x] A bucket with no such row returns the same candle as before.
+- [x] Volumes and trade counts unchanged for every bucket.
+- [x] `vwap` and `pf_vwap` lie within the published `[low, high]`.
+- [x] `base_currency=XLM` (`QuoteLeg` arm) unchanged.
+- [x] XLM 1d 2022-06-18 returns high ≈ $0.1137, low ≈ $0.1005; XLM p95 high/low
       deviation vs Binance recorded before/after and set against the analysis'
-      step 1+2 figures.
-- [ ] Affected assets/buckets counted, including non-USDT legs the allowlist
+      step 1+2 figures. Prod: $0.1137 / $0.1005; on the analysis' 557 days step
+      1 alone gives its 1.14 % / 2.16 % (see the R- note).
+- [x] Affected assets/buckets counted, including non-USDT legs the allowlist
       also drops (the analysis' 419 counts USDT only), and fallback buckets
-      (no USDC/XLM market) counted separately.
-- [ ] ITs pass on CH 26.3.10.60; full ignored suite green.
-- [ ] OpenAPI description updated in the same PR as the code.
-- [ ] Client notice drafted in `notes/`.
+      (no USDC/XLM market) counted separately. 37,582 buckets / 419 assets,
+      all USDT (no other quote is convertible); fallback 1,345 / 160. 1d only.
+- [x] ITs pass on CH 26.3.10.60; full ignored suite green.
+- [x] OpenAPI description updated in the same PR as the code.
+- [x] Client notice drafted in `notes/`.
 
 ## Decisions (2026-10-14, Adam)
 
@@ -107,8 +119,15 @@ All in `packages/prices-api/src/assets/queries_ch.rs` unless stated.
 
 - **Step 2 — per-minute rate for USDC/XLM markets.** Needs `_1m` priced
   end-to-end (0286 USD re-pricing) and a choice: read `_1m` at query time, or
-  store USD extremes in the rollups (schema + re-ingest). Decide once AC 6 shows
-  what step 1 alone delivers.
+  store USD extremes in the rollups (schema + re-ingest). AC 6: for XLM, step 1
+  alone already gives the analysis' step 1+2 figures; any gain from step 2
+  would come from XLM-quoted tokens (ETH, XRP in the analysis).
+- **Cheap single fills on the USDC/XLM markets themselves.** After step 1,
+  most remaining XLM low outliers are Aquarius XLM/USDC fills far below the
+  market (62 of 121 days >5 % off, 2025–26, drifting from $0.20 to $0.03). This
+  looks like a stale pool that nobody arbitrages; which pool is not yet
+  established. The analysis' ±50 % band (rule 3) removed these prints. See the
+  R- note.
 
 ## Notes
 

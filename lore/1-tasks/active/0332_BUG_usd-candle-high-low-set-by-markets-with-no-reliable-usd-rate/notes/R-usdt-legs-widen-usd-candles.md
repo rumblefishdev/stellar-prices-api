@@ -4,6 +4,7 @@ type: research
 status: mature
 spawns:
   - notes/S-price-setting-markets-are-usdc-and-xlm.md
+  - notes/R-step-1-measured-on-production.md
 tags: [ohlcv, usdt, methodology, high-low]
 links: []
 history:
