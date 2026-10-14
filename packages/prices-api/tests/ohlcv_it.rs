@@ -2970,3 +2970,145 @@ async fn ohlcv_a_usdt_leg_no_longer_sets_the_usd_high_and_low() {
 
     teardown(db).await;
 }
+
+/// BAZ on 2026-04-01, one 1h bucket per case. USDC legs sit at the peg (rate
+/// 1), USDT legs at rate 0.5, the XLM leg at rate 0.25.
+async fn seed_price_setting_0332(db: &str, admin: &Client) {
+    exec(admin, &assets_insert(db, &[BAZ, USDT])).await;
+    // lore-0332. 10:00 USDC + USDT; 11:00 USDT has the larger volume;
+    // 12:00 XLM + USDT; 13:00 USDT only; 14:00 USDT pulls vwap above the band.
+    exec(
+        admin,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-04-01 10:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 100, 105, 105, 1.1, 1.05, 10, 1), \
+             ('2026-04-01 10:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1), \
+             ('2026-04-01 11:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, 2, 1), \
+             ('2026-04-01 11:00:00', {BAZ}, {USDT}, 'sdex', 2.1, 2.2, 1.9, 2.1, 1000, 2100, 1050, 1.05, 2.1, 20, 1), \
+             ('2026-04-01 12:00:00', {BAZ}, {XLM}, 'sdex', 10, 12, 9, 10, 100, 1000, 250, 2.5, 10, 7, 1), \
+             ('2026-04-01 12:00:00', {BAZ}, {USDT}, 'sdex', 6, 8, 2, 5, 20, 100, 50, 2.5, 5, 3, 1), \
+             ('2026-04-01 13:00:00', {BAZ}, {USDT}, 'sdex', 2.0, 3.0, 1.0, 2.0, 50, 100, 50, 1.0, 2.0, 5, 1), \
+             ('2026-04-01 14:00:00', {BAZ}, {USDC}, 'sdex', 1.0, 1.1, 0.9, 1.0, 10, 10, 10, 1.0, 1.0, 2, 1), \
+             ('2026-04-01 14:00:00', {BAZ}, {USDT}, 'sdex', 4, 6, 2, 4, 990, 3960, 1980, 2.0, 4.0, 50, 1)"
+        ),
+    )
+    .await;
+}
+
+/// In USD mode USDC- and XLM-quoted rows set the prices when the bucket has
+/// one; a USDT-only bucket is priced as before (lore-0332). Before-fix values
+/// in the comments show what each case discriminates.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_usd_prices_come_from_usdc_and_xlm_markets_when_the_bucket_has_one() {
+    let db = "it_ohlcv_price_setting_0332";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    seed_price_setting_0332(db, &admin).await;
+
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1h&start=2026-04-01T10:00:00Z\
+         &end=2026-04-01T14:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 5, "body={json}");
+    let at = |hour: &str| {
+        let ts = format!("2026-04-01T{hour}:00:00Z");
+        data.iter()
+            .find(|c| c["timestamp"] == ts.as_str())
+            .unwrap_or_else(|| panic!("no bucket at {ts}: {json}"))
+    };
+
+    type Case = (
+        &'static str,
+        &'static str,
+        [f64; 4],
+        &'static str,
+        f64,
+        Option<f64>,
+    );
+    let cases: [Case; 5] = [
+        // label, hour, [open, high, low, close], method, volume_base, vwap (= pf_vwap)
+        // was high 1.5, low 0.5
+        (
+            "1 usdc+usdt",
+            "10",
+            [1.0, 1.2, 0.9, 1.1],
+            "assumed-par",
+            150.0,
+            Some(155.0 / 150.0),
+        ),
+        // was open 1.05, close 1.05, `traded`
+        (
+            "2 usdt larger",
+            "11",
+            [1.0, 1.2, 0.9, 1.1],
+            "assumed-par",
+            1010.0,
+            None,
+        ),
+        // was high 4.0, low 1.0
+        (
+            "3 xlm+usdt",
+            "12",
+            [2.5, 3.0, 2.25, 2.5],
+            "traded",
+            120.0,
+            None,
+        ),
+        (
+            "4 usdt only",
+            "13",
+            [1.0, 1.5, 0.5, 1.0],
+            "traded",
+            50.0,
+            Some(1.0),
+        ),
+        // was high 3.0, close 2.0, vwap 1.99
+        (
+            "5 vwap clamp",
+            "14",
+            [1.0, 1.1, 0.9, 1.0],
+            "assumed-par",
+            1000.0,
+            Some(1.1),
+        ),
+    ];
+    for (label, hour, ohlc, method, vb, vwap) in cases {
+        let c = at(hour);
+        let num = |k: &str| c[k].as_str().map(|s| s.parse::<f64>().unwrap());
+        for (field, want) in ["open", "high", "low", "close"].into_iter().zip(ohlc) {
+            let got = num(field).unwrap_or_else(|| panic!("case {label}: no {field}: {c}"));
+            assert!(
+                (got - want).abs() < 1e-6,
+                "case {label}: {field} {got} != {want}: {c}"
+            );
+        }
+        assert_eq!(c["method"], method, "case {label}: {c}");
+        assert!(
+            (num("volume_base").unwrap() - vb).abs() < 1e-6,
+            "case {label}: {c}"
+        );
+        if let Some(want) = vwap {
+            for field in ["vwap", "pf_vwap"] {
+                let got = num(field).unwrap_or_else(|| panic!("case {label}: no {field}: {c}"));
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "case {label}: {field} {got} != {want}: {c}"
+                );
+            }
+        }
+    }
+    // Case 1: the USDT leg still counts toward volume and trades.
+    let c1 = at("10");
+    approx(&c1["volume_quote_usd"], 155.0);
+    assert_eq!(c1["trade_count"], 15, "case 1: {c1}");
+    assert_eq!(c1["pf_trade_count"], 15, "case 1: {c1}");
+
+    teardown(db).await;
+}
