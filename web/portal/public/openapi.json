@@ -319,7 +319,7 @@
       "get": {
         "tags": ["prices"],
         "summary": "`GET /assets/{asset_identifier}/ohlcv` — candlestick history.",
-        "description": "Candlestick history for one asset. `base_currency` sets the currency the candles are\nexpressed in, not which market they come from. With `USD` (the default) every candle is\nconverted to USD whatever it traded against, so an asset with no USD market still has a\nhistory: `close` is exact, while `open`, `high`, `low` and `vwap` are scaled from the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but has no USD value yet is returned with its price fields `null`\nrather than omitted, so a chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote asset — are merged per bucket, in ascending time order.\n\nThe window is `timeframe`, ending now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the historical backfill is still running.",
+        "description": "Candlestick history for one asset. `base_currency` sets the currency the candles are\nexpressed in, not which market they come from. With `USD` (the default) every candle is\nconverted to USD whatever it traded against, so an asset with no USD market still has a\nhistory: `close` is exact, while `open`, `high`, `low` and `vwap` are scaled from the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but has no USD value yet is returned with its price fields `null`\nrather than omitted, so a chart keeps its time axis. Trades from every venue and quote\nasset are merged per bucket, in ascending time order, and all of them count toward the\nvolumes and trade counts. In USD mode `open`, `high`, `low` and `close` come only from\nmarkets quoted in USDC or XLM when the bucket has one, and from every market otherwise.\n\nThe window is `timeframe`, ending now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the historical backfill is still running.",
         "operationId": "get_ohlcv",
         "parameters": [
           {
@@ -1122,22 +1122,22 @@
           },
           "open": {
             "type": ["string", "null"],
-            "description": "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of this bucket. `null` when the bucket has no price — see `pf_trade_count`.",
+            "description": "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of this bucket. `null` when the bucket has no price — see `pf_trade_count`. In USD mode only markets quoted in USDC or XLM set it when the bucket has one.",
             "example": "0.21155612364244"
           },
           "high": {
             "type": ["string", "null"],
-            "description": "Highest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`.",
+            "description": "Highest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`. In USD mode only markets quoted in USDC or XLM set it when the bucket has one.",
             "example": "0.21336358305927"
           },
           "low": {
             "type": ["string", "null"],
-            "description": "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`.",
+            "description": "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`. In USD mode only markets quoted in USDC or XLM set it when the bucket has one.",
             "example": "0.21019557835832"
           },
           "close": {
             "type": ["string", "null"],
-            "description": "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of this bucket, never one carried over from an earlier one. `null` when the bucket has no price — see `pf_trade_count`. Exact in USD mode — the other price fields are scaled, see `derived`.",
+            "description": "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of this bucket, never one carried over from an earlier one. `null` when the bucket has no price — see `pf_trade_count`. Exact in USD mode — the other price fields are scaled, see `derived`. In USD mode only markets quoted in USDC or XLM set it when the bucket has one.",
             "example": "0.2104557806765"
           },
           "volume_base": {

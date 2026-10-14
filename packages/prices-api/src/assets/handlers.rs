@@ -380,8 +380,8 @@ pub struct OhlcvParams {
 /// filters to the native quote and returns candles as stored.
 ///
 /// Price fields are **absent, not dropped**, on a bucket with no USD value.
-/// Candles merge across sources — and, in USD mode, across quote legs — per
-/// bucket. `backfill_note` appears only for `timeframe=all` while the backfill
+/// Candles merge across sources and quote legs per bucket; in USD mode the
+/// USDC/XLM legs set the prices when the bucket has one (lore-0332). `backfill_note` appears only for `timeframe=all` while the backfill
 /// is still running.
 #[utoipa::path(
     get,
@@ -395,8 +395,10 @@ pub struct OhlcvParams {
      the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` \
      only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but \
      has no USD value yet is returned with its price fields `null`\nrather than omitted, so a \
-     chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote \
-     asset — are merged per bucket, in ascending time order.\n\nThe window is `timeframe`, ending \
+     chart keeps its time axis. Trades from every venue and quote\nasset are merged per bucket, \
+     in ascending time order, and all of them count toward the\nvolumes and trade counts. In USD \
+     mode `open`, `high`, `low` and `close` come only from\nmarkets quoted in USDC or XLM when the \
+     bucket has one, and from every market otherwise.\n\nThe window is `timeframe`, ending \
      now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
      rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
      historical backfill is still running.",

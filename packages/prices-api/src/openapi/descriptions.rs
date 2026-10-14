@@ -346,7 +346,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of \
          this bucket, never one carried over from an earlier one. `null` when the bucket has \
          no price — see `pf_trade_count`. Exact in USD mode — the other price fields are \
-         scaled, see `derived`.",
+         scaled, see `derived`. In USD mode only markets quoted in USDC or XLM set it when \
+         the bucket has one.",
     ),
     (
         "Candle",
@@ -373,13 +374,15 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Candle",
         "high",
         "Highest price among this bucket's price-forming trades, in `base_currency`; `null` \
-         when the bucket has no price — see `pf_trade_count`.",
+         when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
+         quoted in USDC or XLM set it when the bucket has one.",
     ),
     (
         "Candle",
         "low",
         "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` \
-         when the bucket has no price — see `pf_trade_count`.",
+         when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
+         quoted in USDC or XLM set it when the bucket has one.",
     ),
     (
         "Candle",
@@ -421,7 +424,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Candle",
         "open",
         "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of \
-         this bucket. `null` when the bucket has no price — see `pf_trade_count`.",
+         this bucket. `null` when the bucket has no price — see `pf_trade_count`. In USD \
+         mode only markets quoted in USDC or XLM set it when the bucket has one.",
     ),
     (
         "Candle",
