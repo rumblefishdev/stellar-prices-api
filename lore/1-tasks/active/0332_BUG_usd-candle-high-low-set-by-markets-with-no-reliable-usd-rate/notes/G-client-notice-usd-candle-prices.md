@@ -38,17 +38,16 @@ Binance shows $0.1135 and $0.1001.
 
 From `<DATE>`:
 
-- `open`, `high`, `low`, `close` and `method` come only from markets quoted
-  in USDC or XLM, when one of them formed a price in the bucket. That same
-  day now returns $0.1137 / $0.1005.
+- `open`, `high`, `low`, `close`, `method`, `vwap` and `pf_vwap` come only
+  from markets quoted in USDC or XLM, when one of them formed a price in the
+  bucket. That same day now returns $0.1137 / $0.1005.
+- If such a market has traded but its USD value is not computed yet, the
+  bucket's price fields are `null` until it is, rather than taken from the
+  other markets. This affects only the most recent buckets, and only briefly.
 - A bucket in which no USDC- or XLM-quoted market formed a price is computed
   exactly as before.
 - `volume_base`, `volume_quote_usd`, `trade_count` and `pf_trade_count` are
   unchanged and still count every market.
-- `vwap` and `pf_vwap` still weigh every market and stay within the published
-  `low` and `high`. When a USDT-quoted market traded outside the USDC/XLM
-  range, the reported mean is the nearer bound. `close_divergent` can flag
-  such a bucket.
 - `method` follows the markets that set the prices. A bucket that traded
   mostly against USDT can now report the `assumed-par` of its USDC market.
 - `base_currency=XLM` is unchanged.
@@ -59,7 +58,8 @@ The response shape does not change: no field is added, removed or renamed.
 
 Measured on daily candles since 2021-02: 0.34 % of priced buckets (37,582),
 across 419 assets that traded against USDT and against USDC or XLM on the same
-day. High or low moves in 16,136 of those buckets, across 340 assets. For XLM,
+day. High or low moves in 16,136 of those buckets, across 340 assets, and
+`vwap`/`pf_vwap` can move in any of the 37,582. For XLM,
 the 95th-percentile gap to Binance falls from 23 % to 1.2 % for the daily high
 and from 44 % to 6.4 % for the daily low.
 

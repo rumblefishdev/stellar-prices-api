@@ -59,6 +59,11 @@ volume.
 ## Status: Active
 
 **Current state:** PR #402 open, not merged; not deployed. Notice drafted, not sent.
+Oskar's review (2026-10-14) addressed on the branch: the means follow the same
+markets as the prices; a USDC/XLM leg that formed a price but has no USD value
+yet leaves the bucket unpriced (0 such buckets in the stored 1d history); an
+untracked XLM is no longer cached. The overflow-nulls-the-band trade-off was
+kept (0 such buckets on prod).
 
 ## Implementation Plan
 
