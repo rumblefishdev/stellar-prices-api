@@ -438,7 +438,10 @@ async fn resolve_usd_refs(
      volumes and trade counts. In USD mode `open`, `high`,\n`low`, `close`, `method`, `vwap` \
      and `pf_vwap` come only from markets quoted in USDC or\nXLM when one of them formed a \
      price in the bucket, and from every market otherwise. If\nsuch a market has no USD value \
-     yet, those fields are `null`.\n\nThe window is `timeframe`, ending \
+     yet, those fields are `null`. Before 2021-02-01, when Stellar had no USDC, candles \
+     quoted in\nXLM or in another dollar token are converted with an imported, measured \
+     XLM/USD rate\n(`method` is `external`); a dollar token is converted through its own XLM \
+     market and\nstays unpriced without one.\n\nThe window is `timeframe`, ending \
      now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
      rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
      historical backfill is still running.",
