@@ -450,6 +450,12 @@ pub enum ChEnrichError {
 
     #[error("pre-2021 XLM/USD rate mode refused: {0}")]
     PreUsdcXlmRateRefused(String),
+
+    #[error(
+        "pre-2021 XLM/USD step stalled: {remaining} row(s) still differ after the last \
+         batch, and {reset} priced row(s) were set back to 0 before it stopped"
+    )]
+    PreUsdcXlmRateStalled { remaining: u64, reset: u64 },
 }
 
 /// Opt-in reset of **already-written** USD columns, so a corrected pricing tier
@@ -2120,14 +2126,10 @@ impl ChEnrichmentPass {
                 "pre-2021 XLM/USD step stalled — rows still differ",
             )
             .await?;
+        let stats = pre_usdc_stats(before, last.get(), remaining, batches, self.cfg.one_shot)?;
         Ok(ChPassStats {
-            batches,
-            candidates_before: before.pending,
-            candidates_after: last.get().unpriced,
-            rows_enriched: before.pending.saturating_sub(remaining),
-            rows_reset: before.unprice,
             duration_ms: start.elapsed().as_millis() as u64,
-            ..Default::default()
+            ..stats
         })
     }
 
@@ -2718,6 +2720,31 @@ pub fn external_window_s(table: &str) -> u32 {
     bucket_width_s(table).max(86_400)
 }
 
+/// The pre-2021 step's stats from its counts before and after the drain:
+/// `rows_reset` is the priced rows actually set back to 0. A one-shot run that
+/// leaves rows still differing is an error, because the mode can discard
+/// values and a partial run must not read as a finished one.
+fn pre_usdc_stats(
+    before: PreUsdcCounts,
+    after: PreUsdcCounts,
+    remaining: u64,
+    batches: u32,
+    one_shot: bool,
+) -> Result<ChPassStats, ChEnrichError> {
+    let reset = before.unprice.saturating_sub(after.unprice);
+    if one_shot && remaining > 0 {
+        return Err(ChEnrichError::PreUsdcXlmRateStalled { remaining, reset });
+    }
+    Ok(ChPassStats {
+        batches,
+        candidates_before: before.pending,
+        candidates_after: after.unpriced,
+        rows_enriched: before.pending.saturating_sub(remaining),
+        rows_reset: reset,
+        ..Default::default()
+    })
+}
+
 /// `usd_rate` identity `(asset_kind, asset_code, issuer_address, contract_address)`
 /// and the `reference_asset` to require, `""` for any.
 const USDC_RATE_IDENTITY: [&str; 5] = ["credit", "USDC", USDC_ISSUER, "", ""];
@@ -2953,11 +2980,11 @@ fn pre_usdc_sql(
     let inner = if bucket_width_s(tbl) > 3_600 {
         let tiny = "toDecimal128('0.000000000001', 14)";
         format!(
-            "SELECT {p}, {cu} AS new_cu, c.vqu AS new_vqu \
+            "SELECT {p}, {cu} AS new_cu, {vqu} AS new_vqu \
              FROM (SELECT {all} {parents}) AS p \
              LEFT JOIN ( \
                  SELECT b.asset_id AS a, b.quote_asset_id AS q, b.source AS s, b.timestamp AS ts, \
-                     sum(h.volume_quote_usd) AS vqu, \
+                     sum(toDecimal256(h.volume_quote_usd, 14)) AS vqu, \
                      argMaxIf(toFloat64(h.close_usd) / toFloat64(h.close), h.timestamp, \
                          h.close_usd >= {tiny} AND h.close >= {tiny}) AS ratio \
                  FROM ( \
@@ -2978,6 +3005,8 @@ fn pre_usdc_sql(
                  AND c.ts = p.timestamp",
             p = from("p"),
             cu = dec("toFloat64(p.close) * c.ratio".into()),
+            // Σ in Decimal256, parsed back: a Decimal(38, 14) sum wraps silently.
+            vqu = dec("c.vqu".into()),
             hours = span(0, &|e| bucket_end_expr(tbl, &e)),
         )
     } else {
@@ -5722,6 +5751,47 @@ mod tests {
              AND method = 'external' AND usd_rate > 0 ) AS r"
         );
         assert!(external_sql("prices", "price_ohlcv_1h", 3, "").contains(&want));
+    }
+
+    /// (remaining, one_shot, before unprice, after unprice, Ok(rows_reset) or Err(reset)).
+    type StatsCase = (u64, bool, u64, u64, Result<u64, u64>);
+
+    #[test]
+    fn pre_usdc_stats_reports_resets_written_and_refuses_a_partial_run() {
+        let counts = |unprice| PreUsdcCounts {
+            pending: 10,
+            unprice,
+            unpriced: 4,
+        };
+        #[rustfmt::skip]
+        let cases: [StatsCase; 4] = [
+            (0, true, 3, 0, Ok(3)),
+            (0, true, 3, 3, Ok(0)),
+            (2, false, 3, 1, Ok(2)),
+            (2, true, 5, 1, Err(4)),
+        ];
+        for (remaining, one_shot, b, a, want) in cases {
+            let got = pre_usdc_stats(counts(b), counts(a), remaining, 1, one_shot);
+            match (got, want) {
+                (Ok(s), Ok(reset)) => {
+                    assert_eq!(s.rows_reset, reset);
+                    assert_eq!(s.rows_enriched, 10 - remaining);
+                    assert_eq!((s.candidates_before, s.candidates_after), (10, 4));
+                }
+                (
+                    Err(ChEnrichError::PreUsdcXlmRateStalled {
+                        remaining: r,
+                        reset,
+                    }),
+                    Err(want),
+                ) => {
+                    assert_eq!((r, reset), (remaining, want));
+                }
+                (got, want) => {
+                    panic!("remaining={remaining} one_shot={one_shot}: {got:?} vs {want:?}")
+                }
+            }
+        }
     }
 
     #[test]
