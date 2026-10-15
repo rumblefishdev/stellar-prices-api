@@ -209,7 +209,7 @@ impl CoarseRepairDriver {
     /// bound. Both cast to `UInt32` to match [`MonthWindow`].
     async fn months_with_zeros(&self) -> Result<Vec<MonthWindow>, ChEnrichError> {
         let e = &self.cfg.enrich;
-        let pred = if e.pre_usdc_xlm_rate {
+        let pred = if e.pre_usdc_xlm_rate.is_some() {
             pre_usdc_scope_pred(&e.database)
         } else {
             repair_target_pred(&e.database, &e.table, e.usd_reset.as_ref())
@@ -276,9 +276,12 @@ impl CoarseRepairDriver {
         // green having touched nothing. Found by the 0228 prove run and its two
         // review rounds. `reset_step` calls the SAME method — one list, not two
         // that must be kept in step by hand.
-        ChEnrichmentPass::with_client(self.client.clone(), self.cfg.enrich.clone())
-            .assert_reset_is_admissible()
-            .await?;
+        let pass = ChEnrichmentPass::with_client(self.client.clone(), self.cfg.enrich.clone());
+        // Task 0331: its refusals, and native XLM resolved once for every month.
+        let xlm = match self.cfg.enrich.pre_usdc_xlm_rate {
+            Some(_) => Some(pass.assert_pre_usdc_admissible().await?),
+            None => pass.assert_reset_is_admissible().await.map(|()| None)?,
+        };
         let months = self.months_with_zeros().await?;
         info!(
             count = months.len(),
@@ -312,26 +315,30 @@ impl CoarseRepairDriver {
             let mut ecfg = self.cfg.enrich.clone();
             ecfg.time_window = Some((mw.start_ts, mw.end_ts));
             ecfg.one_shot = self.cfg.one_shot;
-            let pre_usdc = ecfg.pre_usdc_xlm_rate;
             let pass = ChEnrichmentPass::with_client(self.client.clone(), ecfg);
+            // Task 0331: rows to write, rows left unpriced, priced rows set to 0.
+            let counts = match xlm {
+                Some(x) => Some(pass.pre_usdc_counts(x).await?),
+                None => None,
+            };
+            let (zeros, after, reset) = counts.map_or((mw.zeros, mw.zeros, 0), |c| {
+                (c.pending, c.unpriced, c.unprice)
+            });
 
-            if self.cfg.dry_run {
-                // Task 0331: report the rows the real run writes, not scope rows.
-                let zeros = if pre_usdc {
-                    pass.pre_usdc_pending().await?
+            // A 0331 month with nothing to write gets no FREEZE either.
+            if self.cfg.dry_run || zeros == 0 {
+                let what = if zeros == 0 {
+                    "nothing to write"
                 } else {
-                    mw.zeros
+                    "DRY RUN — would repair"
                 };
-                info!(
-                    month = mw.month,
-                    zeros, "coarse repair: DRY RUN — would repair"
-                );
+                info!(month = mw.month, zeros, "coarse repair: {what}");
                 summary.months.push(MonthRepair {
                     month: mw.month,
                     zeros_before: zeros,
-                    zeros_after: zeros,
+                    zeros_after: after,
                     rows_enriched: 0,
-                    rows_reset: 0,
+                    rows_reset: reset,
                     snapshot_name: None,
                 });
                 continue;
@@ -352,7 +359,10 @@ impl CoarseRepairDriver {
                 None
             };
 
-            let stats = pass.run().await?;
+            let stats = match xlm {
+                Some(x) => pass.run_pre_usdc(x).await?,
+                None => pass.run().await?,
+            };
 
             info!(
                 month = mw.month,
@@ -373,7 +383,7 @@ impl CoarseRepairDriver {
             // Defensive cross-check: the enumeration count and the pass's own
             // pre-count should agree (both are the month's zero population).
             // In the 0331 mode the pass counts rows to write, not scope rows.
-            if !pre_usdc && mw.zeros != stats.candidates_before {
+            if xlm.is_none() && mw.zeros != stats.candidates_before {
                 warn!(
                     month = mw.month,
                     enumerated = mw.zeros,

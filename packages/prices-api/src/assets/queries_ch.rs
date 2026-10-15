@@ -1697,7 +1697,9 @@ pub(crate) fn usd_method_expr(usdc: u64, pivots: &[u64], granularity: Granularit
          timestamp < toDateTime({pre}), 'external', \
          {traded_arm}\
          '') AS meth",
-        // Task 0331: a priced pre-2021 non-USDC row took the XLM/USD rate.
+        // Task 0331: keys on the timestamp alone because only `coarse-repair
+        // --pre-usdc-xlm-rate` writes a non-USDC close_usd below this boundary.
+        // Another pre-2021 pricer needs its own arm above this one.
         pre = prices_clickhouse::PRE_USDC_END_S,
     )
 }

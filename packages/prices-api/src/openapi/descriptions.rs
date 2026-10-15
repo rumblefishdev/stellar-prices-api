@@ -392,8 +392,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was \
          measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* \
          `external` — an imported, measured USD series supplied the rate: USDC/USD on a \
-         USDC-quoted candle; before 2021-02-01, when Stellar had no USDC, XLM/USD on a \
-         candle quoted in XLM or in another dollar token (USD, USDT or a USDC other than \
+         USDC-quoted candle; before 2021-02-01, XLM/USD on a \
+         candle quoted in XLM or in a dollar token (USD, USDT or a USDC other than \
          Circle's), the latter converted through that token's own XLM market.\n* `oracle` — \
          a measured Reflector reading supplied the rate.\n* `traded` — priced through a \
          reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series \

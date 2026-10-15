@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),
         time_window: None,
         usd_reset: None,
-        pre_usdc_xlm_rate: false,
+        pre_usdc_xlm_rate: None,
     };
 
     let pass = ChEnrichmentPass::new(cfg);

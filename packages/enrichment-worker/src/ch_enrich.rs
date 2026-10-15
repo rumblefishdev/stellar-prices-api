@@ -1002,9 +1002,25 @@ pub struct ChEnrichConfig {
     /// computed value if an operator explicitly names the quote leg and epoch.
     /// See [`UsdResetSpec`].
     pub usd_reset: Option<UsdResetSpec>,
-    /// Opt-in coarse-repair mode (task 0331), `false` on every scheduled path.
-    /// When `true` the pass runs only the pre-2021 XLM/USD step.
-    pub pre_usdc_xlm_rate: bool,
+    /// Opt-in coarse-repair mode (task 0331), `None` on every scheduled path.
+    /// When set the pass runs only the pre-2021 XLM/USD step.
+    pub pre_usdc_xlm_rate: Option<PreUsdcXlmRate>,
+}
+
+/// Options of the pre-2021 XLM/USD step (task 0331).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreUsdcXlmRate {
+    /// Let a `price_ohlcv_1m` run set priced rows back to 0 (1m has no snapshot).
+    pub allow_unprice: bool,
+}
+
+/// The pre-2021 step's counts: rows a run writes, priced rows it sets back to
+/// 0, and rows left unpriced after it.
+#[derive(Debug, Clone, Copy, Default, clickhouse::Row, Deserialize)]
+pub struct PreUsdcCounts {
+    pub pending: u64,
+    pub unprice: u64,
+    pub unpriced: u64,
 }
 
 impl Default for ChEnrichConfig {
@@ -1022,7 +1038,7 @@ impl Default for ChEnrichConfig {
             one_shot: false,
             time_window: None,
             usd_reset: None,
-            pre_usdc_xlm_rate: false,
+            pre_usdc_xlm_rate: None,
         }
     }
 }
@@ -1515,8 +1531,11 @@ impl ChEnrichmentPass {
     /// The last step (task 0208) is `assert_reset_epoch_is_covered`: a
     /// pivot leg's `not_before` below the table's first priced reference
     /// candle is refused, because nothing could refill the rows in between.
+    ///
+    /// With [`ChEnrichConfig::pre_usdc_xlm_rate`] set it runs only that mode's
+    /// refusals ([`Self::assert_pre_usdc_admissible`]).
     pub async fn assert_reset_is_admissible(&self) -> Result<(), ChEnrichError> {
-        if self.cfg.pre_usdc_xlm_rate {
+        if self.cfg.pre_usdc_xlm_rate.is_some() {
             return self.assert_pre_usdc_admissible().await.map(|_| ());
         }
         let Some(spec) = self.cfg.usd_reset.as_ref() else {
@@ -2039,8 +2058,8 @@ impl ChEnrichmentPass {
     }
 
     /// The pre-2021 step's refusals; returns native XLM's id. The driver calls
-    /// this through [`Self::assert_reset_is_admissible`], so a dry run refuses too.
-    async fn assert_pre_usdc_admissible(&self) -> Result<u64, ChEnrichError> {
+    /// this once up front, so a dry run refuses too.
+    pub async fn assert_pre_usdc_admissible(&self) -> Result<u64, ChEnrichError> {
         let refuse = |m: &str| Err(ChEnrichError::PreUsdcXlmRateRefused(m.to_string()));
         if self.cfg.usd_reset.is_some() {
             return refuse("it cannot be combined with a --reset-* spec");
@@ -2063,69 +2082,80 @@ impl ChEnrichmentPass {
     }
 
     fn pre_usdc_statements(&self, xlm: u64) -> (String, String) {
-        let pw = self.cfg.pivot_window_s;
-        // Bound the token-market scan to the month plus its look-back.
-        let ref_window = match self.cfg.time_window {
-            Some((s, e)) => format!(
-                " AND timestamp >= toDateTime({}) AND timestamp < toDateTime({e})",
-                s.saturating_sub(pw)
-            ),
-            None => String::new(),
-        };
-        let db = &self.cfg.database;
-        let (cand, tbl) = (self.window_pred("timestamp"), &self.cfg.table);
-        pre_usdc_sql(db, tbl, xlm, pw, &cand, &ref_window)
+        let (db, tbl) = (&self.cfg.database, &self.cfg.table);
+        pre_usdc_sql(db, tbl, xlm, self.cfg.pivot_window_s, self.cfg.time_window)
     }
 
-    /// Rows a run with this config would write now (the dry-run figure).
-    pub async fn pre_usdc_pending(&self) -> Result<u64, ChEnrichError> {
-        let xlm = self.assert_pre_usdc_admissible().await?;
-        let watermark = self.watermark().await?;
+    /// [`PreUsdcCounts`] now; `pending` is the dry-run figure.
+    pub async fn pre_usdc_counts(&self, xlm: u64) -> Result<PreUsdcCounts, ChEnrichError> {
         let (_, count) = self.pre_usdc_statements(xlm);
-        Ok(self
-            .client
-            .query(&count)
-            .bind(watermark)
-            .fetch_one::<u64>()
-            .await?)
+        Ok(self.client.query(&count).fetch_one().await?)
     }
 
-    /// The pre-2021 XLM/USD step (task 0331), looped to a fixed point like
-    /// [`Self::run_external_tier`], counting with its own pending query.
-    async fn run_pre_usdc(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
+    /// The pre-2021 XLM/USD step (task 0331), drained to a fixed point. In its
+    /// stats `candidates_after` is the rows left unpriced and `rows_reset` the
+    /// priced rows set back to 0.
+    pub async fn run_pre_usdc(&self, xlm: u64) -> Result<ChPassStats, ChEnrichError> {
         let start = std::time::Instant::now();
-        let xlm = self.assert_pre_usdc_admissible().await?;
-        let (insert, count) = self.pre_usdc_statements(xlm);
-        let pending = || self.client.query(&count).bind(watermark).fetch_one::<u64>();
-        let before = pending().await?;
-        let (mut remaining, mut batches) = (before, 0u32);
+        let before = self.pre_usdc_counts(xlm).await?;
+        let allow = self.cfg.pre_usdc_xlm_rate.is_some_and(|m| m.allow_unprice);
+        if before.unprice > 0 && self.cfg.table == "price_ohlcv_1m" && !allow {
+            return Err(ChEnrichError::PreUsdcXlmRateRefused(format!(
+                "it would set {} priced price_ohlcv_1m row(s) back to 0, and 1m has no \
+                 snapshot to roll back to (pass --allow-unprice to accept)",
+                before.unprice
+            )));
+        }
+        let (insert, _) = self.pre_usdc_statements(xlm);
+        let insert = self.client.query(&insert).bind(self.cfg.batch_size);
+        let last = std::cell::Cell::new(before);
+        let (remaining, batches) = self
+            .drain(
+                before.pending,
+                async || Ok(insert.clone().execute().await?),
+                async || {
+                    last.set(self.pre_usdc_counts(xlm).await?);
+                    Ok(last.get().pending)
+                },
+                "pre-2021 XLM/USD step stalled — rows still differ",
+            )
+            .await?;
+        Ok(ChPassStats {
+            batches,
+            candidates_before: before.pending,
+            candidates_after: last.get().unpriced,
+            rows_enriched: before.pending.saturating_sub(remaining),
+            rows_reset: before.unprice,
+            duration_ms: start.elapsed().as_millis() as u64,
+            ..Default::default()
+        })
+    }
+
+    /// Runs `insert` until `pending` reaches 0 or stops falling (logged as
+    /// `stalled`), at most `effective_max_batches` times. Returns
+    /// `(remaining, batches)`.
+    async fn drain(
+        &self,
+        mut remaining: u64,
+        insert: impl AsyncFn() -> Result<(), ChEnrichError>,
+        pending: impl AsyncFn() -> Result<u64, ChEnrichError>,
+        stalled: &str,
+    ) -> Result<(u64, u32), ChEnrichError> {
+        let mut batches = 0;
         for _ in 0..self.effective_max_batches() {
             if remaining == 0 {
                 break;
             }
-            self.client
-                .query(&insert)
-                .bind(watermark)
-                .bind(self.cfg.batch_size)
-                .execute()
-                .await?;
+            insert().await?;
             let after = pending().await?;
             batches += 1;
             if after >= remaining {
-                remaining = after;
-                break;
+                info!(remaining = after, table = %self.cfg.table, "{stalled}");
+                return Ok((after, batches));
             }
             remaining = after;
         }
-        info!(before, remaining, batches, table = %self.cfg.table, "pre-2021 XLM/USD step done");
-        Ok(ChPassStats {
-            batches,
-            candidates_before: before,
-            candidates_after: remaining,
-            rows_enriched: before.saturating_sub(remaining),
-            duration_ms: start.elapsed().as_millis() as u64,
-            ..Default::default()
-        })
+        Ok((remaining, batches))
     }
 
     /// Tier 2 — the peg-pivot deep-history backbone, over the fixed `watermark`
@@ -2166,8 +2196,8 @@ impl ChEnrichmentPass {
         &self,
         usdc_id: u64,
         watermark: u32,
-        mut remaining: u64,
-        mut batches: u32,
+        remaining: u64,
+        batches: u32,
     ) -> Result<(u64, u32), ChEnrichError> {
         let sql = external_sql(
             &self.cfg.database,
@@ -2176,31 +2206,17 @@ impl ChEnrichmentPass {
             &self.window_pred("timestamp"),
         );
         let stale = external_window_s(&self.cfg.table);
-        for _ in 0..self.effective_max_batches() {
-            if remaining == 0 {
-                break;
-            }
-            self.client
-                .query(&sql)
-                .bind(watermark)
-                .bind(stale)
-                .bind(self.cfg.batch_size)
-                .execute()
-                .await?;
-            let after = self.count_candidates(watermark).await?;
-            batches += 1;
-            if after >= remaining {
-                info!(
-                    remaining = after,
-                    table = %self.cfg.table,
-                    "external tier drained — remaining candles have no imported USD rate for their bucket"
-                );
-                remaining = after;
-                break;
-            }
-            remaining = after;
-        }
-        Ok((remaining, batches))
+        let insert = self.client.query(&sql).bind(watermark).bind(stale);
+        let insert = insert.bind(self.cfg.batch_size);
+        let (remaining, n) = self
+            .drain(
+                remaining,
+                async || Ok(insert.clone().execute().await?),
+                async || self.count_candidates(watermark).await,
+                "external tier drained — remaining candles have no imported USD rate for their bucket",
+            )
+            .await?;
+        Ok((remaining, batches + n))
     }
 
     /// Returns the updated `(remaining, batches)`.
@@ -2274,8 +2290,10 @@ impl ChEnrichmentPass {
     /// pin the boundary and assert that candles newer than the snapshot are
     /// deferred, not enriched, in the current pass.
     pub async fn run_through(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
-        if self.cfg.pre_usdc_xlm_rate {
-            return self.run_pre_usdc(watermark).await;
+        if self.cfg.pre_usdc_xlm_rate.is_some() {
+            return self
+                .run_pre_usdc(self.assert_pre_usdc_admissible().await?)
+                .await;
         }
         let start = std::time::Instant::now();
 
@@ -2889,94 +2907,108 @@ pub fn pre_usdc_scope_pred(db: &str) -> String {
     )
 }
 
-/// Pre-2021 step (task 0331): `close_usd = close × f × rate`, where `rate` is
-/// the newest `external` XLM/USD row before the bucket end (within
-/// [`external_window_s`]) and `f` is 1 on an XLM quote, else the dollar
-/// token's XLM price from its own XLM markets (both orientations, pf columns)
-/// at or before the bucket start, within `pivot_window_s`.
+/// Pre-2021 step (task 0331). Up to `_1h`, `close_usd = close × f × rate`:
+/// `rate` is the newest `external` XLM/USD row before the bucket end (within
+/// [`external_window_s`]); `f` is 1 on an XLM quote, else the dollar token's
+/// XLM price from its own XLM markets (both orientations, pf columns) at or
+/// before the bucket start, within `pivot_window_s`. Wider tiers roll up their
+/// `price_ohlcv_1h` rows as `preroll.sql` does (Σ USD volume, `close` × the
+/// last priced hour's `close_usd / close`), so `_1h` must be priced first.
 ///
 /// Writes only rows whose computed pair differs from the stored one, so the
 /// batch loop terminates, a re-run writes nothing, and a newer rate or a
 /// narrower window re-prices (an unreachable row computes 0).
 ///
-/// Returns `(insert, pending_count)` from one body. Binds: the watermark, then
-/// (insert only) the `LIMIT`.
+/// Returns `(insert, counts)` over one body; the insert binds the `LIMIT`.
 fn pre_usdc_sql(
     db: &str,
     tbl: &str,
     xlm: u64,
     pivot_window_s: u32,
-    cand_window: &str,
-    ref_window: &str,
+    window: Option<(u32, u32)>,
 ) -> (String, String) {
     let end = prices_clickhouse::PRE_USDC_END_S;
     let bend = bucket_end_expr(tbl, "timestamp");
-    let stale = external_window_s(tbl);
-    let scope = pre_usdc_scope_pred(db);
-    let series = usd_rate_series_sql(db, XLM_RATE_IDENTITY);
-    let dollar = format!(
-        "SELECT asset_id FROM {db}.assets FINAL WHERE {}",
-        dollar_token_asset_pred()
-    );
-    // Decimal256 sums: a Decimal(38, 14) sum wraps silently, a Float64 one
-    // depends on merge order and would make the differs filter flap.
-    let amt = |a: &str, b: &str| {
-        format!("toFloat64(sum(toDecimal256(if(asset_id = {xlm}, {a}, {b}), 14)))")
+    // `[s - back, upper(e))` of the driver's month window `[s, e)`, if any.
+    let span = |back: u32, upper: &dyn Fn(String) -> String| {
+        window.map_or(String::new(), |(s, e)| {
+            let (s, e) = (s.saturating_sub(back), upper(format!("toDateTime({e})")));
+            format!(" AND timestamp >= toDateTime({s}) AND timestamp < {e}")
+        })
     };
-    let txlm = format!(
-        "{} / {}",
-        amt("pf_volume", "pf_price_volume"),
-        amt("pf_price_volume", "pf_volume")
-    );
-    let xr = format!(
-        "if(r.usd > 0 AND (toUInt32(pt.bend) - toUInt32(r.rts)) <= {stale}, toFloat64(r.usd), 0.)"
-    );
+    let scope = pre_usdc_scope_pred(db);
+    let parents = format!("FROM {db}.{tbl} FINAL WHERE {scope}{}", span(0, &|e| e));
+    let cols = prices_clickhouse::CANDLE_COLUMNS;
+    let list = |f: &dyn Fn(&str) -> String| cols.iter().map(|c| f(c)).collect::<Vec<_>>();
+    let all = cols.join(", ");
+    let from = |a: &str| list(&|c| format!("{a}.{c} AS {c}")).join(", ");
     // Float64, then a NULL-on-overflow parse: a Decimal product wraps silently
     // and an out-of-range CAST aborts the batch.
-    let usd = |col: &str| {
+    let dec =
+        |f: String| format!("ifNull(toDecimal128OrNull(toString({f}), 14), toDecimal128(0, 14))");
+    let inner = if bucket_width_s(tbl) > 3_600 {
+        let tiny = "toDecimal128('0.000000000001', 14)";
         format!(
-            "ifNull(toDecimal128OrNull(toString(toFloat64(pt.{col}) * {xr} * pt.xf), 14), \
-             toDecimal128(0, 14))"
+            "SELECT {p}, {cu} AS new_cu, c.vqu AS new_vqu \
+             FROM (SELECT {all} {parents}) AS p \
+             LEFT JOIN ( \
+                 SELECT b.asset_id AS a, b.quote_asset_id AS q, b.source AS s, b.timestamp AS ts, \
+                     sum(h.volume_quote_usd) AS vqu, \
+                     argMaxIf(toFloat64(h.close_usd) / toFloat64(h.close), h.timestamp, \
+                         h.close_usd >= {tiny} AND h.close >= {tiny}) AS ratio \
+                 FROM ( \
+                     SELECT asset_id, quote_asset_id, source, timestamp, close, close_usd, \
+                         volume_quote_usd \
+                     FROM {db}.price_ohlcv_1h FINAL \
+                     WHERE timestamp < toDateTime({end}){hours} \
+                 ) AS h \
+                 ASOF JOIN ( \
+                     SELECT asset_id, quote_asset_id, source, timestamp, {bend} AS bend {parents} \
+                 ) AS b \
+                     ON h.asset_id = b.asset_id AND h.quote_asset_id = b.quote_asset_id \
+                     AND h.source = b.source AND h.timestamp >= b.timestamp \
+                 WHERE h.timestamp < b.bend \
+                 GROUP BY a, q, s, ts \
+             ) AS c \
+                 ON c.a = p.asset_id AND c.q = p.quote_asset_id AND c.s = p.source \
+                 AND c.ts = p.timestamp",
+            p = from("p"),
+            cu = dec("toFloat64(p.close) * c.ratio".into()),
+            hours = span(0, &|e| bucket_end_expr(tbl, &e)),
         )
-    };
-    let (new_cu, new_vqu) = (usd("close"), usd("volume_quote"));
-    let cols = prices_clickhouse::CANDLE_COLUMNS;
-    let from = |a: &str| {
-        cols.iter()
-            .map(|c| format!("{a}.{c} AS {c}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let (p_cols, pt_cols, x_cols) = (from("p"), from("pt"), cols.join(", "));
-    let out = cols
-        .iter()
-        .map(|c| match *c {
-            "close_usd" => "x.new_cu AS close_usd".to_string(),
-            "volume_quote_usd" => "x.new_vqu AS volume_quote_usd".to_string(),
-            "version" => "x.version + 1 AS version".to_string(),
-            c => format!("x.{c}"),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let body = format!(
-        "SELECT {out} \
-         FROM ( \
-             SELECT {pt_cols}, {new_cu} AS new_cu, {new_vqu} AS new_vqu \
+    } else {
+        let dollar = format!(
+            "SELECT asset_id FROM {db}.assets FINAL WHERE {}",
+            dollar_token_asset_pred()
+        );
+        // Decimal256 sums: a Decimal(38, 14) sum wraps silently, a Float64 one
+        // depends on merge order and would make the differs filter flap.
+        let amt = |a: &str, b: &str| {
+            format!("toFloat64(sum(toDecimal256(if(asset_id = {xlm}, {a}, {b}), 14)))")
+        };
+        let txlm = format!(
+            "{} / {}",
+            amt("pf_volume", "pf_price_volume"),
+            amt("pf_price_volume", "pf_volume")
+        );
+        let xr = format!(
+            "if(r.usd > 0 AND (toUInt32(pt.bend) - toUInt32(r.rts)) <= {}, toFloat64(r.usd), 0.)",
+            external_window_s(tbl)
+        );
+        let usd = |col: &str| dec(format!("toFloat64(pt.{col}) * {xr} * pt.xf"));
+        format!(
+            "SELECT {pt}, {cu} AS new_cu, {vqu} AS new_vqu \
              FROM ( \
-                 SELECT {p_cols}, p.k AS k, p.bend AS bend, \
+                 SELECT {p}, p.k AS k, p.bend AS bend, \
                      if(p.quote_asset_id = {xlm}, 1., if(t.txlm > 0 \
                         AND (toUInt32(p.timestamp) - toUInt32(t.tts)) <= {pivot_window_s}, \
                         t.txlm, 0.)) AS xf \
-                 FROM ( \
-                     SELECT {x_cols}, 1 AS k, {bend} AS bend \
-                     FROM {db}.{tbl} FINAL \
-                     WHERE {scope} AND timestamp <= toDateTime(?){cand_window} \
-                 ) AS p \
+                 FROM (SELECT {all}, 1 AS k, {bend} AS bend {parents}) AS p \
                  ASOF LEFT JOIN ( \
                      SELECT if(asset_id = {xlm}, quote_asset_id, asset_id) AS tok, \
                          timestamp AS tts, {txlm} AS txlm \
                      FROM {db}.{tbl} FINAL \
-                     WHERE timestamp < toDateTime({end}){ref_window} \
+                     WHERE timestamp < toDateTime({end}){refs} \
                        AND pf_trade_count > 0 AND pf_volume > 0 AND pf_price_volume > 0 \
                        AND ((quote_asset_id = {xlm} AND asset_id IN ({dollar})) \
                          OR (asset_id = {xlm} AND quote_asset_id IN ({dollar}))) \
@@ -2985,16 +3017,35 @@ fn pre_usdc_sql(
                      ON t.tok = p.quote_asset_id AND t.tts <= p.timestamp \
              ) AS pt \
              ASOF LEFT JOIN ( {series} ) AS r \
-                 ON r.k = pt.k AND r.rts < pt.bend \
-         ) AS x \
-         WHERE x.close_usd != x.new_cu OR x.volume_quote_usd != x.new_vqu"
-    );
+                 ON r.k = pt.k AND r.rts < pt.bend",
+            pt = from("pt"),
+            p = from("p"),
+            cu = usd("close"),
+            vqu = usd("volume_quote"),
+            // The token-market scan: the month plus its look-back.
+            refs = span(pivot_window_s, &|e| e),
+            series = usd_rate_series_sql(db, XLM_RATE_IDENTITY),
+        )
+    };
+    let differs = "x.close_usd != x.new_cu OR x.volume_quote_usd != x.new_vqu";
+    let out = list(&|c| match c {
+        "close_usd" => "x.new_cu AS close_usd".into(),
+        "volume_quote_usd" => "x.new_vqu AS volume_quote_usd".into(),
+        "version" => "x.version + 1 AS version".into(),
+        c => format!("x.{c}"),
+    })
+    .join(", ");
     (
         format!(
-            "INSERT INTO {db}.{tbl} ({}) {body} ORDER BY x.timestamp LIMIT ?",
+            "INSERT INTO {db}.{tbl} ({}) SELECT {out} FROM ({inner}) AS x \
+             WHERE {differs} ORDER BY x.timestamp LIMIT ?",
             insert_columns()
         ),
-        format!("SELECT count() FROM ({body})"),
+        format!(
+            "SELECT countIf({differs}) AS pending, \
+             countIf(x.close_usd > 0 AND x.new_cu = 0) AS unprice, \
+             countIf(x.new_cu = 0 AND x.close > 0) AS unpriced FROM ({inner}) AS x"
+        ),
     )
 }
 
@@ -4441,23 +4492,21 @@ mod tests {
     /// `_1M` fixtures in `ch_enrich_it.rs`. Task file, Issues 10.
     #[test]
     fn every_timezone_sensitive_expression_pins_utc() {
-        let tables = ["price_ohlcv_1d", "price_ohlcv_1w", "price_ohlcv_1M"];
-        for (t, sql) in tables.iter().flat_map(|t| {
-            [
+        for t in ["price_ohlcv_1d", "price_ohlcv_1w", "price_ohlcv_1M"] {
+            for sql in [
                 external_sql("prices", t, 3, ""),
-                pre_usdc_sql("prices", t, 9, 86_400, "", "").0,
-            ]
-            .map(|sql| (t, sql))
-        }) {
-            for f in ["addDays(", "addWeeks(", "addMonths(", "toDate("] {
-                for (i, _) in sql.match_indices(f) {
-                    let tail = &sql[i..];
-                    let close = tail.find(')').unwrap();
-                    assert!(
-                        tail[..close].ends_with("'UTC'"),
-                        "{t}: {f} without an explicit 'UTC': {}",
-                        &tail[..close + 1]
-                    );
+                pre_usdc_sql("prices", t, 9, 86_400, None).0,
+            ] {
+                for f in ["addDays(", "addWeeks(", "addMonths(", "toDate("] {
+                    for (i, _) in sql.match_indices(f) {
+                        let tail = &sql[i..];
+                        let close = tail.find(')').unwrap();
+                        assert!(
+                            tail[..close].ends_with("'UTC'"),
+                            "{t}: {f} without an explicit 'UTC': {}",
+                            &tail[..close + 1]
+                        );
+                    }
                 }
             }
         }
@@ -4969,7 +5018,11 @@ mod tests {
             ("pivot_sql", pivot_sql("prices", "price_ohlcv_1m", 5, 3, "")),
             (
                 "pre_usdc_sql",
-                pre_usdc_sql("prices", "price_ohlcv_1m", 9, 86_400, "", "").0,
+                pre_usdc_sql("prices", "price_ohlcv_1m", 9, 86_400, None).0,
+            ),
+            (
+                "pre_usdc_sql rollup",
+                pre_usdc_sql("prices", "price_ohlcv_1d", 9, 86_400, None).0,
             ),
         ]
     }
@@ -5658,48 +5711,30 @@ mod tests {
 
     #[test]
     fn pre_usdc_sql_renders_its_contract() {
-        let end = prices_clickhouse::PRE_USDC_END_S;
-        let win = |s| format!(" AND timestamp >= toDateTime({s}) AND timestamp < toDateTime(9)");
-        for (t, (cw, rw)) in GRAINS
-            .iter()
-            .flat_map(|t| [(t, (String::new(), String::new())), (t, (win(5), win(1)))])
-        {
-            let (ins, cnt) = pre_usdc_sql("prices", t, 9, 86_400, &cw, &rw);
-            let must = [
-                "asset_kind = 'native' AND asset_code = 'XLM' AND issuer_address = '' \
-                 AND contract_address = '' AND method = 'external' AND usd_rate > 0"
-                    .to_string(),
-                "r.rts < pt.bend".into(),
-                format!("{} AS bend", bucket_end_expr(t, "timestamp")),
-                format!("<= {}, toFloat64(r.usd)", external_window_s(t)),
-                "<= 86400, t.txlm".into(),
-                "if(asset_id = 9, pf_volume, pf_price_volume)".into(),
-                "if(asset_id = 9, pf_price_volume, pf_volume)".into(),
-                "pf_trade_count > 0".into(),
-                dollar_token_asset_pred(),
-                "x.close_usd != x.new_cu OR x.volume_quote_usd != x.new_vqu".into(),
-                "toDecimal128OrNull(toString(".into(),
-                "toDecimal256(".into(),
-                format!("{cw} ) AS p"),
-                format!("{end}){rw} AND pf_trade_count"),
-            ];
-            for needle in must {
-                assert!(ins.contains(&needle), "{t}: `{needle}` missing in {ins}");
+        let end = format!(
+            "timestamp < toDateTime({})",
+            prices_clickhouse::PRE_USDC_END_S
+        );
+        let month = " AND timestamp >= toDateTime(5) AND timestamp < toDateTime(9)";
+        for t in GRAINS {
+            for w in [None, Some((5, 9))] {
+                let (ins, cnt) = pre_usdc_sql("prices", t, 9, 86_400, w);
+                let rollup = bucket_width_s(t) > 3_600;
+                assert_eq!(
+                    ins.matches("method = ").count(),
+                    usize::from(!rollup),
+                    "{ins}"
+                );
+                assert_eq!(ins.contains("argMaxIf("), rollup, "{t}");
+                for needle in ["LIKE", "startsWith", "candidate"] {
+                    assert!(!ins.contains(needle), "{t}: {needle}");
+                }
+                assert!(ins.matches(&end).count() >= 2, "{ins}");
+                assert_eq!(ins.contains(month), w.is_some(), "{t}");
+                assert_eq!((ins.matches('?').count(), cnt.matches('?').count()), (1, 0));
+                let inner = &cnt[cnt.find("AS unpriced FROM (").unwrap() + 18..cnt.len() - 6];
+                assert!(ins.contains(&format!("FROM ({inner}) AS x WHERE")), "{t}");
             }
-            for needle in ["LIKE", "startsWith", "candidate", &win(1)] {
-                assert_eq!(ins.contains(needle), needle == rw, "{t}: `{needle}`");
-            }
-            assert_eq!(ins.matches("method = ").count(), 1, "{ins}");
-            assert!(
-                ins.matches(&format!("timestamp < toDateTime({end})"))
-                    .count()
-                    >= 2
-            );
-            assert_eq!((ins.matches('?').count(), cnt.matches('?').count()), (2, 1));
-            let body = &cnt["SELECT count() FROM (".len()..cnt.len() - 1];
-            let head = format!("INSERT INTO prices.{t} ({}) ", insert_columns());
-            assert_eq!(ins, format!("{head}{body} ORDER BY x.timestamp LIMIT ?"));
-            assert!(cnt.starts_with("SELECT count() FROM ("));
         }
     }
 }
