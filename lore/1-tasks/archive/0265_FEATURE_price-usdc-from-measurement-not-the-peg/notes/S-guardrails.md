@@ -12,7 +12,7 @@ history:
     status: seed
     who: akot
     note: >
-      Thresholds measured over Chainlink USDC/USDT/DAI, Bitstamp, Kraken and
+      Thresholds measured over Chainlink USDC/USDT/DAI, Bitstamp, third-party and
       OKX daily bars; tests run green on 2026-09-04 (`python3 analysis/guardrails.py`).
 ---
 
@@ -27,9 +27,9 @@ legitimate twin on real data:
 | signal | why it false-positives alone [data] |
 |---|---|
 | O = H = L = C | 68 % of Chainlink USDC days (one heartbeat round per day), 88 % of USDT days; 20 thin Stellar assets with a single trade a day |
-| close exactly 1.0 | 16 % of Kraken days (4-decimal prints), up to 67 % of a 30-day Kraken window; 8–10 % on every other venue |
+| close exactly 1.0 | 16 % of third-party days (4-decimal prints), up to 67 % of a 30-day third-party window; 8–10 % on every other venue |
 | zero realised vol | never on real data, but a 30-day window can be as quiet as 0.23 bps |
-| long constant run | Kraken 18 days, OKX 10 days |
+| long constant run | third-party 18 days, OKX 10 days |
 
 So the invariants are joined with `trade_count`, and the price-shaped ones
 carry thresholds sized off the *noisiest real window*, not off intuition.
@@ -40,9 +40,9 @@ carry thresholds sized off the *noisiest real window*, not off intuition.
 |---|---|---|---|
 | `zero_trades_share_30d` | ≥ 0.9 → **reject** | 0.00 on every venue | 1.00 |
 | `flat_and_no_trades_share_30d` | ≥ 0.9 → reject | 0.00 | 1.00 |
-| `exact_peg_share_30d` | ≥ 0.9 → alert | 0.67 (Kraken) | 1.00 |
-| `constant_close_run_days` | > 30 → alert | 18 (Kraken) | 1 864 |
-| `min_rvol_30d_bps` | < 0.1 bps → alert | 0.23 (Bitstamp), 0.33 (Chainlink), 0.58 (Kraken), 0.85 (OKX); 0 never | 0.00 |
+| `exact_peg_share_30d` | ≥ 0.9 → alert | 0.67 (third-party) | 1.00 |
+| `constant_close_run_days` | > 30 → alert | 18 (third-party) | 1 864 |
+| `min_rvol_30d_bps` | < 0.1 bps → alert | 0.23 (Bitstamp), 0.33 (Chainlink), 0.58 (third-party), 0.85 (OKX); 0 never | 0.00 |
 | `zero_volume_share_30d` | ≥ 0.9 → alert | 0.00 | 1.00 |
 
 "Reject" means the series fails CI (a fixture test over `/ohlcv` for every
@@ -56,7 +56,7 @@ production series, one evaluation per day, which fits the [[0125]] dashboard
 |---|---|
 | `test_our_usdc_series_fails` | our `/ohlcv` USDC series trips zero-trades, exact-peg, constant-run and rvol |
 | `test_our_native_control_passes_price_checks` | XLM, a non-stablecoin, trips nothing |
-| `test_real_usd_sources_pass` | Chainlink USDC/USDT/DAI, Bitstamp, Kraken, OKX and the composed series trip nothing over their full history |
+| `test_real_usd_sources_pass` | Chainlink USDC/USDT/DAI, Bitstamp, third-party, OKX and the composed series trip nothing over their full history |
 | `test_stress_window_does_not_trigger` | 2023-02 → 2023-04 on Chainlink trips nothing (a depeg is not an anomaly of the *series*) |
 | `test_a_quiet_real_quarter_does_not_trigger` | the quietest 30 days ever printed on Bitstamp (0.23 bps) pass |
 | `test_synthetic_injection_is_caught` | a 45-day splice of exactly 1.0 into Bitstamp trips the constant-run check |
@@ -80,5 +80,5 @@ production series, one evaluation per day, which fits the [[0125]] dashboard
    `data/peer_corr.csv`.
 
 Thresholds must be re-derived if the surface changes grain or precision:
-Kraken's 4-decimal prints are what put `exact_peg_share_30d` at 0.9 rather
+third-party's 4-decimal prints are what put `exact_peg_share_30d` at 0.9 rather
 than 0.5.

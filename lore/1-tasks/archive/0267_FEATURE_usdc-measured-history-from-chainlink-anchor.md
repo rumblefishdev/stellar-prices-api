@@ -74,7 +74,7 @@ The acceptance fixture is the falsifying date: **2023-03-11 must close at
 
 - The source decision and its evidence: [[0265]] `notes/memo.md`. Primary
   Chainlink USDC/USD rounds (on-chain, key-less, 2021-02-17 →), fallback
-  Bitstamp, cross-check Kraken. USDT-quoted venues and peer stablecoins
+  Bitstamp, cross-check third-party. USDT-quoted venues and peer stablecoins
   rejected on measured dispersion and correlation.
 - The composed daily series already exists (`compose_usdc.py` output,
   2 049 rows 2021-01-25 → 2026-03-10: 98.6 % measured, 1.2 % fallback,
@@ -218,7 +218,7 @@ What shipped, on `feat/0267_usdc-measured-history-from-chainlink-anchor`
 **The source, its granularity and its fetch date**, because an imported series
 with no provenance is not evidence ([[0247]]'s fifth criterion). Primary
 **Chainlink** USDC/USD on-chain rounds, fallback **Bitstamp**, cross-checked
-against Kraken; composed by [[0265]]'s `compose_usdc.py` and versioned in this repo at **two
+against third-party; composed by [[0265]]'s `compose_usdc.py` and versioned in this repo at **two
 grains**:
 
 - `lore/1-tasks/archive/0265_.../data/composed_usdc_usd_1d.csv` — **2049 daily
