@@ -6125,3 +6125,35 @@ async fn pre_usdc_xlm_rate_repair_reaches_across_a_month_edge() {
         .await
         .unwrap();
 }
+
+/// A wide tier's USD volume is a Σ of its hours; past Decimal(38, 14) it is
+/// written as 0, never as the sum wrapped negative (three hours of 6e23 do).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_rollup_volume_never_wraps() {
+    let db = "test_ch_enrich_pre_usdc_rollup_overflow";
+    #[rustfmt::skip]
+    let day: Leg = ("1d FOO/XLM over three huge hours", WIDE[1], D0331, FOO, XLM, 10.0, 9.0, 90.0, 2.5, 0.0);
+    let client = setup_0331(db, RATES_0331, &[day]).await;
+    for ts in [h(10), h(11), h(12)] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{H1} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+                 VALUES ({ts}, {FOO}, {XLM}, 'sdex', 10, 10, 10, 10, 3, 30, \
+                  '600000000000000000000000', 2.5, 10, 1, 1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+    let pass = ChEnrichmentPass::new(cfg_0331(db, WIDE[1]));
+    assert_eq!(pass.run().await.unwrap().rows_enriched, 1);
+    assert_legs(&client, db, &[day], |_| 1.0).await;
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
