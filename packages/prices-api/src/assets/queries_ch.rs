@@ -6,6 +6,7 @@
 //! field order MUST match the `SELECT` column order.
 
 use clickhouse::Client;
+use prices_clickhouse::{DOLLAR_TOKEN_PRED, OFF_PEG_DOLLAR_TOKENS, PRE_USDC_END_S};
 
 use crate::assets::dto::Candle;
 use crate::common::cursor::Cursor;
@@ -1911,6 +1912,184 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     q.fetch_all::<Candle>().await
 }
 
+/// The aggregates of [`native_usd_series_sql`] over its rows
+/// `(bkt, hk, hts, hr, hs, hq, hx, htc, hxr, hxp)`, in `OUTER_ALIASES` order
+/// minus `ts`. Prices and provenance come from the rate rows (`hk = 1`), volume
+/// from every row; `hxr`/`hxp` are the priced XLM amount × rate, and amount.
+fn native_usd_aggregates() -> String {
+    // Float64, parsed back: a Decimal × Decimal product wraps silently.
+    let dec = |f: &str| format!("toDecimal128OrNull(toString({f}), 14)");
+    // The worst quality of the bucket wins; an unknown label ranks worst.
+    let rank = "multiIf(hq = '', 0, hq = 'measured', 1, hq = 'measured-disputed', 2, \
+                hq = 'fallback', 3, 4)";
+    format!(
+        "toNullable(toString(argMinIf(hr, hts, hk))) AS o, \
+         toNullable(toString(maxIf(hr, hk))) AS h, toNullable(toString(minIf(hr, hk))) AS l, \
+         toNullable(toString(argMaxIf(hr, hts, hk))) AS c, \
+         toString(sum(hx)) AS vb, toString(ifNull({vqu}, toDecimal128(0, 14))) AS vqu, \
+         toNullable(toString(least(greatest(ifNull({vw}, argMaxIf(hr, hts, hk)), \
+         minIf(hr, hk)), maxIf(hr, hk)))) AS vw, \
+         toUInt64(sum(htc)) AS tc, toNullable('external') AS meth, \
+         toNullable(toUInt8(1)) AS drv, {PF_NULL_TAIL}, \
+         if(uniqExactIf(hs, hk) = 1, nullIf(anyIf(hs, hk), ''), NULL) AS src, \
+         nullIf(argMaxIf(hq, {rank}, hk), '') AS qual",
+        // NULL (→ 0) only on overflow, ≥ 1e24 USD: unreachable before 2021.
+        vqu = dec("sum(hxr)"),
+        vw = dec("if(sum(hxp) > 0, sum(hxr) / sum(hxp), avgIf(toFloat64(hr), hk))"),
+    )
+}
+
+/// XLM's markets against a dollar token other than the off-peg ones, in either
+/// orientation; each leg starts on a key prefix (see [`ohlcv_peg_series`]).
+fn dollar_leg_pred(xlm: u64) -> String {
+    let off_peg = OFF_PEG_DOLLAR_TOKENS.map(|(code, issuer)| format!("('{code}', '{issuer}')"));
+    let d = format!(
+        "SELECT asset_id FROM assets FINAL WHERE {DOLLAR_TOKEN_PRED} \
+         AND (asset_code, issuer_address) NOT IN ({})",
+        off_peg.join(", ")
+    );
+    format!(
+        "((asset_id = {xlm} AND quote_asset_id IN ({d})) \
+         OR (asset_id IN ({d}) AND quote_asset_id = {xlm}))"
+    )
+}
+
+/// Native XLM's own USD candles before [`PRE_USDC_END_S`], built from the
+/// promoted hourly XLM/USD rate (task 0331). Only typed integers are
+/// interpolated, so nothing binds.
+fn native_usd_series_sql(args: &OhlcvArgs, xlm: u64) -> String {
+    let (pre, iv) = (PRE_USDC_END_S, args.granularity.interval_sql());
+    // ` AND {lhs}toDateTime(t){rhs}` when the window bound `t` is set.
+    let w = |t: Option<i64>, lhs: &str, rhs: &str| {
+        t.map_or(String::new(), |t| format!(" AND {lhs}toDateTime({t}){rhs}"))
+    };
+    let (amt, legs) = (
+        format!("if(asset_id = {xlm}, volume_base, volume_quote)"),
+        dollar_leg_pred(xlm),
+    );
+    let since = w(args.start, "timestamp >= ", "");
+    // `reference_asset` by equality, so `source` is `third-party` by construction.
+    let rates = |cols: &str, window: String| {
+        format!(
+            "SELECT 1 AS k, timestamp AS rts, usd_rate AS rate, \
+                    CAST(reference_asset AS String) AS rsrc, CAST(quality AS String) AS rq{cols} \
+             FROM usd_rate FINAL \
+             WHERE asset_kind = 'native' AND asset_code = 'XLM' AND issuer_address = '' \
+               AND contract_address = '' AND method = 'external' \
+               AND reference_asset = 'third-party' AND usd_rate > 0 \
+               AND timestamp < toDateTime({pre}){window}"
+        )
+    };
+    let hours = if args.granularity.seconds() < 3600 {
+        // 1m/15m: a bucket only where XLM traded, at its hour's rate. `quote_asset_id`
+        // is not a key prefix; read-only on prod (2026-10-15) a pre-2021 month holds
+        // ≤ 302,183 rows on 1m and ≤ 94,724 on 15m, so the 5000-bucket worst case
+        // (3 months) reads under 1 M rows.
+        let until = w(args.end, "timestamp <= ", "");
+        format!(
+            "SELECT t.bkt AS bkt, 1 AS hk, r.rts AS hts, r.rate AS hr, r.rsrc AS hs, \
+                    r.rq AS hq, t.tx AS hx, t.ttc AS htc, \
+                    toFloat64(t.tx) * toFloat64(r.rate) AS hxr, toFloat64(t.tx) AS hxp \
+             FROM ( SELECT timestamp AS bkt, toStartOfHour(timestamp, 'UTC') AS th, \
+                           sumIf({amt}, {legs}) AS tx, sumIf(trade_count, {legs}) AS ttc \
+                    FROM price_ohlcv_{g} FINAL \
+                    WHERE (asset_id = {xlm} OR quote_asset_id = {xlm}) \
+                      AND timestamp < toDateTime({pre}){since}{until} \
+                    GROUP BY timestamp ) AS t \
+             INNER JOIN ( {r} ) AS r ON r.rts = t.th",
+            g = args.granularity.as_str(),
+            r = rates(
+                "",
+                w(args.start, "timestamp >= toStartOfHour(", ", 'UTC')") + &until
+            ),
+        )
+    } else {
+        // ≥1h: the bucket set and prices from the rate rows (`hk = 1`); volume from
+        // every dollar-leg hour, in USD at the newest rate at or before it within 24 h
+        // (`ch_enrich::external_sql` at 1h), else 0.
+        let bkt =
+            |c: &str| format!("toDateTime(toStartOfInterval({c}, INTERVAL {iv}, 'UTC'), 'UTC')");
+        let ok = "ifNull(r.rate > 0 AND toUInt32(v.vend) - toUInt32(r.rts) <= 86400, 0)";
+        format!(
+            "SELECT bkt, 1 AS hk, rts AS hts, rate AS hr, rsrc AS hs, rq AS hq, \
+                    toDecimal128(0, 14) AS hx, toUInt64(0) AS htc, 0. AS hxr, 0. AS hxp \
+             FROM ( {r} ) \
+             UNION ALL \
+             SELECT {vb} AS bkt, 0 AS hk, v.vh AS hts, toDecimal128(0, 14) AS hr, '' AS hs, \
+                    '' AS hq, v.vx AS hx, v.vtc AS htc, \
+                    if({ok}, toFloat64(v.vx) * ifNull(toFloat64(r.rate), 0.), 0.) AS hxr, \
+                    if({ok}, toFloat64(v.vx), 0.) AS hxp \
+             FROM ( SELECT 1 AS k, timestamp AS vh, timestamp + INTERVAL 1 HOUR AS vend, \
+                           sum({amt}) AS vx, toUInt64(sum(trade_count)) AS vtc \
+                    FROM price_ohlcv_1h FINAL \
+                    WHERE {legs} AND timestamp < toDateTime({pre}){since}{until} \
+                    GROUP BY timestamp ) AS v \
+             ASOF LEFT JOIN ( {back} ) AS r ON r.k = v.k AND r.rts < v.vend",
+            r = rates(
+                &format!(", {} AS bkt", bkt("timestamp")),
+                w(args.start, "bkt >= ", "") + &w(args.end, "bkt <= ", ""),
+            ),
+            vb = bkt("v.vh"),
+            back = rates("", w(args.start, "timestamp >= ", " - INTERVAL 1 DAY")),
+            until = w(args.end, "timestamp < ", &format!(" + INTERVAL {iv}")),
+        )
+    };
+    format!(
+        "SELECT {OUTER_ALIASES} FROM ( \
+           SELECT formatDateTime(bkt, '%Y-%m-%dT%H:%i:%SZ', 'UTC') AS ts, {agg}, bkt \
+           FROM ( {hours} ) \
+           GROUP BY bkt HAVING sum(hk) > 0 ORDER BY bkt DESC LIMIT {limit} \
+         ) ORDER BY ts ASC",
+        agg = native_usd_aggregates(),
+        limit = args.limit,
+    )
+}
+
+/// `own` minus every bucket `synth` covers, plus `synth`: ascending, the last
+/// `limit` kept, as [`ohlcv`] keeps the most recent. The dedup compares strings:
+/// `synth` prints UTC, [`ohlcv`] the server's timezone, which must be UTC (as its
+/// `Z` suffix already assumes).
+fn merge_native_usd(mut synth: Vec<Candle>, own: Vec<Candle>, limit: usize) -> Vec<Candle> {
+    let have: std::collections::HashSet<String> =
+        synth.iter().map(|c| c.timestamp.clone()).collect();
+    synth.extend(own.into_iter().filter(|c| !have.contains(&c.timestamp)));
+    synth.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    synth.split_off(synth.len().saturating_sub(limit))
+}
+
+/// XLM's id when `asset_id` is native XLM in USD, the one case
+/// [`ohlcv_native_usd`] serves; `None` in XLM mode and for every other asset.
+pub fn native_xlm_usd(denomination: &Denomination, asset_id: u64) -> Option<u64> {
+    match denomination {
+        Denomination::Usd(refs) if refs.xlm == Some(asset_id) => refs.xlm,
+        _ => None,
+    }
+}
+
+/// Whether a window starting at `start` can hold a pre-2021 bucket.
+fn reaches_pre_usdc(start: Option<i64>) -> bool {
+    start.is_none_or(|s| s < i64::from(PRE_USDC_END_S))
+}
+
+/// Native XLM in USD: the synthesized pre-2021 series over [`ohlcv`] unchanged,
+/// which still serves every bucket no promoted rate covers.
+pub async fn ohlcv_native_usd(
+    ch: &Client,
+    args: OhlcvArgs,
+    xlm: u64,
+) -> Result<Vec<Candle>, clickhouse::error::Error> {
+    let limit = usize::try_from(args.limit).unwrap_or(usize::MAX);
+    let synth_sql = reaches_pre_usdc(args.start).then(|| native_usd_series_sql(&args, xlm));
+    let synth = async {
+        let Some(sql) = &synth_sql else {
+            return Ok(Vec::new());
+        };
+        ch.query(sql).fetch_all::<Candle>().await
+    };
+    let (synth, own) = tokio::try_join!(synth, ohlcv(ch, args))?;
+    Ok(merge_native_usd(synth, own, limit))
+}
+
 /// How far a bucket's `close` may sit from its price-forming mean before the
 /// response says so: one percent.
 ///
@@ -3435,6 +3614,98 @@ mod tests {
             close_divergent: None,
             source: None,
             quality: None,
+        }
+    }
+
+    #[test]
+    fn native_usd_series_sql_renders_every_grain() {
+        let want: Vec<&str> = OUTER_ALIASES.split(", ").skip(1).collect();
+        assert_eq!(aliases_of(&native_usd_aggregates()), want);
+        use Granularity::*;
+        for g in [M1, M15, H1, H4, D1, W1, Mo1] {
+            let args = OhlcvArgs {
+                asset_id: 7,
+                denomination: Denomination::QuoteLeg(7),
+                granularity: g,
+                start: Some(1_600_000_000),
+                end: Some(1_600_086_400),
+                limit: 5000,
+            };
+            let sql = native_usd_series_sql(&args, 7);
+            let fine = g.seconds() < 3600;
+            assert!(
+                sql.starts_with(&format!("SELECT {OUTER_ALIASES} FROM (")),
+                "{sql}"
+            );
+            // One rate read on 1m/15m; ≥1h adds the 24 h look-back for volume.
+            let reads = if fine { 1 } else { 2 };
+            let rate = "method = 'external' AND reference_asset = 'third-party' AND";
+            assert_eq!(sql.matches("method = ").count(), reads, "{g:?}");
+            assert_eq!(sql.matches(rate).count(), reads, "{g:?}");
+            for bad in ["LIKE", "startsWith", "candidate", "SETTINGS", "?"] {
+                assert!(!sql.contains(bad), "{g:?} {bad}: {sql}");
+            }
+            let pre = format!("toDateTime({PRE_USDC_END_S})");
+            assert_eq!(sql.matches(&pre).count(), reads + 1, "{g:?}: {sql}");
+            let issuers = OFF_PEG_DOLLAR_TOKENS.map(|(_, i)| i);
+            for needle in [pre.as_str(), "'UTC'", DOLLAR_TOKEN_PRED]
+                .iter()
+                .chain(&issuers)
+            {
+                assert!(sql.contains(needle), "{g:?} {needle}: {sql}");
+            }
+            // ≥1h reads volume from 1h on key prefixes only; 1m/15m scan their
+            // own grain with XLM on either side.
+            let table = if fine { g.as_str() } else { "1h" };
+            assert!(
+                sql.contains(&format!("price_ohlcv_{table} FINAL")),
+                "{g:?}: {sql}"
+            );
+            assert_eq!(sql.matches("price_ohlcv_").count(), 1, "{g:?}: {sql}");
+            let either = sql.contains("(asset_id = 7 OR quote_asset_id = 7)");
+            assert_eq!(either, fine, "{g:?}: {sql}");
+            let interval = format!("INTERVAL {}", g.interval_sql());
+            assert!(fine || sql.contains(&interval), "{g:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn native_usd_routing_and_skip() {
+        let usd = Denomination::Usd(usd_refs());
+        assert_eq!(native_xlm_usd(&usd, 1), Some(1));
+        assert_eq!(native_xlm_usd(&usd, 2), None);
+        assert_eq!(native_xlm_usd(&Denomination::QuoteLeg(1), 1), None);
+        let pre = i64::from(PRE_USDC_END_S);
+        let got = [None, Some(pre - 1), Some(pre), Some(pre + 1)].map(reaches_pre_usdc);
+        assert_eq!(got, [true, true, false, false]);
+    }
+
+    #[test]
+    fn merge_native_usd_replaces_orders_and_caps() {
+        let at = |d: &&str, synth: bool| Candle {
+            timestamp: format!("2021-{d}"),
+            source: synth.then(|| "third-party".to_string()),
+            ..candle_with(None, None)
+        };
+        let tag =
+            |c: &Candle| c.timestamp[5..].to_string() + ["", "*"][c.source.is_some() as usize];
+        // (synthetic days, limit, merged days, `*` = synthetic)
+        let cases: [(&[&str], usize, &str); 3] = [
+            (&["01-30", "01-31"], 5000, "01-29 01-30* 01-31* 02-01"),
+            (&["01-30", "01-31"], 2, "01-31* 02-01"),
+            (&[], 5000, "01-29 01-31 02-01"),
+        ];
+        for (synth, limit, want) in cases {
+            let synth = synth.iter().map(|d| at(d, true)).collect();
+            let own = ["01-29", "01-31", "02-01"]
+                .iter()
+                .map(|d| at(d, false))
+                .collect();
+            let got: Vec<String> = merge_native_usd(synth, own, limit)
+                .iter()
+                .map(tag)
+                .collect();
+            assert_eq!(got.join(" "), want, "limit {limit}");
         }
     }
 }

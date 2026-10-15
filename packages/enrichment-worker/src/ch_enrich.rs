@@ -110,7 +110,7 @@ use tracing::{info, warn};
 /// Re-exported from `prices-clickhouse` (the single source of truth, also used by
 /// `sdex-backfill`) so the `asset_id` the backfill interns under these issuers
 /// matches the `quote_asset_id` enriched here — no hand-synced literal to drift.
-use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
+use prices_clickhouse::{DOLLAR_TOKEN_PRED, USDC_ISSUER, USDT_ISSUER};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChEnrichError {
@@ -2885,9 +2885,7 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u64, window: &str) -> String {
 /// Keyed on code/issuer/contract, never `asset_type` (fixtures disagree on it).
 fn dollar_token_asset_pred() -> String {
     format!(
-        "contract_address = '' AND issuer_address != '' \
-         AND asset_code IN ('USD', 'USDT', 'USDC') \
-         AND NOT (asset_code = 'USDC' AND issuer_address = '{USDC_ISSUER}')"
+        "{DOLLAR_TOKEN_PRED} AND NOT (asset_code = 'USDC' AND issuer_address = '{USDC_ISSUER}')"
     )
 }
 
@@ -3373,6 +3371,17 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u64, usdc_id: u64, window: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// lore-0331 moved the code list into `DOLLAR_TOKEN_PRED`; the text is unchanged.
+    #[test]
+    fn dollar_token_asset_pred_renders_the_pre_0331_text() {
+        let want = format!(
+            "contract_address = '' AND issuer_address != '' \
+             AND asset_code IN ('USD', 'USDT', 'USDC') \
+             AND NOT (asset_code = 'USDC' AND issuer_address = '{USDC_ISSUER}')"
+        );
+        assert_eq!(dollar_token_asset_pred(), want);
+    }
 
     #[test]
     fn peg_sql_is_none_without_stablecoins() {

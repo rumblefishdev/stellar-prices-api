@@ -252,6 +252,20 @@ pub const USDC_ORACLE_EPOCH_S: u32 = 1_773_237_600;
 /// `timestamp <` it means the whole bucket lies before it.
 pub const PRE_USDC_END_S: u32 = 1_612_137_600;
 
+/// `prices.assets` rows of a classic dollar token of any issuer, canonical
+/// USDC/USDT included; keyed on code/issuer/contract.
+pub const DOLLAR_TOKEN_PRED: &str =
+    "contract_address = '' AND issuer_address != '' AND asset_code IN ('USD', 'USDT', 'USDC')";
+
+/// Dollar tokens that lost their peg, excluded by identity (task 0331).
+#[rustfmt::skip]
+pub const OFF_PEG_DOLLAR_TOKENS: [(&str, &str); 4] = [
+    ("USDT", "GC2PJ6J37QM3DOQ63DVGCXTRC5QOKAJUBQO2XKBXOJCWTCOCP75KWUDX"),
+    ("USD", "GD3LHBHY6NYJXETU6YO5OYI37F3X6L6C46ZWKBFBT35RBRKACDVMRF5K"),
+    ("USDT", "GC3YRTJQUXVQMG5STS7MSWVF3OF3Z5MVF6NEWZLKNQAJZX5UUFLMCFMA"),
+    ("USD", "GA5O7NTUIKYDPZSV3MNMIRFO2LCV5RJBNO7TNN7Y3MDO2IXRBSWDEO3T"),
+];
+
 /// ClickHouse client configuration, sourced from environment with local-dev
 /// defaults.
 #[derive(Debug, Clone)]

@@ -441,7 +441,17 @@ async fn resolve_usd_refs(
      yet, those fields are `null`. Before 2021-02-01, candles\nquoted in XLM or in a \
      dollar token are converted with an imported, measured\nXLM/USD rate (`method` is \
      `external`); a dollar token is converted through its own XLM\nmarket and stays unpriced \
-     without one.\n\nThe window is `timeframe`, ending \
+     without one.\n\nFor native XLM itself (`GET /assets/native/ohlcv`) before 2021-02-01, a bucket \
+     covered by\nthe imported hourly XLM/USD rate is built from that rate instead: `method` is \
+     `external`,\n`derived` is `true` and `source` is `third-party`. `open` and `close` are the \
+     bucket's\nfirst and last hourly rate, and `high` and `low` are the extremes of the hourly \
+     averages,\nnot of individual trades. The volumes and trade count are those of XLM traded \
+     against\ndollar tokens (USD, USDT and USDC of any issuer, except four that lost their \
+     peg) in\nevery hour of the bucket; an hour without a rate of its own is valued in USD at \
+     the\nnewest rate of the previous 24 hours. From 2021-02-01 the volumes are those of \
+     XLM's own\nmarkets against canonical USDC and USDT only. At\n`15m` and `1m` a bucket appears only where XLM traded, and takes the rate of its \
+     hour. A\nbucket the rate does not cover is built as above.\n\n\
+     The window is `timeframe`, ending \
      now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
      rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
      historical backfill is still running.",
@@ -676,6 +686,8 @@ pub async fn get_ohlcv(
                 .eq_ignore_ascii_case(&usdc_identifier().to_canonical())
     });
 
+    // Native XLM in USD: its pre-2021 buckets come from the imported rate.
+    let native_xlm = queries_ch::native_xlm_usd(&args.denomination, asset_id);
     let mut data = if is_peg_asset {
         // Both references anchor the series: USDC is the rate's identity, XLM is
         // the market the buckets come from (and, in XLM mode, the denominator).
@@ -699,6 +711,11 @@ pub async fn get_ohlcv(
         {
             Ok(d) => d,
             Err(e) => return errors::db_error(&e, "ohlcv peg series"),
+        }
+    } else if let Some(xlm) = native_xlm {
+        match queries_ch::ohlcv_native_usd(state.ch(), args, xlm).await {
+            Ok(d) => d,
+            Err(e) => return errors::db_error(&e, "ohlcv native usd"),
         }
     } else {
         match queries_ch::ohlcv(state.ch(), args).await {
