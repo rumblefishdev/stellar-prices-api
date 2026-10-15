@@ -3425,7 +3425,7 @@ const NATIVE_WEEK: &str = "granularity=1w&start=2021-01-18T00:00:00Z&end=2021-02
 
 /// Native XLM's pre-2021 USD buckets come from the promoted hourly rate; the
 /// rest is today's series (lore-0331). XLM mode never routes here
-/// (`native_usd_routing_and_skip`).
+/// (`ohlcv_native_xlm_mode_ignores_the_promoted_rate`).
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_native_usd_synthesizes_pre_2021_from_the_rate() {
@@ -3496,4 +3496,32 @@ async fn ohlcv_native_usd_before_promotion_equals_today() {
         (NATIVE_WEEK, 2, 0, &[("2021-01-25T00:00:00Z", 0.49, None)]),
     ];
     check_native_usd("it_ohlcv_native_usd_pre_0331", "external-candidate", &cases).await;
+}
+
+/// `base_currency=XLM` never takes the synthesized series: promoting the rate
+/// changes nothing in XLM mode (lore-0331).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn ohlcv_native_xlm_mode_ignores_the_promoted_rate() {
+    let mut got = Vec::new();
+    for (db, m) in [
+        ("it_ohlcv_native_xlm_0331", "external"),
+        ("it_ohlcv_native_xlm_pre_0331", "external-candidate"),
+    ] {
+        let client = setup(db).await;
+        let admin = Client::default().with_url(ch_url()).with_database(db);
+        seed_native_usd(db, &admin, m).await;
+        let mut data = Vec::new();
+        for q in [NATIVE_DAY, NATIVE_HOUR, NATIVE_15M, NATIVE_WEEK] {
+            let uri = format!("/v1/assets/native/ohlcv?{q}&base_currency=XLM");
+            let (status, json) = get(client.clone(), &uri).await;
+            assert_eq!(status, StatusCode::OK, "{q}: {json}");
+            let candles = json["data"].as_array().unwrap();
+            assert!(candles.iter().all(|c| c["source"].is_null()), "{q}: {json}");
+            data.push(json["data"].clone());
+        }
+        got.push(data);
+        teardown(db).await;
+    }
+    assert_eq!(got[0], got[1]);
 }

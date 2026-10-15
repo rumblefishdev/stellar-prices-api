@@ -16,7 +16,9 @@ use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, MonthRepair, run_coarse_sweep,
 };
 use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert, fetch_ids};
-use prices_clickhouse::{PRE_USDC_END_S, USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER};
+use prices_clickhouse::{
+    PRE_USDC_END_S, USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER, XLM_RATE_SOURCE,
+};
 use std::fmt::Display;
 
 // The fixture assets. Each displays as its id, derived from its identity
@@ -2213,15 +2215,15 @@ fn utc_day_start(ts: u32) -> u32 {
     ts - ts % 86_400
 }
 
-/// Seed one `usd_rate` row for canonical USDC under an explicit `method`, so a
-/// test can stage BOTH series for the same bucket and prove which one wins.
-/// [`seed_external_rate`] is the `'external'` case and carries the day-start
+/// Seed one `usd_rate` row of identity `(asset_kind, asset_code, issuer_address)`
+/// and `reference_asset` under an explicit `method`, so a test can stage BOTH
+/// series for the same bucket and prove which one wins. [`seed_external_rate`]
+/// is the canonical USDC `'external'` case and carries the day-start
 /// convention note.
-/// One `usd_rate` row of identity `(asset_kind, asset_code, issuer_address)`.
 async fn seed_usd_rate(
     client: &Client,
     db: &str,
-    (kind, code, issuer): (&str, &str, &str),
+    (kind, code, issuer, source): (&str, &str, &str, &str),
     (ts, rate, method): (u32, f64, &str),
     version: u64,
 ) {
@@ -2230,7 +2232,7 @@ async fn seed_usd_rate(
             "INSERT INTO {db}.usd_rate \
              (asset_kind, asset_code, issuer_address, contract_address, \
               timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
-             ('{kind}', '{code}', '{issuer}', '', {ts}, {rate}, '{method}', '', 0, {version})"
+             ('{kind}', '{code}', '{issuer}', '', {ts}, {rate}, '{method}', '{source}', 0, {version})"
         ))
         .execute()
         .await
@@ -3195,7 +3197,7 @@ async fn a_pivot_leg_prefers_the_oracle_rate_over_the_external_rate() {
     let db = "it_enrich_0228_oracle_wins";
     let client = setup_0228_pivot(db, "price_ohlcv_1d", DEPEG_DAY).await;
     // The oracle says 0.95 at day start; the import says 0.9681 an hour LATER.
-    let usdc = ("credit", "USDC", USDC_ISSUER);
+    let usdc = ("credit", "USDC", USDC_ISSUER, "");
     seed_usd_rate(&client, db, usdc, (DEPEG_DAY, 0.95, "oracle"), 1).await;
     seed_external_rate(&client, db, DEPEG_DAY + 3_600, DEPEG_RATE).await;
 
@@ -5744,7 +5746,10 @@ type Rate = (u32, f64, &'static str);
 #[rustfmt::skip]
 type Leg = (&'static str, &'static str, u32, AssetFixture<'static>, AssetFixture<'static>, f64, f64, f64, f64, f64);
 
-const XLM_RATE: (&str, &str, &str) = ("native", "XLM", "");
+const XLM_RATE: (&str, &str, &str, &str) = ("native", "XLM", "", XLM_RATE_SOURCE);
+/// An `external` XLM row from another source, which no 0331 reader may take:
+/// at h(30) it would price the h(48) and h(53) legs.
+const OTHER_XLM_RATE: (&str, &str, &str, &str) = ("native", "XLM", "", "other-source");
 const RATES_0331: &[Rate] = &[
     (h(10), 0.25, "external"),
     (h(23), 0.20, "external"),
@@ -5828,6 +5833,7 @@ async fn setup_0331(db: &str, rates: &[Rate], legs: &[Leg]) -> Client {
     for r in rates {
         seed_usd_rate(&client, db, XLM_RATE, *r, 1).await;
     }
+    seed_usd_rate(&client, db, OTHER_XLM_RATE, (h(30), 9.0, "external"), 1).await;
     for l in legs {
         seed_leg(&client, db, l).await;
     }
@@ -6067,6 +6073,52 @@ async fn pre_usdc_xlm_rate_repair_refuses_unpromoted_rates_and_previews_exactly(
     assert_legs(&client, db, legs, |_| 1.0).await;
     assert_eq!(run(3600, true).await.unwrap(), (1, 1));
     assert_legs(&client, db, &legs[..1], |_| 1.0).await;
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_repair_reaches_across_a_month_edge() {
+    let db = "test_ch_enrich_pre_usdc_month_edge";
+    let day = |n: u32| D0331 + n * 86_400;
+    // 2020-06-29 is a Monday: its week runs into July.
+    let (week, jun30, jul1, jul2) = (day(28), day(29), day(30), day(31));
+    let rates: &[Rate] = &[
+        (jun30 + 10 * 3600, 0.25, "external"),
+        (jul1, 0.30, "external"),
+        (jul2 + 10 * 3600, 0.20, "external"),
+    ];
+    #[rustfmt::skip]
+    let legs: &[Leg] = &[
+        ("USDT/XLM 06-30 20:00", H1, jun30 + 20 * 3600, USDT, XLM, 5.0, 10.0, 50.0, 1.25, 12.5),
+        ("FOO/USDT 07-01 via June's market", H1, jul1, FOO, USDT, 2.0, 3.0, 6.0, 3.0, 9.0),
+        ("FOO/XLM 06-30 10:00", H1, jun30 + 10 * 3600, FOO, XLM, 10.0, 3.0, 30.0, 2.5, 7.5),
+        ("FOO/XLM 07-02 10:00", H1, jul2 + 10 * 3600, FOO, XLM, 10.0, 3.0, 30.0, 2.0, 6.0),
+        ("1w FOO/XLM from 06-29 rolls up July's hour", WIDE[2], week, FOO, XLM, 10.0, 6.0, 60.0, 2.0, 13.5),
+    ];
+    let client = setup_0331(db, rates, legs).await;
+    for table in [H1, WIDE[2]] {
+        CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich: cfg_0331(db, table),
+                start_month: 202_006,
+                end_month: 202_007,
+                snapshot: false,
+                dry_run: false,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+        .run()
+        .await
+        .unwrap();
+    }
+    assert_legs(&client, db, legs, |_| 1.0).await;
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()
