@@ -382,7 +382,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Highest price among this bucket's price-forming trades, in `base_currency`; `null` \
          when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
          quoted in USDC or XLM set it when one of them formed a price in the bucket; \
-         otherwise every market does.",
+         otherwise every market does. On native XLM's synthesized buckets before 2021-02-01 \
+         it is the highest hourly XLM/USD rate of the bucket, an hourly average rather than \
+         a trade.",
     ),
     (
         "Candle",
@@ -390,7 +392,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` \
          when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
          quoted in USDC or XLM set it when one of them formed a price in the bucket; \
-         otherwise every market does.",
+         otherwise every market does. On native XLM's synthesized buckets before 2021-02-01 \
+         it is the lowest hourly XLM/USD rate of the bucket, an hourly average rather than \
+         a trade.",
     ),
     (
         "Candle",
@@ -440,7 +444,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of \
          this bucket. `null` when the bucket has no price — see `pf_trade_count`. In USD \
          mode only markets quoted in USDC or XLM set it when one of them formed a price in \
-         the bucket; otherwise every market does.",
+         the bucket; otherwise every market does. On native XLM's synthesized buckets \
+         before 2021-02-01 it is the bucket's first hourly XLM/USD rate.",
     ),
     (
         "Candle",
@@ -534,7 +539,10 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "volume_quote_usd",
         "USD volume of the bucket, summed over the trades that have a USD value. A trade not \
          yet priced counts in `volume_base` and `trade_count` but not here, so this is the \
-         USD volume that can be accounted for, not the bucket's total restated in USD.",
+         USD volume that can be accounted for, not the bucket's total restated in USD. On \
+         native XLM's synthesized buckets before 2021-02-01 it covers XLM's trades against \
+         dollar tokens only, each hour valued at the newest XLM/USD rate of the previous \
+         24 hours.",
     ),
     (
         "Candle",

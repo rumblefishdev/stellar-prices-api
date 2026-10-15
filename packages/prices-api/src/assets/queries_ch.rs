@@ -6,7 +6,9 @@
 //! field order MUST match the `SELECT` column order.
 
 use clickhouse::Client;
-use prices_clickhouse::{DOLLAR_TOKEN_PRED, OFF_PEG_DOLLAR_TOKENS, PRE_USDC_END_S};
+use prices_clickhouse::{
+    DOLLAR_TOKEN_PRED, OFF_PEG_DOLLAR_TOKENS, PRE_USDC_END_S, XLM_RATE_SOURCE,
+};
 
 use crate::assets::dto::Candle;
 use crate::common::cursor::Cursor;
@@ -1624,12 +1626,15 @@ pub async fn ohlcv_peg_series(
 ///    USDC leg at or after the epoch was priced from a measured reading.
 /// 4. `quote_asset_id = usdc` -> **`''`**. Scaled, pre-epoch, and no imported
 ///    rate covers the bucket — no tier produces this. Null is the honest answer
-///    to "which input priced this"; it also keeps USDC off arm 5 if it is ever
-///    tracked as a pivot.
-/// 5. `quote_asset_id IN (pivots)` -> **`traded`** (ADR 0011 §4; see [`ohlcv`]).
+///    to "which input priced this"; it also keeps USDC off the arms below, e.g. if
+///    it is ever tracked as a pivot.
+/// 5. `timestamp < PRE_USDC_END_S` -> **`external`** (task 0331): before
+///    2021-02-01 only `coarse-repair --pre-usdc-xlm-rate` writes a non-USDC
+///    `close_usd`, from the imported XLM/USD rate.
+/// 6. `quote_asset_id IN (pivots)` -> **`traded`** (ADR 0011 §4; see [`ohlcv`]).
 ///    Omitted ENTIRELY when no pivot reference is tracked — an empty `IN ()` is
 ///    a ClickHouse syntax error, and the label is optional.
-/// 6. `''` -> the fallback, which [`ohlcv`]'s `nullIf` turns into a JSON `null`.
+/// 7. `''` -> the fallback, which [`ohlcv`]'s `nullIf` turns into a JSON `null`.
 ///    A `multiIf` with no else is an error, so this arm always closes the list.
 ///
 /// ⚠️ The bare column names below (`close_usd`, `close`, `timestamp`) resolve to
@@ -1663,12 +1668,7 @@ pub(crate) fn usd_method_expr(usdc: u64, pivots: &[u64], granularity: Granularit
     // the plain `+ INTERVAL` form slides the coverage window's upper day by the
     // server's offset — and by a whole hour across a DST boundary. The worker
     // guards this at length; the read side must not reintroduce it.
-    let bucket_end = match granularity {
-        Granularity::D1 => "addDays(timestamp, 1, 'UTC')".to_string(),
-        Granularity::W1 => "addWeeks(timestamp, 1, 'UTC')".to_string(),
-        Granularity::Mo1 => "addMonths(timestamp, 1, 'UTC')".to_string(),
-        g => format!("timestamp + {}", g.seconds()),
-    };
+    let bucket_end = bucket_end_sql(granularity, "timestamp");
     // The imported days, as ONE uncorrelated set built per query (ClickHouse
     // renders this as a single `CreatingSet` node, not per row).
     let imported_days = format!(
@@ -1703,6 +1703,16 @@ pub(crate) fn usd_method_expr(usdc: u64, pivots: &[u64], granularity: Granularit
         // Another pre-2021 pricer needs its own arm above this one.
         pre = prices_clickhouse::PRE_USDC_END_S,
     )
+}
+
+/// `col` plus one bucket of `g`, pinned to UTC (see [`usd_method_expr`]).
+fn bucket_end_sql(g: Granularity, col: &str) -> String {
+    match g {
+        Granularity::D1 => format!("addDays({col}, 1, 'UTC')"),
+        Granularity::W1 => format!("addWeeks({col}, 1, 'UTC')"),
+        Granularity::Mo1 => format!("addMonths({col}, 1, 'UTC')"),
+        g => format!("{col} + {}", g.seconds()),
+    }
 }
 
 /// Read merged candles for one asset at the chosen grain, denominated per
@@ -1968,7 +1978,8 @@ fn native_usd_series_sql(args: &OhlcvArgs, xlm: u64) -> String {
         dollar_leg_pred(xlm),
     );
     let since = w(args.start, "timestamp >= ", "");
-    // `reference_asset` by equality, so `source` is `third-party` by construction.
+    // `reference_asset` by equality, as `coarse-repair` reads it, so `source` is
+    // `third-party` by construction.
     let rates = |cols: &str, window: String| {
         format!(
             "SELECT 1 AS k, timestamp AS rts, usd_rate AS rate, \
@@ -1976,7 +1987,7 @@ fn native_usd_series_sql(args: &OhlcvArgs, xlm: u64) -> String {
              FROM usd_rate FINAL \
              WHERE asset_kind = 'native' AND asset_code = 'XLM' AND issuer_address = '' \
                AND contract_address = '' AND method = 'external' \
-               AND reference_asset = 'third-party' AND usd_rate > 0 \
+               AND reference_asset = '{XLM_RATE_SOURCE}' AND usd_rate > 0 \
                AND timestamp < toDateTime({pre}){window}"
         )
     };
@@ -2030,8 +2041,11 @@ fn native_usd_series_sql(args: &OhlcvArgs, xlm: u64) -> String {
                 w(args.start, "bkt >= ", "") + &w(args.end, "bkt <= ", ""),
             ),
             vb = bkt("v.vh"),
-            back = rates("", w(args.start, "timestamp >= ", " - INTERVAL 1 DAY")),
-            until = w(args.end, "timestamp < ", &format!(" + INTERVAL {iv}")),
+            back = rates("", w(args.start, "timestamp >= ", " - 86400")),
+            until = args.end.map_or(String::new(), |t| {
+                let end = bucket_end_sql(args.granularity, &format!("toDateTime({t}, 'UTC')"));
+                format!(" AND timestamp < {end}")
+            }),
         )
     };
     format!(
@@ -3666,6 +3680,38 @@ mod tests {
             assert_eq!(either, fine, "{g:?}: {sql}");
             let interval = format!("INTERVAL {}", g.interval_sql());
             assert!(fine || sql.contains(&interval), "{g:?}: {sql}");
+            // Calendar arithmetic is pinned to UTC, as in `usd_method_expr`.
+            let call = |at: usize| {
+                let mut depth = 0;
+                for (j, ch) in sql[at..].char_indices() {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' if depth == 1 => return &sql[at..at + j],
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                panic!("unbalanced at {at}: {sql}")
+            };
+            for f in [
+                "addDays(",
+                "addWeeks(",
+                "addMonths(",
+                "toStartOf",
+                "formatDateTime(",
+            ] {
+                for (i, _) in sql.match_indices(f) {
+                    assert!(call(i).ends_with("'UTC'"), "{g:?}: {}", call(i));
+                }
+            }
+            for iv in [
+                "- INTERVAL",
+                "+ INTERVAL 1 DAY",
+                "+ INTERVAL 1 WEEK",
+                "+ INTERVAL 1 MONTH",
+            ] {
+                assert!(!sql.contains(iv), "{g:?} {iv}: {sql}");
+            }
         }
     }
 

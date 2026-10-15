@@ -252,6 +252,10 @@ pub const USDC_ORACLE_EPOCH_S: u32 = 1_773_237_600;
 /// `timestamp <` it means the whole bucket lies before it.
 pub const PRE_USDC_END_S: u32 = 1_612_137_600;
 
+/// `usd_rate.reference_asset` of the imported pre-2021 XLM/USD series (task
+/// 0331). Both its readers filter on it, so they read the same rows.
+pub const XLM_RATE_SOURCE: &str = "third-party";
+
 /// `prices.assets` rows of a classic dollar token of any issuer, canonical
 /// USDC/USDT included; keyed on code/issuer/contract.
 pub const DOLLAR_TOKEN_PRED: &str =

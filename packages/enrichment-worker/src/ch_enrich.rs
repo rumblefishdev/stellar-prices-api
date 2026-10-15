@@ -2074,8 +2074,8 @@ impl ChEnrichmentPass {
         );
         if self.client.query(&sql).fetch_one::<u64>().await? == 0 {
             return refuse(
-                "usd_rate holds no method = 'external' XLM row before 2021-02-01 \
-                 (promote the staged series first)",
+                "usd_rate holds no method = 'external' third-party XLM row before \
+                 2021-02-01 (promote the staged series first)",
             );
         }
         Ok(xlm)
@@ -2718,21 +2718,27 @@ pub fn external_window_s(table: &str) -> u32 {
     bucket_width_s(table).max(86_400)
 }
 
-/// `usd_rate` identity `(asset_kind, asset_code, issuer_address, contract_address)`.
-const USDC_RATE_IDENTITY: [&str; 4] = ["credit", "USDC", USDC_ISSUER, ""];
-const XLM_RATE_IDENTITY: [&str; 4] = ["native", "XLM", "", ""];
+/// `usd_rate` identity `(asset_kind, asset_code, issuer_address, contract_address)`
+/// and the `reference_asset` to require, `""` for any.
+const USDC_RATE_IDENTITY: [&str; 5] = ["credit", "USDC", USDC_ISSUER, "", ""];
+const XLM_RATE_IDENTITY: [&str; 5] = ["native", "XLM", "", "", prices_clickhouse::XLM_RATE_SOURCE];
 
 /// The imported (`method = 'external'`) rate series of one `usd_rate` identity,
 /// as an ASOF right side keyed `k = 1`. Equality on `method`: the staged
 /// `external-candidate` rows share its prefix (`external_rate.rs`).
-fn usd_rate_series_sql(db: &str, id: [&str; 4]) -> String {
-    let [kind, code, issuer, contract] = id;
+fn usd_rate_series_sql(db: &str, id: [&str; 5]) -> String {
+    let [kind, code, issuer, contract, source] = id;
+    let source = if source.is_empty() {
+        String::new()
+    } else {
+        format!(" AND reference_asset = '{source}'")
+    };
     format!(
         "SELECT 1 AS k, timestamp AS rts, usd_rate AS usd \
          FROM {db}.usd_rate FINAL \
          WHERE asset_kind = '{kind}' AND asset_code = '{code}' \
            AND issuer_address = '{issuer}' AND contract_address = '{contract}' \
-           AND method = 'external' AND usd_rate > 0"
+           AND method = 'external'{source} AND usd_rate > 0"
     )
 }
 
@@ -5729,11 +5735,9 @@ mod tests {
             for w in [None, Some((5, 9))] {
                 let (ins, cnt) = pre_usdc_sql("prices", t, 9, 86_400, w);
                 let rollup = bucket_width_s(t) > 3_600;
-                assert_eq!(
-                    ins.matches("method = ").count(),
-                    usize::from(!rollup),
-                    "{ins}"
-                );
+                for needle in ["method = ", "reference_asset = 'third-party'"] {
+                    assert_eq!(ins.matches(needle).count(), usize::from(!rollup), "{ins}");
+                }
                 assert_eq!(ins.contains("argMaxIf("), rollup, "{t}");
                 for needle in ["LIKE", "startsWith", "candidate"] {
                     assert!(!ins.contains(needle), "{t}: {needle}");
