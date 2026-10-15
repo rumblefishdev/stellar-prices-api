@@ -26,13 +26,16 @@
 //!
 //! `price_ohlcv_1m` is accepted too, for a whole-history drain (task 0286 §7b):
 //! the hourly Lambda prices at most 200 k rows an hour, which is months for a
-//! re-ingested history. Only the fill-the-zeros mode is allowed there — no
-//! `--reset-*` — and only with `--skip-snapshot`, see [`check_table`].
+//! re-ingested history. Only the fill-the-zeros mode (and `--pre-usdc-xlm-rate`)
+//! is allowed there — no `--reset-*` — and only with `--skip-snapshot`, see
+//! [`check_table`].
 
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use enrichment_worker::ch_enrich::{ChEnrichConfig, UsdResetSpec, external_window_s};
+use enrichment_worker::ch_enrich::{
+    ChEnrichConfig, PreUsdcXlmRate, UsdResetSpec, external_window_s,
+};
 use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
 use prices_clickhouse::USDC_ORACLE_EPOCH_S;
 use tracing::{info, warn};
@@ -75,7 +78,7 @@ struct Args {
     mtls_ca_path: Option<PathBuf>,
 
     /// Table to repair (e.g. `price_ohlcv_1h`). One table per run.
-    /// `price_ohlcv_1m` takes only the fill-the-zeros mode (see `check_table`).
+    /// `price_ohlcv_1m` takes no `--reset-*` (see `check_table`).
     #[arg(long)]
     table: String,
 
@@ -118,12 +121,32 @@ struct Args {
     #[arg(long, env = "PIVOT_WINDOW_S", default_value_t = 86_400)]
     pivot_window_s: u32,
 
+    /// Before 2021-02-01 only (task 0331): price XLM-quoted candles from the
+    /// promoted `method = 'external'` XLM/USD rows, and dollar-token-quoted ones
+    /// through that token's own XLM market within `--pivot-window-s`. Writes only
+    /// rows whose values differ, so a re-run is idempotent. Refused until the
+    /// series is promoted.
+    ///
+    /// Run `price_ohlcv_1h` (and 1m/15m) first: 4h, 1d, 1w and 1M are rolled up
+    /// from the priced 1h rows (Σ USD volume, last priced hour's ratio), so
+    /// `--pivot-window-s` matters only up to 1h, and a wide tier run before its
+    /// 1h writes nothing. A re-run can set priced rows back to 0: on
+    /// `price_ohlcv_1m` that needs `--allow-unprice`, elsewhere a snapshot.
+    #[arg(long, conflicts_with = "reset_quote_asset_id")]
+    pre_usdc_xlm_rate: bool,
+
+    /// With `--pre-usdc-xlm-rate` on `price_ohlcv_1m`: accept writing priced
+    /// rows back to 0 (the dry run's `reset` column), with no snapshot. Without
+    /// it a real run stops at the first such month; earlier months stay written.
+    #[arg(long, requires = "pre_usdc_xlm_rate")]
+    allow_unprice: bool,
+
     /// Re-open already-written USD values for this quote `asset_id` so the
     /// corrected tiers recompute them (task 0182). Requires
     /// `--reset-not-before`.
     ///
-    /// ⚠️ This is the only flag here that DISCARDS a computed value. Everything
-    /// else in this tool is purely additive — it fills zeros. Use it only to
+    /// ⚠️ It DISCARDS a computed value, like the 0228 mode and
+    /// `--pre-usdc-xlm-rate`; the default mode only fills zeros. Use it only to
     /// correct a *pricing* defect, where the stored number is wrong rather than
     /// missing, and only against a FREEZE-snapshotted partition.
     ///
@@ -278,7 +301,9 @@ fn validate_month(label: &str, m: u32) -> Result<(), String> {
 /// nothing, so it can run beside the Lambda (task 0286 §7b). A reset there
 /// would discard prices every other tier is rolled from, so it is refused.
 /// FREEZE is refused too: `prices_writer` cannot take it, and a 1m snapshot
-/// protects nothing in a mode that only fills zeros.
+/// protects nothing in a mode that only fills zeros. `--pre-usdc-xlm-rate` is
+/// allowed there too: it can discard a price, so the pass refuses a 1m run
+/// that would unless `--allow-unprice` is passed.
 fn check_table(
     table: &str,
     resetting: bool,
@@ -303,9 +328,44 @@ fn check_table(
     if !skip_snapshot && !dry_run {
         return Err(
             "price_ohlcv_1m needs --skip-snapshot: prices_writer cannot FREEZE, and \
-             the fill-the-zeros mode discards nothing a snapshot would protect."
+             the fill-the-zeros mode discards nothing a snapshot would protect \
+             (--pre-usdc-xlm-rate refuses to without --allow-unprice)."
                 .into(),
         );
+    }
+    Ok(())
+}
+
+/// The snapshot guard of a real run that can discard stored values: reset
+/// mode, and `--pre-usdc-xlm-rate` off `price_ohlcv_1m` (on 1m the pass guards
+/// that instead, see [`check_table`]).
+///
+/// Rollback for a bad reset IS `ATTACH PARTITION` from the shadow copy, so the
+/// snapshots must exist. They usually will not have been taken by this tool:
+/// `prices_writer` cannot FREEZE and cannot be granted it, so on prod the admin
+/// takes them out of band and `--skip-snapshot` is the *correct* flag rather
+/// than a shortcut. Refusing that combination outright would make reset mode
+/// unusable on the only cluster it exists for. So the operator must say which
+/// case they are in.
+fn check_snapshots(
+    table: &str,
+    resetting: bool,
+    pre_usdc: bool,
+    (skip_snapshot, snapshots_verified): (bool, bool),
+    dry_run: bool,
+) -> Result<(), String> {
+    let discards = resetting || (pre_usdc && table != "price_ohlcv_1m");
+    if discards && !dry_run && skip_snapshot && !snapshots_verified {
+        return Err("--skip-snapshot with --reset-quote-asset-id or \
+             --pre-usdc-xlm-rate requires --snapshots-verified: both can discard \
+             stored values, and their only \
+             rollback is ATTACH PARTITION from the frozen copy.\n\
+             If the CH admin already froze this span (runbook Step 3b — the \
+             normal prod path, since prices_writer cannot FREEZE), confirm with \
+             `ls /var/lib/clickhouse/shadow/ | grep repair_` plus a non-trivial \
+             `du`, then pass --snapshots-verified.\n\
+             If nobody has, stop: there is no rollback point."
+            .into());
     }
     Ok(())
 }
@@ -337,28 +397,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.dry_run,
     )?;
 
-    // Reset mode is the only path here that discards data, so its two footguns
-    // are refused rather than warned about.
-    if args.reset_quote_asset_id.is_some() && !args.dry_run {
-        // 1. Rollback for a bad reset IS `ATTACH PARTITION` from the shadow copy,
-        //    so the snapshots must exist. They usually will not have been taken by
-        //    this tool: `prices_writer` cannot FREEZE and cannot be granted it, so
-        //    on prod the admin takes them out of band and `--skip-snapshot` is the
-        //    *correct* flag rather than a shortcut. Refusing that combination
-        //    outright would make reset mode unusable on the only cluster it exists
-        //    for. So require the operator to say which case they are in.
-        if args.skip_snapshot && !args.snapshots_verified {
-            return Err("--skip-snapshot with --reset-quote-asset-id requires \
-                 --snapshots-verified: a reset discards stored values, and its only \
-                 rollback is ATTACH PARTITION from the frozen copy.\n\
-                 If the CH admin already froze this span (runbook Step 3b — the \
-                 normal prod path, since prices_writer cannot FREEZE), confirm with \
-                 `ls /var/lib/clickhouse/shadow/ | grep repair_` plus a non-trivial \
-                 `du`, then pass --snapshots-verified.\n\
-                 If nobody has, stop: there is no rollback point."
-                .into());
-        }
-    }
+    check_snapshots(
+        &args.table,
+        args.reset_quote_asset_id.is_some(),
+        args.pre_usdc_xlm_rate,
+        (args.skip_snapshot, args.snapshots_verified),
+        args.dry_run,
+    )?;
     // The window guards below run in dry-run mode TOO (task 0228 review WR-01):
     // the runbooks say "dry run first", and a dry run that accepts a window the
     // real run then refuses is a rehearsal of nothing. Only the snapshot guard
@@ -476,6 +521,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // clap's `requires` makes the mixed cases unreachable.
             _ => None,
         },
+        pre_usdc_xlm_rate: args.pre_usdc_xlm_rate.then_some(PreUsdcXlmRate {
+            allow_unprice: args.allow_unprice,
+        }),
     };
 
     let repair_cfg = CoarseRepairConfig {
@@ -530,7 +578,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.preflight().await?;
 
     if args.skip_snapshot && !args.dry_run && args.table == "price_ohlcv_1m" {
-        info!("snapshot disabled on price_ohlcv_1m: fill-the-zeros mode, nothing is discarded");
+        info!(
+            allow_unprice = args.allow_unprice,
+            "snapshot disabled on price_ohlcv_1m: nothing is discarded unless --allow-unprice"
+        );
     } else if args.skip_snapshot && !args.dry_run {
         warn!(
             "snapshot DISABLED (--skip-snapshot): partitions will be repaired with no FREEZE \
@@ -590,11 +641,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             m.snapshot_name.as_deref().unwrap_or("-")
         );
     }
+    if args.pre_usdc_xlm_rate {
+        println!(
+            "--pre-usdc-xlm-rate: zeros_before = rows to write, enriched = rows written, \
+             zeros_after = rows left unpriced, reset = priced rows set back to 0"
+        );
+    }
     println!(
-        "{} month(s): {} enriched, {} left at the no_reference floor{}",
+        "{} month(s): {} enriched, {} {}{}",
         summary.months.len(),
         summary.total_enriched(),
         summary.total_remaining(),
+        if args.pre_usdc_xlm_rate {
+            "left unpriced"
+        } else {
+            "left at the no_reference floor"
+        },
         if args.dry_run {
             " [DRY RUN — nothing written]"
         } else {
@@ -602,11 +664,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
+    // A real 1m run refuses the first month that would set priced rows to 0;
+    // the dry run reports the count, so say what the real run would do with it.
+    let unprice = summary.total_reset();
+    let first = summary.months.iter().find(|m| m.rows_reset > 0);
+    if let (true, true, Some(m)) = (args.pre_usdc_xlm_rate, args.dry_run, first) {
+        if args.table == "price_ohlcv_1m" {
+            if !args.allow_unprice {
+                println!(
+                    "A real run would stop at month {} ({unprice} priced row(s) in all \
+                     would be set back to 0); months before it would be written. \
+                     Pass --allow-unprice to accept.",
+                    m.month
+                );
+            }
+        } else {
+            println!(
+                "A real run would set {unprice} priced row(s) back to 0, from month {} \
+                 on; only the snapshot can restore them.",
+                m.month
+            );
+        }
+    }
+
     // The reset's own safety check, computed rather than left to the operator's
     // arithmetic. `rows_reset` > `rows_enriched` means values were discarded and
     // not recomputed — the one outcome worse than the defect being repaired.
     let (reset, enriched) = (summary.total_reset(), summary.total_enriched());
-    if reset > 0 {
+    if reset > 0 && !args.pre_usdc_xlm_rate {
         println!("{reset} row(s) re-opened by the USD reset, {enriched} recomputed");
         println!(
             "Run the damage check (runbook Appendix A, 'Extra verification') on \
@@ -653,7 +738,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_table;
+    use super::{check_snapshots, check_table};
+
+    /// (table, resetting, pre_usdc, skip_snapshot, snapshots_verified, dry_run, refused)
+    #[rustfmt::skip]
+    const SNAPSHOT_CASES: &[(&str, bool, bool, bool, bool, bool, bool)] = &[
+        ("price_ohlcv_1h", true, false, true, false, false, true),
+        ("price_ohlcv_1h", false, true, true, false, false, true),
+        ("price_ohlcv_1M", false, true, true, false, false, true),
+        ("price_ohlcv_1h", false, true, true, true, false, false),
+        ("price_ohlcv_1h", false, true, false, false, false, false),
+        ("price_ohlcv_1h", false, true, true, false, true, false),
+        ("price_ohlcv_1m", false, true, true, false, false, false),
+        ("price_ohlcv_1h", false, false, true, false, false, false),
+    ];
+
+    #[test]
+    fn a_real_run_that_can_discard_needs_a_snapshot_or_its_confirmation() {
+        for &(t, reset, pre, skip, verified, dry, refused) in SNAPSHOT_CASES {
+            let got = check_snapshots(t, reset, pre, (skip, verified), dry);
+            assert_eq!(
+                got.is_err(),
+                refused,
+                "{t} reset={reset} pre={pre} skip={skip} verified={verified} dry={dry}"
+            );
+        }
+    }
 
     #[test]
     fn coarse_tables_take_every_mode() {

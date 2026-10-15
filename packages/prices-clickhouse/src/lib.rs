@@ -247,6 +247,29 @@ pub const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6
 /// precondition 3 is the check that confirms it before the pass runs.
 pub const USDC_ORACLE_EPOCH_S: u32 = 1_773_237_600;
 
+/// 2021-02-01T00:00:00Z: before it Stellar has no USDC, so candles are priced
+/// from an imported XLM/USD rate (task 0331). A bucket edge on every tier, so
+/// `timestamp <` it means the whole bucket lies before it.
+pub const PRE_USDC_END_S: u32 = 1_612_137_600;
+
+/// `usd_rate.reference_asset` of the imported pre-2021 XLM/USD series (task
+/// 0331). Both its readers filter on it, so they read the same rows.
+pub const XLM_RATE_SOURCE: &str = "third-party";
+
+/// `prices.assets` rows of a classic dollar token of any issuer, canonical
+/// USDC/USDT included; keyed on code/issuer/contract.
+pub const DOLLAR_TOKEN_PRED: &str =
+    "contract_address = '' AND issuer_address != '' AND asset_code IN ('USD', 'USDT', 'USDC')";
+
+/// Dollar tokens that lost their peg, excluded by identity (task 0331).
+#[rustfmt::skip]
+pub const OFF_PEG_DOLLAR_TOKENS: [(&str, &str); 4] = [
+    ("USDT", "GC2PJ6J37QM3DOQ63DVGCXTRC5QOKAJUBQO2XKBXOJCWTCOCP75KWUDX"),
+    ("USD", "GD3LHBHY6NYJXETU6YO5OYI37F3X6L6C46ZWKBFBT35RBRKACDVMRF5K"),
+    ("USDT", "GC3YRTJQUXVQMG5STS7MSWVF3OF3Z5MVF6NEWZLKNQAJZX5UUFLMCFMA"),
+    ("USD", "GA5O7NTUIKYDPZSV3MNMIRFO2LCV5RJBNO7TNN7Y3MDO2IXRBSWDEO3T"),
+];
+
 /// ClickHouse client configuration, sourced from environment with local-dev
 /// defaults.
 #[derive(Debug, Clone)]
@@ -469,6 +492,14 @@ mod tests {
             expected,
             "USDC_ORACLE_EPOCH_S must be 2026-03-11T14:00:00Z (the first measured \
              oracle row for canonical USDC in prices.usd_rate on prod)"
+        );
+    }
+
+    #[test]
+    fn pre_usdc_end_is_2021_02_01t00_00_00z() {
+        assert_eq!(
+            i64::from(PRE_USDC_END_S),
+            days_from_civil(2021, 2, 1) * 86_400
         );
     }
 

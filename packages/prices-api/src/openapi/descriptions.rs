@@ -59,7 +59,10 @@ pub(super) const SCHEMAS: &[(&str, &str)] = &[
          that has no USD value: either the conversion has not caught up with the newest \
          buckets yet, or the bucket traded only against a quote asset with no USD reference. \
          `volume_base`, `volume_quote_usd` and `trade_count` are always present, so such a \
-         bucket still shows its activity.",
+         bucket still shows its activity.\n\nThe exception is native XLM before 2021-02-01 \
+         (`GET /assets/native/ohlcv`): a bucket the imported hourly XLM/USD rate covers takes \
+         its prices from that rate and its volumes from XLM's trades against dollar tokens \
+         (`method` `external`, `derived` `true`).",
     ),
     (
         "ErrorEnvelope",
@@ -347,7 +350,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          this bucket, never one carried over from an earlier one. `null` when the bucket has \
          no price — see `pf_trade_count`. Exact in USD mode — the other price fields are \
          scaled, see `derived`. In USD mode only markets quoted in USDC or XLM set it when \
-         one of them formed a price in the bucket; otherwise every market does.",
+         one of them formed a price in the bucket; otherwise every market does. On native \
+         XLM's synthesized buckets before 2021-02-01 it is the bucket's last hourly XLM/USD \
+         rate.",
     ),
     (
         "Candle",
@@ -367,7 +372,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          measured. Normally `close` is exact and the other price fields are scaled from the \
          quote-asset values with one rate per bucket, so the true USD high may have occurred \
          at a different moment than the quote-asset high. For USDC, which has no trades of \
-         its own, every price field comes from the rate and `derived` is `true`.\n\n`null` \
+         its own, every price field comes from the rate and `derived` is `true`, as it does for \
+         native XLM before 2021-02-01 where the hourly XLM/USD rate covers the bucket.\n\n`null` \
          when the price fields are `null`, and always `null` for `base_currency=XLM`.",
     ),
     (
@@ -376,7 +382,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Highest price among this bucket's price-forming trades, in `base_currency`; `null` \
          when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
          quoted in USDC or XLM set it when one of them formed a price in the bucket; \
-         otherwise every market does.",
+         otherwise every market does. On native XLM's synthesized buckets before 2021-02-01 \
+         it is the highest hourly XLM/USD rate of the bucket, an hourly average rather than \
+         a trade.",
     ),
     (
         "Candle",
@@ -384,14 +392,19 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` \
          when the bucket has no price — see `pf_trade_count`. In USD mode only markets \
          quoted in USDC or XLM set it when one of them formed a price in the bucket; \
-         otherwise every market does.",
+         otherwise every market does. On native XLM's synthesized buckets before 2021-02-01 \
+         it is the lowest hourly XLM/USD rate of the bucket, an hourly average rather than \
+         a trade.",
     ),
     (
         "Candle",
         "method",
         "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was \
          measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* \
-         `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — \
+         `external` — an imported, measured USD series supplied the rate: USDC/USD on a \
+         USDC-quoted candle; before 2021-02-01, XLM/USD on a \
+         candle quoted in XLM or in a dollar token (USD, USDT or a USDC other than \
+         Circle's), the latter converted through that token's own XLM market.\n* `oracle` — \
          a measured Reflector reading supplied the rate.\n* `traded` — priced through a \
          reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series \
          (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the \
@@ -431,7 +444,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of \
          this bucket. `null` when the bucket has no price — see `pf_trade_count`. In USD \
          mode only markets quoted in USDC or XLM set it when one of them formed a price in \
-         the bucket; otherwise every market does.",
+         the bucket; otherwise every market does. On native XLM's synthesized buckets \
+         before 2021-02-01 it is the bucket's first hourly XLM/USD rate.",
     ),
     (
         "Candle",
@@ -448,8 +462,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          traded, its `volume_base` and `trade_count` are reported, and it has NO price — \
          every price field is `null` rather than carrying a dust print. Always at most \
          `trade_count`; `null` only on the synthesized USDC self-series \
-         (`GET /assets/USDC:<issuer>/ohlcv`), which is built from rate observations and has \
-         no trades to count.",
+         (`GET /assets/USDC:<issuer>/ohlcv`) and on native XLM's synthesized buckets before \
+         2021-02-01, which are built from rate observations.",
     ),
     (
         "Candle",
@@ -459,15 +473,17 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          compares `close` against.\n\nDenominated exactly like `close` and bounded by the \
          published `low` and `high`, so the response stays self-consistent. In USD mode it \
          weighs the same markets that set those (see `/ohlcv`). `null` when the \
-         bucket has no price-forming volume, and on the synthesized USDC self-series. Never \
-         `0`.",
+         bucket has no price-forming volume, on the synthesized USDC self-series and on \
+         native XLM's synthesized buckets before 2021-02-01. Never `0`.",
     ),
     (
         "Candle",
         "quality",
-        "How confident the imported series is in that day's observation. Present only \
+        "How confident the imported series is in its observation; on a bucket built from \
+         several, the least confident of them. Present only \
          alongside `source`, i.e. only on the synthesized USDC self-series \
-         (`GET /assets/USDC:<issuer>/ohlcv`) for buckets whose `method` is `external`; \
+         (`GET /assets/USDC:<issuer>/ohlcv`) and on native XLM before 2021-02-01 \
+         (`GET /assets/native/ohlcv`), for buckets whose `method` is `external`; \
          `null` on every other asset, on the `peg` fallback, and whenever the price fields \
          are `null`.\n\n* `measured` — a real observation from the primary feed.\n* \
          `measured-disputed` — observed, but a cross-check against a second independent \
@@ -481,9 +497,10 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "source",
-        "Which outside USD series the imported rate came from: `chainlink` or `bitstamp`.\n\n\
-         Present only on the synthesized USDC self-series \
-         (`GET /assets/USDC:<issuer>/ohlcv`), and there only for buckets whose `method` is \
+        "Which outside USD series the imported rate came from: `chainlink` or `bitstamp` for \
+         USDC, `third-party` for XLM.\n\nPresent only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`) and on native XLM before 2021-02-01 \
+         (`GET /assets/native/ohlcv`), and there only for buckets whose `method` is \
          `external`. It is `null` on every other asset — not because those candles lack \
          provenance, but because the stored candles carry no column to report it from — \
          `null` on an `oracle` bucket (a poll has no outside series, even where an outranked \
@@ -499,14 +516,18 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "trade_count",
-        "Number of trades in the bucket. The documented maximum, 2^53 − 1, is the largest \
-         integer JSON carries exactly — a transport limit, not a domain one.",
+        "Number of trades in the bucket; on native XLM's synthesized buckets before \
+         2021-02-01, only XLM's trades against dollar tokens, so possibly `0`. The documented \
+         maximum, 2^53 − 1, is the largest integer JSON carries exactly — a transport limit, \
+         not a domain one.",
     ),
     (
         "Candle",
         "volume_base",
         "Volume in units of the asset — the base side of each trade, over EVERY trade in \
-         the bucket including the ones too small to form a price. It is therefore a \
+         the bucket including the ones too small to form a price (on native XLM's \
+         synthesized buckets before 2021-02-01, its trades against dollar tokens only, so \
+         possibly `0`). It is therefore a \
          complete activity figure and not a price-quality signal: `pf_trade_count` is the \
          one to read for that, and a bucket that traded only in such amounts reports its \
          volume here with no price at all.\n\nVolume is undistorted by those trades — \
@@ -518,14 +539,19 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "volume_quote_usd",
         "USD volume of the bucket, summed over the trades that have a USD value. A trade not \
          yet priced counts in `volume_base` and `trade_count` but not here, so this is the \
-         USD volume that can be accounted for, not the bucket's total restated in USD.",
+         USD volume that can be accounted for, not the bucket's total restated in USD. On \
+         native XLM's synthesized buckets before 2021-02-01 it covers XLM's trades against \
+         dollar tokens only, each hour valued at the newest XLM/USD rate of the previous \
+         24 hours.",
     ),
     (
         "Candle",
         "vwap",
         "Volume-weighted average price of the bucket, in `base_currency`, over the trades it \
          holds — including the ones too small to form a price. `pf_vwap` is the same mean \
-         with those left out. `null` when the bucket has no price.\n\nWHICH trades it \
+         with those left out. `null` when the bucket has no price. On native XLM's synthesized \
+         buckets before 2021-02-01 it is the hourly rates weighted by its dollar-token volume, \
+         or their mean without any.\n\nWHICH trades it \
          weighs depends on the denomination, so the two can differ on a bucket that holds a \
          source with no usable price. With `base_currency=XLM` it is every row of the \
          bucket, as stored. With `USD` it is every row that has a usable rate to convert it \

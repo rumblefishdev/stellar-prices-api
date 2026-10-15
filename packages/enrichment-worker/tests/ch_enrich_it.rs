@@ -9,12 +9,16 @@
 //! at the end, so they never touch `prices` and can run in parallel.
 
 use clickhouse::Client;
-use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, UsdResetSpec};
+use enrichment_worker::ch_enrich::{
+    ChEnrichConfig, ChEnrichError, ChEnrichmentPass, PreUsdcXlmRate, UsdResetSpec,
+};
 use enrichment_worker::repair::{
-    CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
+    CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, MonthRepair, run_coarse_sweep,
 };
 use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert, fetch_ids};
-use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER};
+use prices_clickhouse::{
+    PRE_USDC_END_S, USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER, XLM_RATE_SOURCE,
+};
 use std::fmt::Display;
 
 // The fixture assets. Each displays as its id, derived from its identity
@@ -159,6 +163,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         one_shot: false,
         time_window: None,
         usd_reset: None,
+        pre_usdc_xlm_rate: None,
     }
 }
 
@@ -2210,17 +2215,24 @@ fn utc_day_start(ts: u32) -> u32 {
     ts - ts % 86_400
 }
 
-/// Seed one `usd_rate` row for canonical USDC under an explicit `method`, so a
-/// test can stage BOTH series for the same bucket and prove which one wins.
-/// [`seed_external_rate`] is the `'external'` case and carries the day-start
+/// Seed one `usd_rate` row of identity `(asset_kind, asset_code, issuer_address)`
+/// and `reference_asset` under an explicit `method`, so a test can stage BOTH
+/// series for the same bucket and prove which one wins. [`seed_external_rate`]
+/// is the canonical USDC `'external'` case and carries the day-start
 /// convention note.
-async fn seed_usd_rate(client: &Client, db: &str, ts: u32, rate: f64, method: &str) {
+async fn seed_usd_rate(
+    client: &Client,
+    db: &str,
+    (kind, code, issuer, source): (&str, &str, &str, &str),
+    (ts, rate, method): (u32, f64, &str),
+    version: u64,
+) {
     client
         .query(&format!(
             "INSERT INTO {db}.usd_rate \
              (asset_kind, asset_code, issuer_address, contract_address, \
               timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
-             ('credit', 'USDC', '{USDC_ISSUER}', '', {ts}, {rate}, '{method}', '', 0, 1)"
+             ('{kind}', '{code}', '{issuer}', '', {ts}, {rate}, '{method}', '{source}', 0, {version})"
         ))
         .execute()
         .await
@@ -3185,7 +3197,8 @@ async fn a_pivot_leg_prefers_the_oracle_rate_over_the_external_rate() {
     let db = "it_enrich_0228_oracle_wins";
     let client = setup_0228_pivot(db, "price_ohlcv_1d", DEPEG_DAY).await;
     // The oracle says 0.95 at day start; the import says 0.9681 an hour LATER.
-    seed_usd_rate(&client, db, DEPEG_DAY, 0.95, "oracle").await;
+    let usdc = ("credit", "USDC", USDC_ISSUER, "");
+    seed_usd_rate(&client, db, usdc, (DEPEG_DAY, 0.95, "oracle"), 1).await;
     seed_external_rate(&client, db, DEPEG_DAY + 3_600, DEPEG_RATE).await;
 
     let mut c = cfg(db);
@@ -5702,6 +5715,442 @@ async fn the_epoch_is_measured_on_the_pass_s_own_table() {
         "on _4h the midnight epoch is refused against the 16:00 bucket, got {res:?}"
     );
 
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// --- Task 0331: pre-2021 candles priced from the hourly XLM/USD rate ---
+
+const USDX: AssetFixture = AssetFixture::new("USD", "classic", "GUSDX", "");
+/// 2020-06-01 00:00 UTC, a Monday.
+const D0331: u32 = 1_590_969_600;
+const H1: &str = "price_ohlcv_1h";
+const WIDE: [&str; 4] = [
+    "price_ohlcv_4h",
+    "price_ohlcv_1d",
+    "price_ohlcv_1w",
+    "price_ohlcv_1M",
+];
+const END: u32 = PRE_USDC_END_S;
+
+const fn h(n: u32) -> u32 {
+    D0331 + n * 3600
+}
+
+/// (ts, rate, method) of `('native','XLM','')` rows in `usd_rate`.
+type Rate = (u32, f64, &'static str);
+/// (label, table, ts, asset, quote, close, volume_base, volume_quote, close_usd, volume_quote_usd)
+#[rustfmt::skip]
+type Leg = (&'static str, &'static str, u32, AssetFixture<'static>, AssetFixture<'static>, f64, f64, f64, f64, f64);
+
+const XLM_RATE: (&str, &str, &str, &str) = ("native", "XLM", "", XLM_RATE_SOURCE);
+/// An `external` XLM row from another source, which no 0331 reader may take:
+/// at h(30) it would price the h(48) and h(53) legs.
+const OTHER_XLM_RATE: (&str, &str, &str, &str) = ("native", "XLM", "", "other-source");
+const RATES_0331: &[Rate] = &[
+    (h(10), 0.25, "external"),
+    (h(23), 0.20, "external"),
+    (h(24), 0.50, "external"),
+    (h(29), 0.40, "external"),
+    (h(11), 9.0, "external-candidate"),
+    (h(81), 0.25, "external"),
+    (END - 3600, 0.30, "external"),
+];
+
+// No dollar-quoted expectation equals par: a token is 5 XLM via USDT/XLM, 3 via
+// XLM/USDX and 4.5 where both USDT orientations pool at h(13). Wide tiers are
+// Σ of their hours' USD volume and close × the last priced hour's ratio.
+#[rustfmt::skip]
+const LEGS_0331: &[Leg] = &[
+    ("FOO/XLM 1h", H1, h(10), FOO, XLM, 10.0, 3.0, 30.0, 2.5, 7.5),
+    ("FOO/XLM ignores the candidate's 9.0", H1, h(11), FOO, XLM, 10.0, 3.0, 30.0, 2.5, 7.5),
+    ("FOO/XLM 23:00 takes 23:00, not midnight", H1, h(23), FOO, XLM, 10.0, 3.0, 30.0, 2.0, 6.0),
+    ("FOO/XLM, rate 20 h old", H1, h(48), FOO, XLM, 10.0, 3.0, 30.0, 4.0, 12.0),
+    ("FOO/XLM, newest rate 25 h old", H1, h(53), FOO, XLM, 10.0, 3.0, 30.0, 0.0, 0.0),
+    ("FOO/XLM, rate 2 h old", H1, h(82), FOO, XLM, 10.0, 3.0, 30.0, 2.5, 7.5),
+    ("USDT/XLM", H1, h(10), USDT, XLM, 5.0, 10.0, 50.0, 1.25, 12.5),
+    ("XLM/USDX", H1, h(10), XLM, USDX, 0.4, 30.0, 10.0, 0.3, 7.5),
+    ("FOO/USDT via USDT/XLM", H1, h(10), FOO, USDT, 2.0, 3.0, 6.0, 2.5, 7.5),
+    ("FOO/USDX via XLM/USDX", H1, h(10), FOO, USDX, 2.0, 3.0, 6.0, 1.5, 4.5),
+    ("FOO/USDT, market 2 h old", H1, h(12), FOO, USDT, 2.0, 3.0, 6.0, 2.5, 7.5),
+    ("USDT/XLM pooled", H1, h(13), USDT, XLM, 5.0, 10.0, 50.0, 1.25, 12.5),
+    ("XLM/USDT pooled: XLM's own USD candle", H1, h(13), XLM, USDT, 0.24, 40.0, 10.0, 0.27, 11.25),
+    ("FOO/USDT via the pooled market", H1, h(13), FOO, USDT, 2.0, 3.0, 6.0, 2.25, 6.75),
+    ("FOO/USDT, market 69 h old", H1, h(82), FOO, USDT, 2.0, 3.0, 6.0, 0.0, 0.0),
+    ("FOO/XLM 2021-01-31 23:00", H1, END - 3600, FOO, XLM, 10.0, 3.0, 30.0, 3.0, 9.0),
+    ("FOO/XLM at 2021-02-01", H1, END, FOO, XLM, 10.0, 3.0, 30.0, 0.0, 0.0),
+    ("XLM/USDC (canonical)", H1, h(10), XLM, USDC, 0.25, 40.0, 10.0, 0.0, 0.0),
+    ("FOO/USDC (canonical)", H1, h(10), FOO, USDC, 4.0, 1.0, 4.0, 0.0, 0.0),
+    ("4h FOO/XLM", WIDE[0], h(8), FOO, XLM, 10.0, 6.0, 60.0, 2.5, 15.0),
+    ("1d FOO/XLM, hours at 0.25 and 0.20", WIDE[1], D0331, FOO, XLM, 10.0, 9.0, 90.0, 2.0, 21.0),
+    ("1d FOO/XLM, last hour unpriced", WIDE[1], h(48), FOO, XLM, 10.0, 6.0, 60.0, 4.0, 12.0),
+    ("1d FOO/USDT", WIDE[1], D0331, FOO, USDT, 2.0, 9.0, 18.0, 2.25, 21.75),
+    ("1w FOO/XLM, hours at three rates", WIDE[2], D0331, FOO, XLM, 10.0, 18.0, 180.0, 2.5, 40.5),
+    ("1w FOO/XLM ending at 2021-02-01", WIDE[2], END - 7 * 86_400, FOO, XLM, 10.0, 3.0, 30.0, 3.0, 9.0),
+    ("1M FOO/XLM 2021-01", WIDE[3], 1_609_459_200, FOO, XLM, 10.0, 3.0, 30.0, 3.0, 9.0),
+    ("1w FOO/XLM at 2021-02-01", WIDE[2], END, FOO, XLM, 10.0, 3.0, 30.0, 0.0, 0.0),
+];
+
+async fn seed_leg(client: &Client, db: &str, leg: &Leg) {
+    let (_, table, ts, asset, quote, close, vb, vq, _, _) = *leg;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.{table} \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES ({ts}, {asset}, {quote}, 'sdex', {close}, {close}, {close}, {close}, \
+              {vb}, {vq}, 0, 0, {close}, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (close_usd, volume_quote_usd, version) of a leg, read FINAL.
+async fn usd_of(client: &Client, db: &str, leg: &Leg) -> (f64, f64, u64) {
+    let (_, table, ts, asset, quote, ..) = *leg;
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), toFloat64(volume_quote_usd), version \
+             FROM {db}.{table} FINAL \
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = {ts}"
+        ))
+        .fetch_one::<(f64, f64, u64)>()
+        .await
+        .unwrap()
+}
+
+async fn setup_0331(db: &str, rates: &[Rate], legs: &[Leg]) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO, USDX]))
+        .execute()
+        .await
+        .unwrap();
+    for r in rates {
+        seed_usd_rate(&client, db, XLM_RATE, *r, 1).await;
+    }
+    seed_usd_rate(&client, db, OTHER_XLM_RATE, (h(30), 9.0, "external"), 1).await;
+    for l in legs {
+        seed_leg(&client, db, l).await;
+    }
+    client
+}
+
+fn cfg_0331(db: &str, table: &str) -> ChEnrichConfig {
+    ChEnrichConfig {
+        table: table.to_string(),
+        one_shot: true,
+        pre_usdc_xlm_rate: Some(PreUsdcXlmRate::default()),
+        ..cfg(db)
+    }
+}
+
+fn written_in(table: &str) -> u64 {
+    LEGS_0331
+        .iter()
+        .filter(|l| l.1 == table && l.8 != 0.0)
+        .count() as u64
+}
+
+async fn assert_legs<'a>(
+    client: &Client,
+    db: &str,
+    legs: impl IntoIterator<Item = &'a Leg>,
+    scale: impl Fn(&str) -> f64,
+) -> Vec<u64> {
+    let mut versions = Vec::new();
+    for leg in legs {
+        let (cu, vqu, v) = usd_of(client, db, leg).await;
+        let (want_cu, want_vqu) = (leg.8 * scale(leg.0), leg.9 * scale(leg.0));
+        assert!(
+            (cu - want_cu).abs() < 1e-9 && (vqu - want_vqu).abs() < 1e-9,
+            "{}: got ({cu}, {vqu}), want ({want_cu}, {want_vqu})",
+            leg.0
+        );
+        versions.push(v);
+    }
+    versions
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_prices_xlm_and_dollar_quoted_legs() {
+    let db = "test_ch_enrich_pre_usdc_prices";
+    let client = setup_0331(db, RATES_0331, LEGS_0331).await;
+    let run = async |table: &str| {
+        let pass = ChEnrichmentPass::new(cfg_0331(db, table));
+        pass.run().await.unwrap().rows_enriched
+    };
+    assert_eq!(
+        run(WIDE[1]).await,
+        0,
+        "a wide tier before its 1h writes nothing"
+    );
+    for table in std::iter::once(H1).chain(WIDE) {
+        assert_eq!(run(table).await, written_in(table), "{table}");
+    }
+    let versions = assert_legs(&client, db, LEGS_0331, |_| 1.0).await;
+    // Only written rows bump their version; unreachable and out-of-scope ones stay at 1.
+    let want: Vec<u64> = LEGS_0331
+        .iter()
+        .map(|l| 1 + u64::from(l.8 != 0.0))
+        .collect();
+    assert_eq!(versions, want);
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_rewrites_only_values_that_differ() {
+    let db = "test_ch_enrich_pre_usdc_rewrite";
+    let client = setup_0331(db, RATES_0331, LEGS_0331).await;
+    let run = async |pivot_window_s| {
+        let pass = ChEnrichmentPass::new(ChEnrichConfig {
+            pivot_window_s,
+            ..cfg_0331(db, H1)
+        });
+        let stats = pass.run().await.unwrap();
+        (stats.rows_enriched, stats.rows_reset)
+    };
+    let h1 = || LEGS_0331.iter().filter(|l| l.1 == H1);
+    assert_eq!(run(86_400).await, (written_in(H1), 0));
+    let first = assert_legs(&client, db, h1(), |_| 1.0).await;
+
+    assert_eq!(
+        run(86_400).await,
+        (0, 0),
+        "a re-run with the same rate writes nothing"
+    );
+    assert_eq!(
+        assert_legs(&client, db, h1(), |_| 1.0).await,
+        first,
+        "and bumps no version"
+    );
+
+    // A corrected h(10) rate re-prices exactly the priced 1h legs of h(10)..h(13).
+    seed_usd_rate(&client, db, XLM_RATE, (h(10), 0.5, "external"), 2).await;
+    let on_h10: Vec<&str> = h1()
+        .filter(|l| (h(10)..=h(13)).contains(&l.2) && l.8 != 0.0)
+        .map(|l| l.0)
+        .collect();
+    assert_eq!(run(86_400).await, (on_h10.len() as u64, 0));
+    let doubled = |l: &str| if on_h10.contains(&l) { 2.0 } else { 1.0 };
+    assert_legs(&client, db, h1(), doubled).await;
+
+    // A 1 h window can no longer reach the 2 h old USDT market: written back to 0.
+    assert_eq!(run(3600).await, (1, 1));
+    let narrowed = |l: &str| {
+        if l == "FOO/USDT, market 2 h old" {
+            0.0
+        } else {
+            doubled(l)
+        }
+    };
+    assert_legs(&client, db, h1(), narrowed).await;
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_repair_refuses_unpromoted_rates_and_previews_exactly() {
+    let driver = |client: &Client, db: &str, dry_run, snapshot| {
+        CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich: cfg_0331(db, H1),
+                start_month: 202_001,
+                end_month: 202_103,
+                snapshot,
+                dry_run,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+    };
+    let refused = |res: &Result<_, ChEnrichError>, why: &str| matches!(res, Err(ChEnrichError::PreUsdcXlmRateRefused(m)) if m.contains(why));
+    // (i) Only a staged row: refused before any write, in a dry run too.
+    let db = "test_ch_enrich_pre_usdc_refuse";
+    let client = setup_0331(db, &[(h(10), 0.25, "external-candidate")], &LEGS_0331[..1]).await;
+    for dry_run in [true, false] {
+        let res = driver(&client, db, dry_run, false).run().await.map(|_| ());
+        assert!(refused(&res, "promote"), "{res:?}");
+    }
+    assert_eq!(usd_of(&client, db, &LEGS_0331[0]).await.2, 1);
+    // (ii) Never combined with a reset.
+    let spec = UsdResetSpec {
+        quote_asset_id: 1,
+        not_before: 1,
+        not_after: None,
+        require_external_rate: false,
+        require_pivot_usdc_rate: false,
+    };
+    let res = ChEnrichmentPass::new(ChEnrichConfig {
+        usd_reset: Some(spec),
+        ..cfg_0331(db, H1)
+    })
+    .assert_reset_is_admissible()
+    .await;
+    assert!(refused(&res, "--reset-*"), "{res:?}");
+    // (iii) Native XLM does not resolve.
+    client
+        .query(&format!("TRUNCATE TABLE {db}.assets"))
+        .execute()
+        .await
+        .unwrap();
+    let res = driver(&client, db, true, false).run().await.map(|_| ());
+    assert!(refused(&res, "native XLM"), "{res:?}");
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+
+    // (iv) The dry run reports exactly what the real run then writes; a month
+    // with nothing to write is skipped, FREEZE included.
+    let db = "test_ch_enrich_pre_usdc_preview";
+    let client = setup_0331(db, RATES_0331, LEGS_0331).await;
+    // (month, to write / written, left unpriced, set back to 0, frozen)
+    let months = async |dry_run, snapshot| {
+        let summary = driver(&client, db, dry_run, snapshot).run().await.unwrap();
+        let n = |m: &MonthRepair| {
+            if dry_run {
+                m.zeros_before
+            } else {
+                m.rows_enriched
+            }
+        };
+        let row = |m: &MonthRepair| {
+            let frozen = m.snapshot_name.is_some();
+            (m.month, n(m), m.zeros_after, m.rows_reset, frozen)
+        };
+        summary.months.iter().map(row).collect::<Vec<_>>()
+    };
+    let want = [(202_006, 13, 2, 0, false), (202_101, 1, 0, 0, false)];
+    assert_eq!(months(true, false).await, want);
+    assert_eq!(
+        usd_of(&client, db, &LEGS_0331[0]).await.2,
+        1,
+        "the dry run wrote nothing"
+    );
+    assert_eq!(months(false, false).await, want);
+    let rerun = [(202_006, 0, 2, 0, false), (202_101, 0, 0, 0, false)];
+    assert_eq!(months(false, true).await, rerun);
+
+    // (v) On 1m a run that would set a priced row back to 0 needs allow_unprice.
+    #[rustfmt::skip]
+    let legs: &[Leg] = &[
+        ("USDT/XLM", "price_ohlcv_1m", h(10), USDT, XLM, 5.0, 10.0, 50.0, 1.25, 12.5),
+        ("FOO/USDT, market 2 h old", "price_ohlcv_1m", h(12), FOO, USDT, 2.0, 3.0, 6.0, 2.5, 7.5),
+    ];
+    for l in legs {
+        seed_leg(&client, db, l).await;
+    }
+    let run = async |pivot_window_s, allow_unprice| {
+        ChEnrichmentPass::new(ChEnrichConfig {
+            pivot_window_s,
+            pre_usdc_xlm_rate: Some(PreUsdcXlmRate { allow_unprice }),
+            ..cfg_0331(db, "price_ohlcv_1m")
+        })
+        .run()
+        .await
+        .map(|s| (s.rows_enriched, s.rows_reset))
+    };
+    assert_eq!(run(86_400, false).await.unwrap(), (2, 0));
+    let res = run(3600, false).await.map(|_| ());
+    assert!(refused(&res, "--allow-unprice"), "{res:?}");
+    assert_legs(&client, db, legs, |_| 1.0).await;
+    assert_eq!(run(3600, true).await.unwrap(), (1, 1));
+    assert_legs(&client, db, &legs[..1], |_| 1.0).await;
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_repair_reaches_across_a_month_edge() {
+    let db = "test_ch_enrich_pre_usdc_month_edge";
+    let day = |n: u32| D0331 + n * 86_400;
+    // 2020-06-29 is a Monday: its week runs into July.
+    let (week, jun30, jul1, jul2) = (day(28), day(29), day(30), day(31));
+    let rates: &[Rate] = &[
+        (jun30 + 10 * 3600, 0.25, "external"),
+        (jul1, 0.30, "external"),
+        (jul2 + 10 * 3600, 0.20, "external"),
+    ];
+    #[rustfmt::skip]
+    let legs: &[Leg] = &[
+        ("USDT/XLM 06-30 20:00", H1, jun30 + 20 * 3600, USDT, XLM, 5.0, 10.0, 50.0, 1.25, 12.5),
+        ("FOO/USDT 07-01 via June's market", H1, jul1, FOO, USDT, 2.0, 3.0, 6.0, 3.0, 9.0),
+        ("FOO/XLM 06-30 10:00", H1, jun30 + 10 * 3600, FOO, XLM, 10.0, 3.0, 30.0, 2.5, 7.5),
+        ("FOO/XLM 07-02 10:00", H1, jul2 + 10 * 3600, FOO, XLM, 10.0, 3.0, 30.0, 2.0, 6.0),
+        ("1w FOO/XLM from 06-29 rolls up July's hour", WIDE[2], week, FOO, XLM, 10.0, 6.0, 60.0, 2.0, 13.5),
+    ];
+    let client = setup_0331(db, rates, legs).await;
+    for table in [H1, WIDE[2]] {
+        CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich: cfg_0331(db, table),
+                start_month: 202_006,
+                end_month: 202_007,
+                snapshot: false,
+                dry_run: false,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+        .run()
+        .await
+        .unwrap();
+    }
+    assert_legs(&client, db, legs, |_| 1.0).await;
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A wide tier's USD volume is a Σ of its hours; past Decimal(38, 14) it is
+/// written as 0, never as the sum wrapped negative (three hours of 6e23 do).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn pre_usdc_xlm_rate_rollup_volume_never_wraps() {
+    let db = "test_ch_enrich_pre_usdc_rollup_overflow";
+    #[rustfmt::skip]
+    let day: Leg = ("1d FOO/XLM over three huge hours", WIDE[1], D0331, FOO, XLM, 10.0, 9.0, 90.0, 2.5, 0.0);
+    let client = setup_0331(db, RATES_0331, &[day]).await;
+    for ts in [h(10), h(11), h(12)] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{H1} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+                 VALUES ({ts}, {FOO}, {XLM}, 'sdex', 10, 10, 10, 10, 3, 30, \
+                  '600000000000000000000000', 2.5, 10, 1, 1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+    let pass = ChEnrichmentPass::new(cfg_0331(db, WIDE[1]));
+    assert_eq!(pass.run().await.unwrap().rows_enriched, 1);
+    assert_legs(&client, db, &[day], |_| 1.0).await;
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()
