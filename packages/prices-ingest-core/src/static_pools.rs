@@ -18,12 +18,23 @@ use crate::soroban::Registries;
 ///   issuer, with wasm `8abc28913035c07411ed5d134e6bfeab4723d97ddd4d1a22a0605d35c94d1a36`.
 ///   It has no factory and emits no init / new-pool event (task 0300).
 ///
-/// Its sister `CB3A6LUP…` (same wasm) is deliberately absent: it has emitted
-/// no event, ever.
-pub const STATIC_POOLS: &[(&str, Venue)] = &[(
-    "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM",
-    Venue::Comet,
-)];
+/// - `CASYAKK3…UMIHE` — Blend v2.1's Comet BLND/USDC pool, listed in
+///   `blend-capital/docs-v2` `mainnet-deployments.md`. Deployed 2026-09-30
+///   with wasm `d735c3395f59510172cf5cf838823a1389b97cfec6bf24e580e9bd77d2b3e687`,
+///   CometDEX release v1.1.0, which rejects self-swaps (task 0334).
+///
+/// Its sister `CB3A6LUP…` (same wasm as `CAS3FL6T…`) is deliberately absent:
+/// it has emitted no event, ever.
+pub const STATIC_POOLS: &[(&str, Venue)] = &[
+    (
+        "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM",
+        Venue::Comet,
+    ),
+    (
+        "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE",
+        Venue::Comet,
+    ),
+];
 
 impl Registries {
     /// Route every [`STATIC_POOLS`] entry to its venue. The committed list
@@ -59,10 +70,14 @@ mod tests {
     use crate::registry_io::PoolRegistryRow;
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+    const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
 
     #[test]
-    fn the_list_holds_exactly_the_comet_pool() {
-        assert_eq!(STATIC_POOLS, &[(COMET, Venue::Comet)]);
+    fn the_list_holds_exactly_the_two_comet_pools() {
+        assert_eq!(
+            STATIC_POOLS,
+            &[(COMET, Venue::Comet), (COMET_V1_1, Venue::Comet)]
+        );
     }
 
     #[test]
@@ -79,28 +94,29 @@ mod tests {
     fn merging_routes_the_pools_and_touches_nothing_else() {
         let mut reg = Registries::new();
         reg.merge_static_pools();
-        assert_eq!(reg.venue.len(), 1);
+        assert_eq!(reg.venue.len(), 2);
         assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
+        assert_eq!(reg.venue.get(COMET_V1_1), Some(&Venue::Comet));
         assert_eq!(reg.pool_count(), 0, "no pair or phoenix entry");
 
         reg.merge_static_pools();
-        assert_eq!(reg.venue.len(), 1, "idempotent");
+        assert_eq!(reg.venue.len(), 2, "idempotent");
     }
 
     #[test]
-    fn a_merged_pool_flattens_to_one_venue_only_row() {
+    fn each_merged_pool_flattens_to_one_venue_only_row() {
         let mut reg = Registries::new();
         reg.merge_static_pools();
-        assert_eq!(
-            reg.to_pool_rows(),
-            vec![PoolRegistryRow {
-                contract_id: COMET.to_string(),
-                venue: "comet".to_string(),
-                token0: String::new(),
-                token1: String::new(),
-                pool_type: 0,
-                wasm_hash: String::new(),
-            }]
-        );
+        let mut rows = reg.to_pool_rows();
+        rows.sort_by(|a, b| a.contract_id.cmp(&b.contract_id));
+        let row = |id: &str| PoolRegistryRow {
+            contract_id: id.to_string(),
+            venue: "comet".to_string(),
+            token0: String::new(),
+            token1: String::new(),
+            pool_type: 0,
+            wasm_hash: String::new(),
+        };
+        assert_eq!(rows, vec![row(COMET), row(COMET_V1_1)]);
     }
 }
