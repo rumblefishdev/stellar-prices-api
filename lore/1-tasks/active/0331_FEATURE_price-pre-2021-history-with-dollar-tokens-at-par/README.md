@@ -13,6 +13,17 @@ links:
   - "../../../../packages/prices-clickhouse/schema/current.sql"
   - "../../../../docs/scf/milestone-3-evidence.md"
 history:
+  - date: "2026-10-16"
+    status: active
+    who: akot
+    note: >
+      History run done (Plan step 4). Backup repair_0331_bak_* of
+      201802–202101, source = backup on six tiers. coarse-repair
+      --pre-usdc-xlm-rate over seven tiers wrote exactly what each dry
+      run listed, with reset 0 everywhere (1h 794,672; 1m 4,971,301; 1d
+      114,117). No insert into 202102 or later. 97 % of what stays
+      unpriced is quoted in other assets with no two-hop path. The
+      Bitstamp tolerance is still open.
   - date: "2026-10-15"
     status: active
     who: akot
@@ -178,17 +189,93 @@ Anyone can issue a token called `USD`, so "every dollar token" needs these:
    a time on the cluster shared with the block explorer.
 5. Spot-check against Bitstamp. Then the M3 reply and evidence.
 
+Steps 1–4 are done. The API went out and the rate was promoted on 2026-10-15
+(version 1791990002, 25,551 `external` rows). The history run was 2026-10-16.
+
+## Rollout of the history run (2026-10-16)
+
+**Order and preconditions.** The 0286 1m drain finished on 2026-10-15 at
+14:27 UTC, and 0286's after-checks (A6) passed on 2026-10-16, both recorded
+on 0286.
+
+**Backup.** Partitions 201802–202101 of 15m, 1h, 4h, 1d, 1w and 1M were
+copied into `prices.repair_0331_bak_<tier>` as `dev_shared`, with
+`ATTACH PARTITION … FROM`. Each table holds 36 partitions, with source
+equal to backup on every tier: 2,302,390 / 1,043,707 / 454,131 / 143,771 /
+36,674 / 13,563 rows. Rollback is
+`REPLACE PARTITION <p> FROM prices.repair_0331_bak_<tier>`.
+
+**Run.** `coarse-repair --pre-usdc-xlm-rate --start-month 201802
+--end-month 202101`, from Adam's laptop as `prices_writer`, 08:34–~09:05
+UTC. Each tier had a dry run first, and a gate stopped the chain on any
+`reset` > 0 or any month ≥ 202102. Tier order: 1h → 15m → 1m (`--skip-snapshot`)
+→ 4h → 1d → 1w → 1M (`--skip-snapshot --snapshots-verified`).
+
+| Tier | Written | Left unpriced | Reset |
+| --- | ---: | ---: | ---: |
+| 1h | 794,672 | 3,351 | 0 |
+| 15m | 1,655,500 | 8,545 | 0 |
+| 1m | 4,971,301 | 25,553 | 0 |
+| 4h | 357,495 | 1,284 | 0 |
+| 1d | 114,117 | 383 | 0 |
+| 1w | 27,770 | 55 | 0 |
+| 1M | 9,303 | 16 | 0 |
+
+- Every tier wrote exactly what its dry run listed.
+- On 1h, 3,005 of the unpriced rows are 201802 hours before the rate starts
+  (task 0333). The other 346 are spread over 2018–2021.
+- `system.part_log` shows new parts only in partitions 201802–202101, with
+  row counts equal to the table above, and none in 202102–202508.
+
+**What is still unpriced, and why.** Measured on 1d rows with volume and a
+price, 2018-01-01 → 2021-01-31, after the run.
+
+| Year | Rows priced |
+| --- | ---: |
+| 2018 | 74.8 % |
+| 2019 | 77.7 % |
+| 2020 | 81.9 % |
+| 2021-01 | 81.8 % |
+
+Of the 30,054 rows still unpriced:
+
+| Cause | Rows |
+| --- | ---: |
+| Quoted in an asset other than XLM or a dollar token (330 quotes, 275 bases) | 29,328 |
+| XLM-quoted before the rate (task 0333) | 579 |
+| Dollar-token quote with no XLM market within 24 h | 147 |
+
+- **No two-hop pricing.** The largest group needs a second step, quote →
+  XLM → USD, which the pipeline does not have on any date. The same pairs
+  are unpriced after 2021 too.
+- **The top quotes have XLM markets.** Those quotes are XCN, HKDT, CMS,
+  NGNT, LTC, ETH, BTC, XRP and CNY. Most of them have an XLM market on
+  450–1,070 of the 1,080 days.
+
+**XLM-quoted rows, implied XLM/USD.** Median per year 0.229 / 0.083 / 0.073
+(2018 / 2019 / 2020). The 2020 minimum is 0.031, in March 2020.
+
+**Bitstamp, after the run.** The OHLC endpoint returned data for one of
+five dates tried; the other four returned 404. That date was 2020-11-24,
+where XLM/USDT 1d `close_usd` is 0.19589 and Bitstamp's close is 0.19589.
+Agreement over the whole range was measured on the rate before deploy (AC
+below).
+
 ## Acceptance Criteria
 
 - [x] Pre-run report in `notes/`, read by Marek or Adam
 - [x] Codes, source and label decided and recorded here (Decisions 5–11)
-- [ ] Native XLM's daily USD candles priced on every day the rate covers
+- [x] Native XLM's daily USD candles priced on every day the rate covers
       (2018-02-16 → 2021-01-31). Candles quoted in XLM priced wherever the rate
       covers them; candles quoted in a dollar token also need the token's XLM market
       within 24 h. The remaining rows explained. Measured on prod before deploy
       (2026-10-15): 1081 of 1081 days; 794,672 of 814,269 in-scope 1h rows, the rest
       before the rate (task 0333) or 358 dollar-quoted rows with no token market
+      ✅ 2026-10-16. The native series has been live since 2026-10-15 on 1081 of
+      1081 days. The history run priced 794,672 1h rows, as measured. The rows
+      left are explained in "Rollout of the history run".
 - [ ] Spot-check against Bitstamp XLM/USD within an agreed tolerance (measured before
       deploy: median 0.30 %, p95 1.76 %, without 2020-05-28 → 07-15 where Bitstamp
-      printed a flat stale price)
-- [ ] Rows from 2021-02-01 on unchanged
+      printed a flat stale price). The tolerance is still to agree with Marek.
+- [x] Rows from 2021-02-01 on unchanged. ✅ 2026-10-16: the run listed no month
+      ≥ 202102, and `system.part_log` shows no insert into 202102–202508.
