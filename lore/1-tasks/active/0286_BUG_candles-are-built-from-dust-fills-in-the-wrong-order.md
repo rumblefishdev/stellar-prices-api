@@ -197,6 +197,16 @@ history:
       finished" need two readings, because the frontier gauge skips months
       still marked exhausted from before the re-ingest. The criterion above
       now matches.
+  - date: "2026-10-16"
+    status: active
+    who: akot
+    note: >
+      1m drain on fishuser-hero finished 2026-10-15 14:27 UTC (202608).
+      After-checks run read-only: 1 802 reachable 1m zeros, all USDT
+      pivot-window residue; post_run_0228_it 2/2; no USDT peg (0212);
+      no carried product on 5 tiers (0207); seven dust days within 5 %
+      of Bitstamp; 2 round-price XLM/USDC buckets on 15m/1h, not dust,
+      awaiting decision. The frontier gauge (49) is a recorded deviation.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -911,6 +921,101 @@ stays DISABLED until M3 completes (decided 2026-09-14).
 **Rough end:** history rebuilt by mid-October, provided 0300 lands before
 the loop reaches 202405.
 
+### Phase 3 — after-checks (2026-10-16)
+
+Runbook §7b-2 (a)(b), §7c, §7e, §7e-2, §7f, §8.3 and §8.4, run read-only on
+prod on 2026-10-16 ~08:00–09:30 UTC. Asset ids by identity: XLM
+`5209214538714742248`, USDC `1368471977071604712`, USDT
+`11430142929638344312`.
+
+**The 1m drain on fishuser-hero is finished.** Its last batch ran on
+2026-10-15 at 14:27:10 UTC, on 202608. That month is `END`, two months
+back; 202609 on belongs to the live sweep. `system.query_log` shows
+~415 M rows written from 10-15 02:00 with 0 exceptions. Since 14:27 only
+the live ingest and the hourly Lambda write to `price_ohlcv_1m`.
+
+**§7b-2 (a)/(b) cannot pass as written, so the drain was measured
+directly.**
+
+- `EnrichmentFrontierMonthsPending` reads 49. It went 52 → 49 over 48 h,
+  not one month per hour.
+- 45 months, 202212–202608, have no row in `prices.enrichment_frontier`.
+  202103 and 202209–202211 are `pending`.
+- The Lambda takes 202103 first every hour and leaves it `pending`, with
+  81 112 zeros, none of them reachable (below). Why is not investigated.
+
+In its place, runbook ③'s `coarse_zeros` columns were computed on
+`price_ohlcv_1m FINAL`, one partition per query, over 201511–202608
+(130 months):
+
+| zero_usd | no_volume | no_price | other_quote | before_reference | reachable_left |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 245 112 743 | 0 | 27 658 212 | 212 555 564 | 4 897 165 | **1 802** |
+
+Every one of the 1 802 is USDT-quoted. Each sits more than 24 h after the
+last USDT/USDC candle, which is the pivot-window residue of §7b-2 ⑤:
+
+| Month | Rows | When | USDT/USDC gap |
+| --- | ---: | --- | --- |
+| 202102 | 1 787 | 02-08 → 02-14 | silent from 02-09 15:35 to 02-12 01:09 |
+| 202304 / 202305 / 202306 | 6 / 1 / 8 | one day each | 24 h 3 min to ~25 h |
+
+**§7c — `post_run_0228_it`: green, 2 of 2.** Run with
+`POST_RUN_0228_VERSION_BEFORE_1W=45340987003` and `_1M=1407435801128`,
+both captured on fishuser-hero on 2026-10-13 before `finish`.
+
+**§7e — USDT peg: none.** The runbook's `peg_written` (rate ≥ 0.9) cannot
+tell the peg from the pivot before the depeg: USDT/USDC traded at
+0.98–1.00 from 2021-02 to 2022-05. Peg was therefore counted as
+`close_usd = close` exactly, per year:
+
+| Tier | Years | `peg_exact` | Rate < 0.5 |
+| --- | --- | ---: | --- |
+| 1m | 2023–2026 | 0 | every priced row (2023: 77 000 of 77 000) |
+| 1m | 2021–2022 | 6 872 | — |
+| 1h | 2023–2026 | 0 | every priced row (2023: 30 685 of 30 685) |
+| 1h | 2021–2022 | 988 | — |
+
+All 988 on 1h fall in 2021-03 … 2022-05. In 960 of them, USDT/USDC's 1h
+close in the same hour is exactly 1.0, so they are measured, not pegged.
+Priced USDT-quoted rows start at 2021-02-07 19:42, the first USDT/USDC
+candle.
+
+**§7e-2 — carried product: no rows** on 1h, 4h, 1d, 1w or 1M, XLM and USDT
+legs. Before the re-ingest there were 1 757.
+
+**§7f — nothing to start.** All six `mv_reconcile_*` read `Scheduled` and
+refreshed at 08:00 UTC.
+
+**§8.3 — the seven dust days are within 5 % of Bitstamp XLM/USD (1d
+close).**
+
+| Day | Source | Close | Bitstamp | Deviation |
+| --- | --- | ---: | ---: | ---: |
+| 2021-09-05 | sdex | 0.39600 | 0.39803 | −0.51 % |
+| 2021-12-28 | sdex | 0.27520 | 0.27500 | +0.07 % |
+| 2022-01-11 | sdex | 0.26252 | 0.26314 | −0.23 % |
+| 2023-03-11 | sdex | 0.08220 | 0.07936 | +3.58 % |
+| 2023-03-15 | sdex | 0.08382 | 0.08399 | −0.21 % |
+| 2026-02-09 | four sources | 0.15956–0.15987 | 0.1595 | +0.03 to +0.23 % |
+| 2026-04-02 | five sources | 0.16254–0.16331 | 0.16295 | −0.25 to +0.22 % |
+
+**§8.4 — two buckets, not zero; neither is quantisation.** The check
+applies 0278's definition to XLM/USDC: a close that is an exact `n/d`
+with `d ≤ 200`, more than 5 % off the bucket VWAP. 4h, 1d and 1w hold 0;
+15m and 1h hold one each:
+
+- **1h 2023-07-13 17:00, sdex: close 0.125 (1/8).** VWAP 0.1188. The bucket
+  holds 4 544 price-forming fills and 4.4 M XLM, and Bitstamp's range that
+  hour was 0.1137–0.1425. It is a real price in a fast hour that happens to
+  be round.
+- **15m 2026-03-09 10:00, aquarius: close 0.128 (16/125).** VWAP 0.1499. The
+  bucket holds 11 fills and 48 k XLM. Bitstamp was 0.1496–0.1501, so this
+  is an off-market pool price, 14.6 % below, not stroop dust. Whether
+  anything was priced from it is not checked.
+
+Whether these two count as explained is Adam's decision.
+
 ## Out of scope
 
 - D9, the cross-source rule on the read path (median instead of largest
@@ -1019,6 +1124,9 @@ Phase 3:
       85 699 / 30 064 / 10 938 on 15m / 1h / 4h / 1d / 1w) is zero after the
       re-ingest and pre-roll. [[0266]] closed into this criterion (2026-09-24,
       [[0314]]) — it is that task's only remaining check.
+      2026-10-16: the seven days are within 5 % (worst +3.58 %). Quantised
+      buckets: 1 on 15m, 1 on 1h, 0 on 4h/1d/1w. Neither is dust; awaiting
+      Adam's decision ("Phase 3 — after-checks").
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
@@ -1032,6 +1140,11 @@ Phase 3:
         non-`exhausted` or swept before `T7` (the last §4e re-ingest's end).
         The gauge alone reads 0 for a re-ingested month still marked
         `exhausted`.
+        2026-10-16: the drain finished 10-15 14:27 UTC, after the coarse
+        re-price, which the runbook allows. Neither reading passes: the
+        gauge is 49 and 45 months have no frontier row. A direct count on
+        1m leaves 1 802 reachable zeros, all explained ("Phase 3 —
+        after-checks"). Recorded as a known deviation.
   - [ ] Dry run recorded for all six coarse tables. Every table lists months
         up to END (two months back), and none reports 0 months.
   - [ ] `coarse-repair` run in plain mode (no `--reset-*`) on `price_ohlcv_15m`,
@@ -1042,18 +1155,22 @@ Phase 3:
         `reachable_left` ~0 (any remainder explained through the drill-down);
         `before_reference`, `no_price` and `no_volume` unchanged; `other_quote`
         not higher than the baseline.
-  - [ ] `post_run_0228_it` green after this step.
-- [ ] No USDT-quoted `price_ohlcv_1m` row carries the $1 peg after the
+  - [x] `post_run_0228_it` green after this step. ✅ 2026-10-16, 2 of 2.
+- [x] No USDT-quoted `price_ohlcv_1m` row carries the $1 peg after the
       re-enrichment ([[0212]]'s query: `peg_written = 0`, `pivot_written > 0`,
       measured on 1m and on one coarse tier) — the re-ingest replaces the
       1.56 M rows 0172/0182 never reached, so 0212 closes here (re-ingest
       runbook §7e). 0212 is archived pending this check ([[0314]]).
-- [ ] No coarse row whose `close_usd` contradicts its own `close` after §7a
+      ✅ 2026-10-16: `close_usd = close` on 0 rows from 2023 on, on 1m
+      and 1h. The 988 at ×1.0 on 1h (2021-03 … 2022-05) are measured
+      USDT/USDC closes of exactly 1.0 before the depeg.
+- [x] No coarse row whose `close_usd` contradicts its own `close` after §7a
       and §7b-2 ([[0207]]'s query, re-ingest runbook §7e-2: no row on 1h, 4h,
       1d, 1w, 1M more than 10x off its quote leg's median rate in the bucket,
       XLM and USDT legs). Before: 1 757 rows, all XLM-quoted, 2022-01 …
       2022-04 — the pre-0286 carried product, which the rate form cannot
       write. 0207 is archived pending this check.
+      ✅ 2026-10-16: no rows on any of the five tiers.
 
 ## Implementation Notes
 
