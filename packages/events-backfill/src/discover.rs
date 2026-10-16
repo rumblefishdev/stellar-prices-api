@@ -291,10 +291,11 @@ mod tests {
     }
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+    const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
 
-    fn comet_row() -> PoolRegistryRow {
+    fn comet_row(id: &str) -> PoolRegistryRow {
         PoolRegistryRow {
-            contract_id: COMET.to_string(),
+            contract_id: id.to_string(),
             venue: "comet".to_string(),
             token0: String::new(),
             token1: String::new(),
@@ -303,19 +304,31 @@ mod tests {
         }
     }
 
-    /// Task 0300 D3b: over an EMPTY table the factory-less Comet pool is the
-    /// one row to write — whatever the range, since it has no factory event.
+    /// Task 0300 D3b: over an EMPTY table the factory-less Comet pools are the
+    /// rows to write — whatever the range, since they have no factory event.
     #[test]
     fn a_static_pool_missing_from_the_table_is_written_once() {
         let (reg, persisted) = preload(Registries::new());
-        assert_eq!(reg.pool_rows_unpersisted(&persisted), vec![comet_row()]);
+        assert_eq!(
+            reg.pool_rows_unpersisted(&persisted),
+            vec![comet_row(COMET), comet_row(COMET_V1_1)]
+        );
     }
 
-    /// ...and once the table holds it, a re-run writes nothing.
+    /// ...a table holding only the first writes only the second (task 0334,
+    /// production's state), and a table holding both writes nothing.
     #[test]
     fn a_static_pool_already_in_the_table_is_not_rewritten() {
         let mut loaded = Registries::new();
-        loaded.load_pool_rows(&[comet_row()]);
+        loaded.load_pool_rows(&[comet_row(COMET)]);
+        let (reg, persisted) = preload(loaded);
+        assert_eq!(
+            reg.pool_rows_unpersisted(&persisted),
+            vec![comet_row(COMET_V1_1)]
+        );
+
+        let mut loaded = Registries::new();
+        loaded.load_pool_rows(&[comet_row(COMET), comet_row(COMET_V1_1)]);
         let (reg, persisted) = preload(loaded);
         assert!(reg.pool_rows_unpersisted(&persisted).is_empty());
     }
@@ -337,6 +350,7 @@ mod tests {
             written,
             vec![
                 (COMET, "comet"),
+                (COMET_V1_1, "comet"),
                 (
                     "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD",
                     "soroswap"
