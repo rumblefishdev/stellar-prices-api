@@ -42,3 +42,5 @@ ledger-processor = { path = "../ledger-processor" }
 [dev-dependencies]
 # task 0078: reuse the shared Phoenix xyk swap fixture in the classify-seam test.
 phoenix-extractor = { path = "../phoenix-extractor", features = ["test-fixtures"] }
+# task 0335: `decode.rs` tests pack a ledger the way Galexie writes it.
+zstd = "0.13"
