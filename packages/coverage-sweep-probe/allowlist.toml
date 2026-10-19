@@ -183,6 +183,18 @@ reason = "on-chain order book of tokenised instruments (NewSellInitiatedTrade); 
 task = "0100"
 
 [[contract]]
+id = "CD35HSTRTNL4O3BFXQL75XGAI6AOCWFFAEPR5OCBS7A7HVUDUZOVLCAB"
+wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
+reason = "on-chain order book of tokenised instruments (NewBuyInitiatedTrade), a further instance of the wasm above; instruments are u64 ids with no token addresses, not priceable here"
+task = "0334"
+
+[[contract]]
+id = "CDU47AIU3BKKRTJBTPFHFXLVJG4BGNOXKDYUBDTKRIWAFP2RLWFKL4HV"
+wasm = "f3dd3edfd637a9654054181a9c47391ddafa723697b982698b3c9662a9df974e"
+reason = "securities-financing trade ledger (repo, stock loan, FX forward); trade_opened/trade_closed carry notional and rate_bps, no token price"
+task = "0334"
+
+[[contract]]
 id = "CBP76I2FRMUKYKIYYBKN3DH7TSWMFAJF2WTDC7Q2OHQFBIVWP7CAAI5Q"
 wasm = "76e60d025ee6c0322cb19f4846b9587ab172870802251de903e93545371678b6"
 reason = "lending protocol (borrow, liquidate, flash_loan); its swap_exact event is a liquidation step, not a market"

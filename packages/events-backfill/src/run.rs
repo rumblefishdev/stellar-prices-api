@@ -853,6 +853,7 @@ mod tests {
     }
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+    const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
 
     /// Task 0300 D3a: the static pools never mask an unseeded `pool_registry`
     /// — the guard is about the table, and still fires on an empty one.
@@ -873,9 +874,10 @@ mod tests {
         loaded.venue.insert(AQUA.to_string(), Venue::Aquarius);
 
         let reg = reprice_registry(loaded).expect("a seeded table reprices");
-        assert_eq!(reg.venue.len(), 2);
+        assert_eq!(reg.venue.len(), 3);
         assert_eq!(reg.venue.get(AQUA), Some(&Venue::Aquarius));
         assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
+        assert_eq!(reg.venue.get(COMET_V1_1), Some(&Venue::Comet));
     }
 
     // ---- task 0139: only new identities, and before their candles ----------

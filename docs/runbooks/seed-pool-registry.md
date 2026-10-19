@@ -234,9 +234,13 @@ Confirm with the same `FINAL` count below, then drop `--dry-run` to write.
 
 Some pools have no factory event, so neither `learn_factory` nor this tool can
 find them. They are registered by a committed list, `STATIC_POOLS` in
-`packages/prices-ingest-core/src/static_pools.rs`. Today it holds one pool:
-Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`
-(venue `comet`).
+`packages/prices-ingest-core/src/static_pools.rs`. Today it holds two pools,
+both venue `comet`:
+
+- Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`,
+  Blend v1/v2's backstop pool (task 0300);
+- Comet v1.1 BLND/USDC `CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE`,
+  Blend v2.1's backstop pool, first swap 2026-10-07 (task 0334).
 
 - The live processor and the events-backfill reprice route it from the list,
   with or without a table row.
@@ -249,9 +253,10 @@ Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`
     --clickhouse-url http://localhost:8123 --dry-run
   ```
 
-  Expected until written: a `change="new"` line for `CAS3FL6T…` with
-  `venue="comet"`, then `to_write=1 per_venue={"comet": 1}` (plus any
-  factory pools created in that ledger).
+  Expected until written: a `change="new"` line per missing pool with
+  `venue="comet"`, then `to_write=N per_venue={"comet": N}` (plus any
+  factory pools created in that ledger). On production after task 0334 that
+  is `CASYAKK3…` alone, `N = 1`: `CAS3FL6T…` has been in the table since 0300.
 
 - sdex-backfill's end-of-run registry write also persists it — the identical
   row, idempotent under the table's `ReplacingMergeTree`.

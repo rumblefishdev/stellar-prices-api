@@ -572,3 +572,54 @@ fn the_static_list_routes_comet_from_an_empty_registry() {
     assert_eq!((&tick.base, &tick.quote), (&blnd(), &usdc()));
     assert!(out.unregistered_pool_events.is_empty());
 }
+
+/// Blend v2.1's Comet pool (task 0334), wasm `d735c339…` (CometDEX v1.1.0).
+const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
+
+/// `v1_1_blnd_to_usdc` — pool `CASYAKK3…`, ledger 64,875,167, tx idx 199,
+/// op 0, event 8. BLND → USDC, 16805005302 in / 94368304 out.
+fn v1_1_blnd_to_usdc() -> RawSorobanEvent {
+    RawSorobanEvent {
+        contract_id: COMET_V1_1.to_string(),
+        ..comet_event(
+            64_875_167,
+            199,
+            8,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "16805005302"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "94368304"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+        )
+    }
+}
+
+/// Task 0334: the v1.1 pool's real swap, unregistered before and routed by
+/// the static list after, from an empty registry.
+#[test]
+fn the_static_list_routes_the_blend_v2_1_comet_pool() {
+    let mut assets = seeded_assets();
+    let out = run(
+        64_875_167,
+        &[v1_1_blnd_to_usdc()],
+        &mut Registries::new(),
+        &mut assets,
+    );
+    assert!(out.amm_ticks.is_empty());
+    assert_eq!(out.unregistered_pool_events, vec![("comet", 1)]);
+    assert_eq!(
+        out.unregistered_pool_contracts,
+        vec![COMET_V1_1.to_string()]
+    );
+
+    let mut reg = Registries::new();
+    reg.merge_static_pools();
+    let out = run(64_875_167, &[v1_1_blnd_to_usdc()], &mut reg, &mut assets);
+    assert_eq!(out.amm_ticks.len(), 1);
+    let (source, tick) = &out.amm_ticks[0];
+    assert_eq!(*source, "comet");
+    assert_eq!((&tick.base, &tick.quote), (&blnd(), &usdc()));
+    // BLND → USDC: price = USDC out / BLND in (≈ 0.005616).
+    assert_eq!(tick.price, d(94_368_304) / d(16_805_005_302));
+    assert_eq!(tick.volume_base, d(16_805_005_302));
+    assert!(tick.price_forming);
+    assert!(out.unregistered_pool_events.is_empty());
+    assert!(out.dispatch_errors.is_empty());
+}
