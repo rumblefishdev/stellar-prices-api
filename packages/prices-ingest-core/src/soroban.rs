@@ -21,8 +21,8 @@ use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
 use ledger_processor::dispatch::{PairRegistries, dispatch};
 use phoenix_extractor::PhoenixPoolRegistry;
 use soroswap_extractor::SoroswapPoolRegistry;
-use xdr_parser::extract_events;
-use xdr_parser::types::EventSource;
+use xdr_parser::LedgerEvents;
+use xdr_parser::types::ExtractedEvent;
 
 // USDT_ISSUER is deliberately NOT imported here: task 0172 removed the `USDT`
 // arm from `reflector_key_to_identity`, so this module must not resolve that
@@ -314,37 +314,38 @@ pub fn process_ledger(
 ) -> LedgerSoroban {
     let (ledger_seq, closed_at) = ledger_header(lcm);
     let tx_metas = collect_tx_metas(lcm);
+    let ledger_events = LedgerEvents::new(ledger_seq, closed_at, &tx_metas);
     let mut out = LedgerSoroban::default();
 
-    for (tx_index, tx_meta) in tx_metas.iter().enumerate() {
+    for tx_index in 0..tx_metas.len() {
         let tx_id = format!("{ledger_seq}:{tx_index}");
-        let events = extract_events(tx_meta, &tx_id, ledger_seq, closed_at);
+        // Consensus events only; the diagnostic mirrors come back in
+        // `.diagnostic`, unread. An event's position here is its per-tx
+        // `event_index`: tx-level events first, then per-op.
+        let events = ledger_events.extract(tx_index, &tx_id).events;
 
         // Grouped AMM event rows by emitting contract, order preserved.
         let mut amm_groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
 
-        for ev in &events {
-            if ev.source == EventSource::Diagnostic {
-                continue; // drop diagnostic mirrors
-            }
-            let Some(contract_id) = ev.contract_id.clone() else {
+        for (event_index, ev) in events.iter().enumerate() {
+            let Some(contract_id) = ev.body.contract_id.clone() else {
                 continue;
             };
-            let sig = signature(&ev.topics);
+            let sig = signature(&ev.body.topics);
 
             match sig {
                 Some("REFLECTOR") => decode_reflector(ev, assets, &mut out),
                 Some("REDSTONE") => decode_redstone(ev, &mut out),
                 _ => {
                     // Factory events grow the registry; pool events are queued.
-                    learn_factory(&ev.topics, &ev.data, reg);
+                    learn_factory(&ev.body.topics, &ev.body.data, reg);
                     let row = SorobanEventRow {
                         contract_id: contract_id.clone(),
                         transaction_id: tx_id.clone(),
                         ledger_sequence: ledger_seq as u64,
-                        event_index: ev.event_index,
-                        topics: topics_to_tagged(&ev.topics),
-                        data: json_to_tagged(&ev.data),
+                        event_index: event_index as u32,
+                        topics: topics_to_tagged(&ev.body.topics),
+                        data: json_to_tagged(&ev.body.data),
                     };
                     amm_groups.entry(contract_id).or_default().push(row);
                 }
@@ -931,12 +932,9 @@ fn amm_trade_to_tick(
 
 /// Decode a REFLECTOR `update` event: data.update_data is a vec of
 /// [asset_key, price_i128@1e14] pairs; topic[2] is the u64 ms timestamp.
-fn decode_reflector(
-    ev: &xdr_parser::types::ExtractedEvent,
-    assets: &mut AssetRegistry,
-    out: &mut LedgerSoroban,
-) {
+fn decode_reflector(ev: &ExtractedEvent, assets: &mut AssetRegistry, out: &mut LedgerSoroban) {
     let ts_ms = ev
+        .body
         .topics
         .as_array()
         .and_then(|t| t.get(2))
@@ -946,7 +944,7 @@ fn decode_reflector(
         .unwrap_or((ev.created_at.max(0) as u64) * 1000);
     let timestamp = (ts_ms / 1000) as u32;
 
-    let TaggedValue::Map(m) = json_to_tagged(&ev.data) else {
+    let TaggedValue::Map(m) = json_to_tagged(&ev.body.data) else {
         return;
     };
     let Some((_, update_data)) = m.iter().find(|(k, _)| k.as_str() == Some("update_data")) else {
@@ -998,8 +996,9 @@ fn decode_reflector(
 /// row. That id is functionally dead anyway (price_usd = 0, oracle_name =
 /// 'redstone'; never read by the `reflector` ASOF join), and the raw payload is
 /// preserved for the byte-footprint measurement.
-fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSoroban) {
+fn decode_redstone(ev: &ExtractedEvent, out: &mut LedgerSoroban) {
     let raw = ev
+        .body
         .data
         .as_object()
         .and_then(|o| o.get("value"))
