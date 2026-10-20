@@ -2,7 +2,7 @@
 id: "0335"
 title: "Bump stellar-xdr 28→30 before the protocol 30 vote — every ledger after it carries a millisecond StellarValue arm that 28 cannot decode"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0277", "0330", "0325", "0098", "0091"]
 tags: [layer-backend, priority-high, effort-small, phase-live, resilience, ingestion, deployment]
@@ -47,6 +47,15 @@ history:
       and EventBridge (asset-discovery and the rest) at 09:02 UTC. CodeSha256
       changed on both, with 0 errors after. Stays active until the candle
       frontier is measured across the protocol-30 activation ledger.
+  - date: "2026-10-20"
+    status: completed
+    who: akot
+    note: >
+      Closed as done before the vote. Pin, lock, event API adaptation, decode
+      test and both deploys are complete (6 of 7 AC). The post-vote crossing
+      cannot be measured yet: on 2026-10-20 mainnet, testnet and futurenet
+      are all on protocol 29. It is not tracked as a task; xdr-protocol-watch
+      is the backstop.
 ---
 
 # stellar-xdr 28 → 30 for protocol 30
@@ -193,4 +202,36 @@ and supply run `rate(1 hour)` and had not run since the deploy yet.
 - [x] The `xdr-parser` event API change preserves extraction: 360,847 events identical on 485 real ledgers
 - [x] Ledger-processor deployed on the 30 binary, `CodeSha256` before/after recorded (2026-10-20 08:31 UTC)
 - [x] EventBridge Lambdas linking `stellar-xdr` deployed on the 30 binary (2026-10-20 09:02 UTC)
-- [ ] Candle frontier measured across the protocol-30 activation ledger (after the vote)
+- [ ] Candle frontier measured across the protocol-30 activation ledger (after the vote). Not done: on 2026-10-20 no public network had voted on 30 (Horizon: mainnet, testnet and futurenet all `current_protocol_version` 29). Closed without it.
+
+## Design Decisions
+
+### From Plan
+
+1. **Exact pin `=30.0.0`**, moved together with `xdr-parser` so the lock holds
+   one XDR major.
+2. **Readiness proved by decode, not compile**: the `decode.rs` test packs
+   `SignedMs` / `EmptyTxSetMs` ledgers as Galexie does and goes through
+   `decode_object`.
+
+### Emerged
+
+3. **Adapted to BE's `LedgerEvents` API instead of pinning the old rev.** The
+   rev that requires XDR 30 also removed `extract_events`. Staying on the old
+   API was not possible without forking BE.
+4. **`event_index` = position in `TxEvents.events`.** Diagnostic events are
+   now separate and unread. Equivalence was measured on 485 real ledgers
+   rather than argued.
+5. **Whole EventBridge stack redeployed**, not just asset-discovery, since
+   every Lambda in it links `stellar-xdr`.
+6. **Closed before the vote** at Adam's call. The crossing measurement is
+   left out, with no follow-up task.
+
+## Issues Encountered
+
+- **The compile break was BE's event API (ADR 0059), not XDR.** See Findings.
+- **The runbook is stale** (`docs/runbooks/deploy-ledger-processor.md`): it
+  says asset-discovery decodes ledgers and uses the `soroban-admin` profile.
+  Not fixed here.
+- **The task-opening commit 12a65fd5 also carried an unrelated staged rename
+  of 0333** (active → archive), done by mistake.
