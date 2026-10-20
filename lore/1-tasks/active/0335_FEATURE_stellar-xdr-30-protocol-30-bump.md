@@ -31,6 +31,22 @@ history:
       (ADR 0059), not XDR. On 485 real mainnet ledgers the adapted extraction
       gives the same 360,847 events as develop. Workspace tests: 1448 passed,
       0 failed.
+  - date: "2026-10-20"
+    status: active
+    who: akot
+    note: >
+      PR #406 merged to develop as af504c37 (approved). CI green, including
+      328/328 ClickHouse integration tests. Not deployed yet: ledger-processor
+      and the EventBridge Lambdas are next, then the post-vote crossing
+      measurement.
+  - date: "2026-10-20"
+    status: active
+    who: akot
+    note: >
+      Deployed on the XDR 30 binary: Compute (ledger-processor) at 08:31 UTC
+      and EventBridge (asset-discovery and the rest) at 09:02 UTC. CodeSha256
+      changed on both, with 0 errors after. Stays active until the candle
+      frontier is measured across the protocol-30 activation ledger.
 ---
 
 # stellar-xdr 28 → 30 for protocol 30
@@ -124,12 +140,57 @@ warnings` fails only on `prices-clickhouse/tests/current_mv_it.rs:1187`
 (`too_many_arguments`), a file this branch does not touch. Excluding that
 crate, clippy is clean.
 
+## Deploy 2026-10-20
+
+Preflight, read 2026-10-20 at about 08:00 UTC:
+`npm run xdr:verify-protocol-gap` reports pinned 30, mainnet current 29, and
+**core supports 30**. Validators already run core 30, so the vote can come at
+any time.
+
+| Lambda | `CodeSha256` before | `LastModified` before |
+| --- | --- | --- |
+| `prices-production-ledger-processor` | `ZFuumECCwyZNKDt1B6lH48YeFxgwH6aHT+1t36FsQzg=` | 2026-10-19 08:26:51 UTC |
+| `prices-production-asset-discovery` | `Zaeo0F6RslW+kdc2e5nNxScnikNbjNGkjGIks0ESIos=` | 2026-10-19 08:59:03 UTC |
+
+Candle frontier before: sdex and aquarius 88 s behind now (07:54 UTC candle).
+
+**Compute deployed** (`make deploy-production-compute`, stage cache flushed):
+
+| Lambda | `CodeSha256` after | `LastModified` after |
+| --- | --- | --- |
+| `prices-production-ledger-processor` | `WCokytgM7mqlxS/+KiQk+QTf665qHwB7a+ssUGTD26g=` | 2026-10-20 08:31:01 UTC |
+
+Read at 09:00 UTC, about 30 minutes later: Lambda `Errors` = 0 in every
+10-minute bucket from 07:30 to 09:10 UTC. sdex and aquarius were 86 s behind,
+with 29 and 28 one-minute candles since the deploy. soroswap (5) and sushiswap
+(2) also wrote candles since the deploy, so the Soroban event path works on the
+new `LedgerEvents` extraction. comet (1.7 h behind) and phoenix (2.7 h) had no
+candle since the deploy. That is normal for them: in the previous 24 h they
+wrote 12 and 8 candles, and phoenix's longest gap was 16 h.
+
+**EventBridge deployed** (`make deploy-production-eventbridge`), every Lambda
+in the stack at 2026-10-20 09:02:43–44 UTC:
+
+| Lambda | `CodeSha256` after |
+| --- | --- |
+| `prices-production-asset-discovery` | `m7eceW0ZGn+gykUhHb3yhn6/haa1q86CFj+LsiH2u18=` (before `Zaeo0F6R…`) |
+| `prices-production-oracle` | `+D6AZ+rytOpspELZ37v4iRBiIgj342g6NACnEvrgnY0=` |
+| `prices-production-enrichment` | `M6YAUmixrmN6FlTdZkVfr60l2+yX1k97Oe9zYtdcMpc=` |
+| `prices-production-supply` | `q8UWEMWZcI0gdsgRSg/VjqaH+91FoUV5w2/h38YTmc0=` |
+| `prices-production-coarse-sweep` | `VLMFBYOXdBTXNDEBxS5t7ykJmCnpPCgYnYnm3B2iPX8=` |
+
+The probes and `cleanup` were rebuilt too. The `prices-production-cleanup` rule
+is still `DISABLED` (0200). By 09:13 UTC, oracle (2 runs) and the backfill and
+rollup freshness probes (1 run each) had run with 0 errors, and the
+ledger-processor had run 119 times with 0 errors. asset-discovery, enrichment
+and supply run `rate(1 hour)` and had not run since the deploy yet.
+
 ## Acceptance Criteria
 
 - [x] Workspace pin `=30.0.0`; `xdr-parser` on BE `develop` at `d1251f30`; one `stellar-xdr` in the lock
-- [ ] `cargo test --workspace` (1448 passed / 0 failed locally) and the CH ignored suite green (CI runs it on the PR)
+- [x] `cargo test --workspace` (1448 passed / 0 failed locally) and the CH ignored suite green (CI on #406: 328/328)
 - [x] A test proves a `SignedMs` / `EmptyTxSetMs` ledger decodes through `decode_object` with `close_time` in seconds (`decode.rs`, table-driven)
 - [x] The `xdr-parser` event API change preserves extraction: 360,847 events identical on 485 real ledgers
-- [ ] Ledger-processor deployed on the 30 binary, `CodeSha256` before/after recorded
-- [ ] EventBridge Lambdas linking `stellar-xdr` deployed on the 30 binary
+- [x] Ledger-processor deployed on the 30 binary, `CodeSha256` before/after recorded (2026-10-20 08:31 UTC)
+- [x] EventBridge Lambdas linking `stellar-xdr` deployed on the 30 binary (2026-10-20 09:02 UTC)
 - [ ] Candle frontier measured across the protocol-30 activation ledger (after the vote)
