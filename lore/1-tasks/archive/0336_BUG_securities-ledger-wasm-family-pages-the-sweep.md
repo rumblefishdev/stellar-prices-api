@@ -2,7 +2,7 @@
 id: "0336"
 title: "coverage-sweep-unclassified stays in ALARM: new instances of the securities-financing ledger wasm page one by one — allow-list the family as not a venue"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0100", "0323", "0334"]
@@ -16,6 +16,13 @@ history:
     status: active
     who: akot
     note: "Task created from the daily stuck-alarm digest: coverage-sweep-unclassified in ALARM for 11d 4h"
+  - date: "2026-10-23"
+    status: completed
+    who: akot
+    note: >
+      PR #407 merged as 06e788a5. EventBridge deployed at 10:54 UTC (diff:
+      only the coverage-sweep-probe S3Key). Manual invoke: rows=21,
+      allowlisted=21, unclassified=0. Alarm OK at 10:55:59 UTC.
 ---
 
 # New instances of the securities-financing ledger wasm keep the sweep in ALARM
@@ -67,13 +74,25 @@ not hold for a family whose code is not a market. Add an explicit exception:
 
 ## Acceptance Criteria
 
-- [ ] Validator: `not_a_venue` without `until` accepted; with `until`, or
+- [x] Validator: `not_a_venue` without `until` accepted; with `until`, or
       `until` missing without it, refused (unit tests)
-- [ ] The five known instances match `wasm:f3dd3edf…` (unit test)
-- [ ] Runbook §3 describes `not_a_venue`
-- [ ] EventBridge deployed; one manual invoke logs `coverage sweep complete`
+- [x] The five known instances match `wasm:f3dd3edf…` (unit test)
+- [x] Runbook §3 describes `not_a_venue`
+- [x] EventBridge deployed; one manual invoke logs `coverage sweep complete`
       with `unclassified=0`
-- [ ] `coverage-sweep-unclassified` back to OK
+- [x] `coverage-sweep-unclassified` back to OK
+
+## Result (2026-10-23)
+
+- `cdk diff` for `Prices-production-EventBridge` changed only
+  `CoverageSweepProbeFunction` `.S3Key`. Deployed with
+  `make -C infra deploy-production-eventbridge`; probe `LastModified`
+  10:54:04 UTC, `CodeSha256` `5QXzXnsLtgTvLGb9/CkJIXjAZq7XQBz8gdk3ikopGvI=`.
+- Manual invoke at 10:55 UTC, window 64,872,241–65,093,419: `rows=21`,
+  `allowlisted=21`, `unclassified=0`, `unresolved=0`.
+- `Prices/Coverage` `UnclassifiedSwapEvents` = 0 for the 10:55 UTC hour;
+  `prices-production-coverage-sweep-unclassified` OK at 10:55:59 UTC, after 11
+  days in ALARM.
 
 ## Notes
 
