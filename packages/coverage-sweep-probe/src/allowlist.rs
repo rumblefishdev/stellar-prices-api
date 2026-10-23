@@ -31,7 +31,8 @@ pub struct ContractEntry {
     pub task: String,
 }
 
-/// A whole wasm family, allow-listed until `until` ships.
+/// A whole wasm family, allow-listed until `until` ships, or for good when
+/// `not_a_venue` (task 0336).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WasmEntry {
@@ -39,9 +40,14 @@ pub struct WasmEntry {
     pub hash: String,
     pub reason: String,
     pub task: String,
-    /// The task whose delivery removes this entry. Required (D4).
+    /// The task whose delivery removes this entry. Required (D4) unless
+    /// `not_a_venue`.
     #[serde(default)]
     pub until: String,
+    /// The family's code cannot be a market we price (a securities ledger,
+    /// say), so no task will ever register it. Takes the place of `until`.
+    #[serde(default)]
+    pub not_a_venue: bool,
 }
 
 /// Why an allow-list was refused.
@@ -87,7 +93,8 @@ impl AllowList {
     /// Enforce the rules a list must meet before it may hide anything:
     /// - every entry has a non-empty `reason` and `task`;
     /// - every `[[wasm]]` entry has a non-empty `until` (D4: a permanent
-    ///   family-wide ignore would hide the next pool of a real venue);
+    ///   family-wide ignore would hide the next pool of a real venue), or
+    ///   `not_a_venue` and no `until` (task 0336);
     /// - every contract `id` is a valid `C…` strkey (an account key or a typo
     ///   would silently match nothing);
     /// - every hash, including a contract entry's informational `wasm`, is
@@ -127,7 +134,13 @@ impl AllowList {
             }
             require(&who, "reason", &e.reason)?;
             require(&who, "task", &e.task)?;
-            require(&who, "until", &e.until)?;
+            if !e.not_a_venue {
+                require(&who, "until", &e.until)?;
+            } else if !e.until.trim().is_empty() {
+                return Err(AllowListError::Invalid(format!(
+                    "{who}: `not_a_venue` and `until` are exclusive"
+                )));
+            }
             if !hashes.insert(e.hash.as_str()) {
                 return Err(AllowListError::Invalid(format!("{who}: duplicate hash")));
             }
@@ -174,21 +187,46 @@ mod tests {
     use super::*;
 
     const SUSHI_V3: &str = "003710b383f9da7d650a7f719a7be479110266427817ebbed61d924505fcd7c7";
+    const SECURITIES_LEDGER: &str =
+        "f3dd3edfd637a9654054181a9c47391ddafa723697b982698b3c9662a9df974e";
     const AQUARIUS_ROUTER: &str = "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK";
 
     #[test]
     fn embedded_list_parses_with_the_seeded_entries() {
         let list = AllowList::embedded().expect("embedded allow-list parses");
-        assert_eq!(list.contract.len(), 29, "{list:?}");
-        assert_eq!(list.wasm.len(), 3, "{list:?}");
-        // Every family-wide entry is temporary and names the task that ends it:
-        // SushiSwap V3 (0290) and the Comet BLND/USDC pool (0300).
+        assert_eq!(list.contract.len(), 28, "{list:?}");
+        assert_eq!(list.wasm.len(), 4, "{list:?}");
+        // Every family-wide entry is temporary and names the task that ends it
+        // (SushiSwap V3, 0290; the Comet BLND/USDC pool, 0300), except the one
+        // non-venue family (0336).
         assert!(
-            list.wasm
-                .iter()
-                .all(|w| w.until == "0290" || w.until == "0300"),
+            list.wasm.iter().all(|w| if w.not_a_venue {
+                w.hash == SECURITIES_LEDGER
+            } else {
+                w.until == "0290" || w.until == "0300"
+            }),
             "{list:?}"
         );
+    }
+
+    #[test]
+    fn securities_ledger_family_is_allow_listed_by_wasm() {
+        // The 2026-10-19 sweep (task 0336): four new instances of the wasm
+        // 0334 allow-listed by one contract id, each paging on its own.
+        let list = AllowList::embedded().unwrap();
+        for id in [
+            "CDU47AIU3BKKRTJBTPFHFXLVJG4BGNOXKDYUBDTKRIWAFP2RLWFKL4HV",
+            "CAKQ6DWLPTKFDHYON346SBAYJJDTVO5DKTMZ7737HBF6NCGASIMOM4U2",
+            "CCLN72NMUDZVXK6V6W5RQ4GHGHMX437G2FMGT6YKVNB7BAAH7XFLP5SZ",
+            "CBZYHS2DVYAIOURIAXVUNTTAGTUXH3I4SWFWKN7FAKFKNOKLQ5LIR5YB",
+            "CB4B4ELLM4YTF7HLITB52OFCYPGHPT763JZBHVUOD4AN4FJR7RWVZXJ6",
+        ] {
+            assert_eq!(
+                list.match_row(id, Some(SECURITIES_LEDGER)),
+                Some(format!("wasm:{SECURITIES_LEDGER}")),
+                "{id}"
+            );
+        }
     }
 
     #[test]
@@ -274,6 +312,19 @@ mod tests {
         assert!(e.contains(SUSHI_V3), "{e}");
         refused(&wasm_toml(SUSHI_V3, Some("")));
         refused(&wasm_toml(SUSHI_V3, Some("  ")));
+    }
+
+    #[test]
+    fn not_a_venue_takes_the_place_of_until() {
+        let entry = |extra: &str| {
+            format!(
+                "[[wasm]]\nhash = \"{SECURITIES_LEDGER}\"\nreason = \"r\"\ntask = \"0336\"\n{extra}"
+            )
+        };
+        AllowList::parse(&entry("not_a_venue = true\n")).unwrap();
+        let e = refused(&entry("not_a_venue = true\nuntil = \"0336\"\n"));
+        assert!(e.contains("exclusive"), "{e}");
+        refused(&entry("not_a_venue = false\n"));
     }
 
     #[test]
