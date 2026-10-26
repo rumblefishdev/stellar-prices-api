@@ -874,7 +874,7 @@ mod tests {
         loaded.venue.insert(AQUA.to_string(), Venue::Aquarius);
 
         let reg = reprice_registry(loaded).expect("a seeded table reprices");
-        assert_eq!(reg.venue.len(), 3);
+        assert_eq!(reg.venue.len(), 1 + prices_ingest_core::STATIC_POOLS.len());
         assert_eq!(reg.venue.get(AQUA), Some(&Venue::Aquarius));
         assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
         assert_eq!(reg.venue.get(COMET_V1_1), Some(&Venue::Comet));
