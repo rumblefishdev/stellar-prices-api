@@ -234,13 +234,18 @@ Confirm with the same `FINAL` count below, then drop `--dry-run` to write.
 
 Some pools have no factory event, so neither `learn_factory` nor this tool can
 find them. They are registered by a committed list, `STATIC_POOLS` in
-`packages/prices-ingest-core/src/static_pools.rs`. Today it holds two pools,
-both venue `comet`:
+`packages/prices-ingest-core/src/static_pools.rs`. Today it holds five pools,
+all venue `comet`:
 
 - Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`,
   Blend v1/v2's backstop pool (task 0300);
 - Comet v1.1 BLND/USDC `CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE`,
-  Blend v2.1's backstop pool, first swap 2026-10-07 (task 0334).
+  Blend v2.1's backstop pool, first swap 2026-10-07 (task 0334);
+- Comet v1.1 BLNT/USDC `CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3`
+  and BLNT/XLM `CA5HX3D47PQZWC2E7VWXCKH4534P2NOJEOIXAWU47MI4QV2FQUYY3FLC`,
+  deployed for the BLNT launch, first swaps 2026-10-25 (task 0337);
+- Comet v1.1 BLND/USDC `CCNDNFA7LEVUJRYWTSWVAA2ESZAKFO6MYOPI6E5AZT3V2UBP2MNV7QFZ`,
+  a small pool, first swap 2026-10-23 (task 0337).
 
 - The live processor and the events-backfill reprice route it from the list,
   with or without a table row.
@@ -255,8 +260,9 @@ both venue `comet`:
 
   Expected until written: a `change="new"` line per missing pool with
   `venue="comet"`, then `to_write=N per_venue={"comet": N}` (plus any
-  factory pools created in that ledger). On production after task 0334 that
-  is `CASYAKK3…` alone, `N = 1`: `CAS3FL6T…` has been in the table since 0300.
+  factory pools created in that ledger). On production after task 0337 that
+  is `CDQMIKIH…`, `CA5HX3D4…` and `CCNDNFA7…`, `N = 3`: the two Blend pools
+  have been in the table since 0300 and 0334.
 
 - sdex-backfill's end-of-run registry write also persists it — the identical
   row, idempotent under the table's `ReplacingMergeTree`.

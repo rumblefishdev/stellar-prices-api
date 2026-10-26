@@ -623,3 +623,142 @@ fn the_static_list_routes_the_blend_v2_1_comet_pool() {
     assert!(out.unregistered_pool_events.is_empty());
     assert!(out.dispatch_errors.is_empty());
 }
+
+// ---- task 0337: three more factory-less Comet v1.1 pools -------------------
+//
+// Fixtures from StellarExpert's copy of each event (`/contract/<id>/events`),
+// decoded from its `bodyXdr`; ledger and tx application order are the event
+// id's TOID (`ledger << 32 | tx << 12 | op`), event index its suffix.
+
+const BLNT_USDC: &str = "CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3";
+const BLNT_XLM: &str = "CA5HX3D47PQZWC2E7VWXCKH4534P2NOJEOIXAWU47MI4QV2FQUYY3FLC";
+const BLND_USDC_SMALL: &str = "CCNDNFA7LEVUJRYWTSWVAA2ESZAKFO6MYOPI6E5AZT3V2UBP2MNV7QFZ";
+/// BLNT's issuer; its SAC is `CCBNWP5L…`.
+const BLNT_ISSUER: &str = "GAP2ACGH3O6TRFAERGM4USJ6XWU3U2BFIK224JPV6NI3CUNEEEGTBTFB";
+
+fn blnt() -> AssetIdentity {
+    AssetIdentity::Credit {
+        code: "BLNT".to_string(),
+        issuer: BLNT_ISSUER.to_string(),
+    }
+}
+
+/// One `POOL/swap` of `pool`, its payload map built from the five fields.
+fn v1_1_swap(
+    pool: &str,
+    (ledger, tx_index, event_index): (u32, u16, u32),
+    caller: &str,
+    (token_in, amount_in): (&str, &str),
+    (token_out, amount_out): (&str, &str),
+) -> RawSorobanEvent {
+    RawSorobanEvent {
+        contract_id: pool.to_string(),
+        ..comet_event(
+            ledger,
+            tx_index,
+            event_index,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": caller}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": amount_in}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": amount_out}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": token_in}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": token_out}}]}),
+        )
+    }
+}
+
+const USDC_SAC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+const BLND_SAC: &str = "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY";
+const BLNT_SAC: &str = "CCBNWP5L7ZSXA3DBWCMFAVKFVRW3ZHWO7B5J557W42O64DDZNPJP7VDS";
+const XLM_SAC: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+/// The router behind every BLNT swap so far (USDC → BLNT → XLM in one tx).
+const BLNT_ROUTER: &str = "CB2DT56GJPXZG7SXGPJOW3F3WNF6RQ7RT5HZLAD2XW4TJ7NUN2YWUZLW";
+
+/// Event `279761757207027713-0001` — `CDQMIKIH…`, ledger 65,137,110, tx 262,
+/// event 1. USDC → BLNT, 500000000 in / 103337956008 out.
+fn blnt_usdc_swap() -> RawSorobanEvent {
+    v1_1_swap(
+        BLNT_USDC,
+        (65_137_110, 262, 1),
+        BLNT_ROUTER,
+        (USDC_SAC, "500000000"),
+        (BLNT_SAC, "103337956008"),
+    )
+}
+
+/// Event `279761757207027713-0005` — `CA5HX3D4…`, the same transaction's
+/// second hop. BLNT → XLM, 103337956008 in / 3711330029 out.
+fn blnt_xlm_swap() -> RawSorobanEvent {
+    v1_1_swap(
+        BLNT_XLM,
+        (65_137_110, 262, 5),
+        BLNT_ROUTER,
+        (BLNT_SAC, "103337956008"),
+        (XLM_SAC, "3711330029"),
+    )
+}
+
+/// Event `279599050962505729-0009` — `CCNDNFA7…`, ledger 65,099,227, tx 641,
+/// event 9, the pool's first swap. BLND → USDC, 42983166 in / 231757 out.
+fn blnd_usdc_small_swap() -> RawSorobanEvent {
+    v1_1_swap(
+        BLND_USDC_SMALL,
+        (65_099_227, 641, 9),
+        "CDYYYMHP3RKMPDY7VARR5J65RBLUFBHMARTHZM5NZ774D4CMOV7VHRR2",
+        (BLND_SAC, "42983166"),
+        (USDC_SAC, "231757"),
+    )
+}
+
+/// Run `event` from an empty registry, then from one with the static list
+/// merged: unregistered before, exactly one `"comet"` tick after.
+fn routed_by_the_static_list(event: RawSorobanEvent) -> TradeTick {
+    let mut assets = AssetRegistry::from_existing(vec![usdc(), blnd(), blnt()]);
+    let ledger = event.ledger_sequence;
+    let pool = event.contract_id.clone();
+
+    let out = run(
+        ledger,
+        std::slice::from_ref(&event),
+        &mut Registries::new(),
+        &mut assets,
+    );
+    assert!(out.amm_ticks.is_empty());
+    assert_eq!(out.unregistered_pool_events, vec![("comet", 1)]);
+    assert_eq!(out.unregistered_pool_contracts, vec![pool]);
+
+    let mut reg = Registries::new();
+    reg.merge_static_pools();
+    let out = run(ledger, &[event], &mut reg, &mut assets);
+    assert!(out.unregistered_pool_events.is_empty());
+    assert!(out.dispatch_errors.is_empty());
+    assert!(out.unresolved.is_empty());
+    assert_eq!(out.amm_ticks.len(), 1);
+    let (source, tick) = out.amm_ticks.into_iter().next().unwrap();
+    assert_eq!(source, "comet");
+    assert!(tick.price_forming);
+    tick
+}
+
+#[test]
+fn the_static_list_routes_the_blnt_usdc_pool() {
+    let tick = routed_by_the_static_list(blnt_usdc_swap());
+    assert_eq!((&tick.base, &tick.quote), (&blnt(), &usdc()));
+    // USDC → BLNT: price = USDC in / BLNT out (≈ 0.00484).
+    assert_eq!(tick.price, d(500_000_000) / d(103_337_956_008));
+    assert_eq!(tick.volume_base, d(103_337_956_008));
+}
+
+#[test]
+fn the_static_list_routes_the_blnt_xlm_pool() {
+    let tick = routed_by_the_static_list(blnt_xlm_swap());
+    assert_eq!((&tick.base, &tick.quote), (&blnt(), &AssetIdentity::Native));
+    // BLNT → XLM: price = XLM out / BLNT in (≈ 0.0359).
+    assert_eq!(tick.price, d(3_711_330_029) / d(103_337_956_008));
+    assert_eq!(tick.volume_base, d(103_337_956_008));
+}
+
+#[test]
+fn the_static_list_routes_the_small_blnd_usdc_pool() {
+    let tick = routed_by_the_static_list(blnd_usdc_small_swap());
+    assert_eq!((&tick.base, &tick.quote), (&blnd(), &usdc()));
+    // BLND → USDC: price = USDC out / BLND in (≈ 0.00539).
+    assert_eq!(tick.price, d(231_757) / d(42_983_166));
+    assert_eq!(tick.volume_base, d(42_983_166));
+}

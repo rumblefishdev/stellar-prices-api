@@ -203,6 +203,12 @@ wasm = "91d5ab7e075d533a9404373453a548bc21c3d2893d78f9782785985f396b4454"
 reason = "bonding-curve token launchpad (pad_created, launched, buy, bump_curve); its trade events price a launched token on its own curve, not a pool; first seen 2026-10-04 as a test launch (ANYCHAIN Test, CCRIN5F5…), 3 trades by its creator"
 task = "0323"
 
+[[contract]]
+id = "CANIE64BDFKLHROLOIY2KTQVBWUZNUKZP75DLXC272QM7TIN5N3M4LVA"
+wasm = "dcdc0b1860799629c7c88804955dd7373cb6febaf069e2ba863e98ebbaa95c27"
+reason = "BLNT v3 backfill contract (verified source BLNT-Protocol/blnt-backfill-contract); swap_blnd is a fixed 1:1 BLND -> BLNT conversion (burns BLND, pays pre-funded BLNT), not a market; no admin, no upgrade"
+task = "0337"
+
 # --- unindexed venue families (temporary, keyed by wasm) ----------------------
 
 [[wasm]]

@@ -292,6 +292,9 @@ mod tests {
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
     const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
+    const BLNT_USDC: &str = "CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3";
+    const BLNT_XLM: &str = "CA5HX3D47PQZWC2E7VWXCKH4534P2NOJEOIXAWU47MI4QV2FQUYY3FLC";
+    const BLND_USDC_SMALL: &str = "CCNDNFA7LEVUJRYWTSWVAA2ESZAKFO6MYOPI6E5AZT3V2UBP2MNV7QFZ";
 
     fn comet_row(id: &str) -> PoolRegistryRow {
         PoolRegistryRow {
@@ -311,24 +314,40 @@ mod tests {
         let (reg, persisted) = preload(Registries::new());
         assert_eq!(
             reg.pool_rows_unpersisted(&persisted),
-            vec![comet_row(COMET), comet_row(COMET_V1_1)]
+            vec![
+                comet_row(BLNT_XLM),
+                comet_row(COMET),
+                comet_row(COMET_V1_1),
+                comet_row(BLND_USDC_SMALL),
+                comet_row(BLNT_USDC),
+            ]
         );
     }
 
-    /// ...a table holding only the first writes only the second (task 0334,
-    /// production's state), and a table holding both writes nothing.
+    /// ...a table holding the two Blend pools writes only the three of task
+    /// 0337 (production's state), and a table holding all five writes nothing.
     #[test]
     fn a_static_pool_already_in_the_table_is_not_rewritten() {
         let mut loaded = Registries::new();
-        loaded.load_pool_rows(&[comet_row(COMET)]);
+        loaded.load_pool_rows(&[comet_row(COMET), comet_row(COMET_V1_1)]);
         let (reg, persisted) = preload(loaded);
         assert_eq!(
             reg.pool_rows_unpersisted(&persisted),
-            vec![comet_row(COMET_V1_1)]
+            vec![
+                comet_row(BLNT_XLM),
+                comet_row(BLND_USDC_SMALL),
+                comet_row(BLNT_USDC),
+            ]
         );
 
         let mut loaded = Registries::new();
-        loaded.load_pool_rows(&[comet_row(COMET), comet_row(COMET_V1_1)]);
+        loaded.load_pool_rows(&[
+            comet_row(COMET),
+            comet_row(COMET_V1_1),
+            comet_row(BLNT_USDC),
+            comet_row(BLNT_XLM),
+            comet_row(BLND_USDC_SMALL),
+        ]);
         let (reg, persisted) = preload(loaded);
         assert!(reg.pool_rows_unpersisted(&persisted).is_empty());
     }
@@ -349,12 +368,15 @@ mod tests {
         assert_eq!(
             written,
             vec![
+                (BLNT_XLM, "comet"),
                 (COMET, "comet"),
                 (COMET_V1_1, "comet"),
                 (
                     "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD",
                     "soroswap"
                 ),
+                (BLND_USDC_SMALL, "comet"),
+                (BLNT_USDC, "comet"),
             ]
         );
     }
