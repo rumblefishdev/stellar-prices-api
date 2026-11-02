@@ -176,20 +176,32 @@ task = "0100"
 [[contract]]
 id = "CA5YJ5H2HH6KUZBGQ7M7R2TX63LQKQVG57Y3HE23NVC5C6Q7BQFMSOI5"
 wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
-reason = "on-chain order book of tokenised instruments (NewBuyInitiatedTrade); instruments are u64 ids with no token addresses, not priceable here"
+reason = "permissioned order book, grBENJI/USDC (whitelist, admin-set phases and reference price); its NewBuyInitiatedTrade carries order ids, no token address, and has no extractor"
 task = "0100"
 
 [[contract]]
 id = "CBOSXSEZXU7P66O6F3AQV65URR5XUVKMY6CAQ7FT7C5TQLGYNV7IG5I6"
 wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
-reason = "on-chain order book of tokenised instruments (NewSellInitiatedTrade); instruments are u64 ids with no token addresses, not priceable here"
+reason = "permissioned order book, AMA1/XUSDT (whitelist, admin-set phases and reference price); its NewSellInitiatedTrade carries order ids, no token address, and has no extractor"
 task = "0100"
 
 [[contract]]
 id = "CD35HSTRTNL4O3BFXQL75XGAI6AOCWFFAEPR5OCBS7A7HVUDUZOVLCAB"
 wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
-reason = "on-chain order book of tokenised instruments (NewBuyInitiatedTrade), a further instance of the wasm above; instruments are u64 ids with no token addresses, not priceable here"
+reason = "permissioned order book, AMA1/XUSDT, a further instance of the wasm above (whitelist, admin-set phases and reference price); its NewBuyInitiatedTrade carries order ids, no token address, and has no extractor"
 task = "0334"
+
+[[contract]]
+id = "CAF5RWQG5GSTEPD5XAKCUH2H77NWA4J6DNFT6TUP2NU6Q6VW3R6HCZYO"
+wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
+reason = "permissioned order book, grBENJI/USDC, a further instance of the wasm above (whitelist, admin-set phases and reference price); its trade events carry order ids, no token address, and have no extractor; decoded trades ~75,000 at ~1.00; 0/50 txs hold a registered pool's swap"
+task = "0338"
+
+[[contract]]
+id = "CC5QR5OOQMCPVSL3SJMH7QESCFINWUMX3427CT4NIDBS3FRVDHAM4NAJ"
+wasm = "a85d6d53dfe894ef6483aad0613359584e5a78629c159cf3dbf53d74395a0404"
+reason = "tokenised managed fund aLQD (issue, redeem, nav, rebalance), not a market; its trade event wraps a swap through the Soroswap router, and indexing it double-counts; 3/8 txs hold a registered pool's swap, its one trade among them"
+task = "0338"
 
 [[contract]]
 id = "CBP76I2FRMUKYKIYYBKN3DH7TSWMFAJF2WTDC7Q2OHQFBIVWP7CAAI5Q"
@@ -208,6 +220,14 @@ id = "CANIE64BDFKLHROLOIY2KTQVBWUZNUKZP75DLXC272QM7TIN5N3M4LVA"
 wasm = "dcdc0b1860799629c7c88804955dd7373cb6febaf069e2ba863e98ebbaa95c27"
 reason = "BLNT v3 backfill contract (verified source BLNT-Protocol/blnt-backfill-contract); swap_blnd is a fixed 1:1 BLND -> BLNT conversion (burns BLND, pays pre-funded BLNT), not a market; no admin, no upgrade"
 task = "0337"
+
+# --- unindexed pools (one contract, not their family) -------------------------
+
+[[contract]]
+id = "CAZE5GVMH5332L6FEGVPPDLEPVYUFGQB7ZOCH2OKKBJCBYZQ5FGKZN7L"
+wasm = "ae835560f930e73b3ac8ce0ab2b26543b815eb6bb61b0d87b894f4dc8dc6e8df"
+reason = "Spreadless USD 3pool, a real stableswap AMM (USDT0, PYUSD, USDC; amp 100) with no extractor; ~$29 of reserves and three 1-unit swaps at 2026-11-02; 0/7 txs hold a registered pool's swap; this pool only, so the next pool of the wasm still pages"
+task = "0338"
 
 # --- unindexed venue families (temporary, keyed by wasm) ----------------------
 

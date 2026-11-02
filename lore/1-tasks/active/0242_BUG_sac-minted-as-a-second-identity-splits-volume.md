@@ -243,6 +243,8 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
 - **2026-10-06, seed (runbook §3).** Stage B finished 202404. The seed ran at 10:29:11 UTC as `dev_shared`, straight from `seed-0242.sql` rather than through the staged variant of §3. There is therefore no `bak_0242_seed_stage`, and `bak_0242_seed` was created afterwards from the 29 rows with that `created_at`.
   - Check: `29 29 / 29 / 0`, with collisions at 0. No candle under any seeded id on any tier.
   - Comet's `pool_registry` row is present (1).
+- **2026-11-02, a new split (found in [[0338]]).** BLNT's SAC `CCBNWP5L…` traded on Comet from 2026-10-26 14:22 UTC, before SDEX interned its classic at 18:42, so 10 trades sit on the `soroban` id 14236029787030528679. The "no contract row since BURNMKR" of the October window no longer holds.
+  - The reprice in 0338 rewrites those trades under the classic id, so the rows left on that id are copies. Add it to the residual cleanup. It does not fall under PC9, because the classic exists.
 
 ## Acceptance Criteria
 
