@@ -2,7 +2,7 @@
 id: "0334"
 title: "Blend v2.1's Comet BLND/USDC pool is missing from pool_registry — every swap since 2026-10-07 is dropped and both pool alarms fire"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0300", "0291", "0100", "0323", "0329"]
@@ -18,6 +18,11 @@ history:
     status: active
     who: akot
     note: "Task created from the unregistered-pool and coverage-sweep alarms; pool verified as Blend v2.1's"
+  - date: "2026-11-02"
+    status: completed
+    who: akot
+    note: >
+      Reprice finished under 0338, which has the result and the residual.
 ---
 
 # Blend v2.1's Comet BLND/USDC pool is missing from pool_registry
@@ -75,16 +80,23 @@ The sweep's two other emitters are not priceable:
 
 ## Acceptance Criteria
 
-- [ ] `STATIC_POOLS` holds `CASYAKK3…`; a test decodes one of its real swaps
-- [ ] Both sweep emitters allow-listed
-- [ ] Ledger-processor deployed; no `unregistered_pool_events` WARN after it
-- [ ] `prices.pool_registry FINAL` has a `comet` row for `CASYAKK3…`
-- [ ] Minutes from 2026-10-07 00:16 UTC repriced; BLND `comet` 1h candles
+- [x] `STATIC_POOLS` holds `CASYAKK3…`; a test decodes one of its real swaps
+- [x] Both sweep emitters allow-listed
+- [x] Ledger-processor deployed; no `unregistered_pool_events` WARN after it
+- [x] `prices.pool_registry FINAL` has a `comet` row for `CASYAKK3…`
+- [x] Minutes from 2026-10-07 00:16 UTC repriced; BLND `comet` 1h candles
       exist for those hours
-- [ ] Next coverage sweep clean; `coverage-sweep-unclassified` back to OK
+- [x] Next coverage sweep clean; `coverage-sweep-unclassified` back to OK
 
 ## Notes
 
 - The old pool `CAS3FL6T…`, called frozen after the exploit, still emitted 1,084
   swaps from 2026-09-30 to ~2026-10-11 and is indexed. Its prices were not
   checked here.
+
+## Result (2026-11-02)
+
+The reprice and pre-roll were done under [[0338]], over ledgers
+64,809,264–65,025,000. 2026-10-12–18 matches BE's swap count per day. 93 swaps of
+10-07–11 stay undercounted: they share a minute with an enriched row of the old
+pool, which outranks the reprice. Comet 1h candles exist for all those hours.

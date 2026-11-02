@@ -2,7 +2,7 @@
 id: "0337"
 title: "Three new Comet v1.1 pools (BLNT/USDC, BLNT/XLM, a small BLND/USDC) are missing from pool_registry and the BLNT backfill contract pages the sweep"
 type: BUG
-status: active
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0300", "0334", "0336", "0100", "0291"]
@@ -18,6 +18,11 @@ history:
     status: active
     who: okarcz
     note: "Task created from the coverage-sweep-unclassified alarm of the 2026-10-26 05:17 UTC run"
+  - date: "2026-11-02"
+    status: completed
+    who: akot
+    note: >
+      Registry rows and the reprice finished under 0338, which has the result.
 ---
 
 # New Comet pools and the BLNT backfill contract page the sweep
@@ -79,9 +84,15 @@ step with the BLNT swaps. The fourth contract is not a market.
 
 ## Acceptance Criteria
 
-- [ ] `STATIC_POOLS` holds the three pools; a test decodes one real swap of each
-- [ ] `CANIE64B…` allow-listed with reason and task
-- [ ] Compute and EventBridge deployed; the running Lambdas carry the change
-- [ ] No `unregistered_pool_events` WARN for these pools after the deploy
-- [ ] Registry rows written; range from ledger 65,099,227 repriced
-- [ ] Manual probe run reads `unclassified = 0`; alarm back to OK
+- [x] `STATIC_POOLS` holds the three pools; a test decodes one real swap of each
+- [x] `CANIE64B…` allow-listed with reason and task
+- [x] Compute and EventBridge deployed; the running Lambdas carry the change
+- [x] No `unregistered_pool_events` WARN for these pools after the deploy
+- [x] Registry rows written; range from ledger 65,099,227 repriced
+- [x] Manual probe run reads `unclassified = 0`; alarm back to OK
+
+## Result (2026-11-02)
+
+The registry write, reprice, pre-roll and manual probe run were done under
+[[0338]]: three rows written, ledgers 65,099,220–65,150,000 repriced, 22 dropped
+swaps back in the candles, alarm OK at 12:35:41 UTC.

@@ -2,7 +2,7 @@
 id: "0338"
 title: "coverage-sweep-unclassified stays in ALARM: 0334 and 0337 never finished their registry and reprice steps, and three new emitters are unclassified"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0334", "0337", "0336", "0242", "0100", "0200"]
@@ -18,6 +18,12 @@ history:
     status: active
     who: akot
     note: "Task created from the coverage-sweep-unclassified alarm of the 2026-11-02 05:17 UTC run; one task for all of it"
+  - date: "2026-11-02"
+    status: completed
+    who: akot
+    note: >
+      PR #409 merged. EventBridge deployed, three registry rows written, 0334 and
+      0337 repriced and pre-rolled. Alarm OK at 12:35:41 UTC. Residual recorded.
 ---
 
 # Clear the pool-coverage alarms after 0334 and 0337
@@ -160,12 +166,43 @@ and come back. Up to 286 sit in minutes that already hold an old-pool row: 282 o
 
 ## Acceptance Criteria
 
-- [ ] `CAF5RWQG…`, `CC5QR5OO…` and `CAZE5GVM…` allow-listed with reason and task
-- [ ] The reason on the three older `4d6abb0d…` entries is corrected
-- [ ] EventBridge deployed; the running probe carries the change
-- [ ] `prices.pool_registry FINAL` has `comet` rows for the three 0337 pools
-- [ ] `source = 'comet'` candles cover 2026-10-12–18 and 10-25 23:35–10-26 01:40 UTC,
+- [x] `CAF5RWQG…`, `CC5QR5OO…` and `CAZE5GVM…` allow-listed with reason and task
+- [x] The reason on the three older `4d6abb0d…` entries is corrected
+- [x] EventBridge deployed; the running probe carries the change
+- [x] `prices.pool_registry FINAL` has `comet` rows for the three 0337 pools
+- [x] `source = 'comet'` candles cover 2026-10-12–18 and 10-25 23:35–10-26 01:40 UTC,
       on `1m` and on `1h`; the residual of 10-07–11 is recorded with its measured size
-- [ ] BLNT's 10 comet trades of 10-26 14:22–16:36 UTC exist under the classic id,
+- [x] BLNT's 10 comet trades of 10-26 14:22–16:36 UTC exist under the classic id,
       and the orphan id is on [[0242]]'s residual list
-- [ ] Manual probe run reads `unclassified = 0`; alarm back to OK
+- [x] Manual probe run reads `unclassified = 0`; alarm back to OK
+
+## Result (2026-11-02)
+
+- PR #409 merged as `380aed31`. EventBridge deployed; probe `LastModified`
+  12:17:53 UTC, and the deployed `bootstrap` holds the three contracts. `cdk diff`
+  for that stack changed only `CoverageSweepProbeFunction` `.S3Key`.
+- `--discover-pools` WRITE at 12:33:22 UTC: `written=3`, then `to_write=0`.
+  `comet` holds 5 rows. The binary was `3e0e521a…`, built with `cargo lambda
+  build --target x86_64-unknown-linux-musl`, since the workstation has no musl-gcc.
+- Manual invoke, window 65,046,238–65,267,416: `rows=22`, `allowlisted=22`,
+  `unclassified=0`, `unresolved=0`. Alarm OK at 12:35:41 UTC.
+- Reprice of 65,099,220–65,150,000 (18,717 rows), then 64,809,264–65,025,000
+  (86,791 rows). Other venues kept their rows, trades and `close_usd` zero counts,
+  which confirms that an enriched row outranks the reprice.
+- Comet gained 512 trades on 1m: 481 in the first range and 31 in the second.
+  10-12–18 matches BE's swap count per day.
+- **Residual: 93 swaps of `CASYAKK3…` on 10-07–11**, not the 286 estimated above:
+  a repriced row with a higher version did replace an old-pool row. The minutes
+  affected remain undercounted, as decided.
+- 334 comet rows at `close_usd = 0` were enriched in about 90 s, before the pre-roll.
+- `preroll-live-gap.sql` over 10-07 to 10-27 ran on 2026-11-02, **without `SYSTEM
+  STOP VIEW` and before the 11-03 start above**, which departs from runbook 0142.
+  Its reason, a half-refilled `1m`, did not apply: no partition was dropped. No
+  rollup or `mv-refresh` alarm fired.
+- After it, comet agrees on 1m, 15m, 1h, 4h and 1d: 1,726 trades, $23,364.42. The
+  reconcile MVs finished 1w and 1M: each week equals its days, October is 2,630
+  trades, $40,006.36.
+- The pre-roll put 72 `sdex` rows at `close_usd = 0` (46, 16, 7, 3 on 15m, 1h, 4h,
+  1d). The 13:30 UTC coarse sweep restored every count to its value before.
+- BLNT's 10 trades now exist under the classic id. The orphan id's rows stay for
+  [[0242]]'s cleanup. #390 was merged at 13:28 UTC and is not deployed.
