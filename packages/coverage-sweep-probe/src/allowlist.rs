@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn embedded_list_parses_with_the_seeded_entries() {
         let list = AllowList::embedded().expect("embedded allow-list parses");
-        assert_eq!(list.contract.len(), 29, "{list:?}");
+        assert_eq!(list.contract.len(), 32, "{list:?}");
         assert_eq!(list.wasm.len(), 4, "{list:?}");
         // Every family-wide entry is temporary and names the task that ends it
         // (SushiSwap V3, 0290; the Comet BLND/USDC pool, 0300), except the one
@@ -227,6 +227,38 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    #[test]
+    fn the_2026_11_02_emitters_are_allow_listed_by_contract() {
+        // The sweep of 2026-11-02 (task 0338).
+        let list = AllowList::embedded().unwrap();
+        for id in [
+            "CAF5RWQG5GSTEPD5XAKCUH2H77NWA4J6DNFT6TUP2NU6Q6VW3R6HCZYO",
+            "CC5QR5OOQMCPVSL3SJMH7QESCFINWUMX3427CT4NIDBS3FRVDHAM4NAJ",
+            "CAZE5GVMH5332L6FEGVPPDLEPVYUFGQB7ZOCH2OKKBJCBYZQ5FGKZN7L",
+        ] {
+            assert_eq!(
+                list.match_row(id, None),
+                Some(format!("contract:{id}")),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_next_spreadless_pool_still_pages() {
+        // Task 0338 lists one pool of an AMM we do not index, not its family: a
+        // new pool has to reach a human.
+        let list = AllowList::embedded().unwrap();
+        let spreadless = "ae835560f930e73b3ac8ce0ab2b26543b815eb6bb61b0d87b894f4dc8dc6e8df";
+        assert_eq!(
+            list.match_row(
+                "CCCRWH6Q3FNP3I2I57BDLM5AFAT7O6OF6GKQOC6SSJNDAVRZ57SPHGU2",
+                Some(spreadless)
+            ),
+            None
+        );
     }
 
     #[test]
