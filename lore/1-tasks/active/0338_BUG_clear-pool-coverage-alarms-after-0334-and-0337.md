@@ -83,7 +83,14 @@ the window.
   sit on `asset_id` 14236029787030528679, `soroban`, contract `CCBNWP5L…`, created
   at 14:22:57. From 18:42 UTC, when `sdex` first traded it, the trades sit on
   15676158627979534220, `classic` BLNT-`GAP2ACGH…`, `sac_address` `CCBNWP5L…`.
-  Same shape as [[0242]]; the cause is not confirmed here.
+  This is the race in [[0242]]: the SAC traded before anything interned its
+  classic. PR #390 is still open, so live can do this again for any new SAC.
+- **A reprice heals the trades, not the orphan id.** `events-backfill` builds its
+  registry from `prices.assets` (`run.rs:220`), and the classic row now carries
+  the SAC, so it writes these minutes under the classic id. The rows under
+  14236029787030528679 and its `prices.assets` row stay.
+- **The order books.** `CA5YJ5H2…` is grBENJI/USDC like `CAF5RWQG…`; `CBOSXSEZ…`
+  and `CD35HSTR…` are AMA1/XUSDT.
 
 ### What does not constrain this
 
@@ -103,14 +110,16 @@ the window.
 - `CC5QR5OO…` is a permanent `[[contract]]`.
 - Removing the stale `until` entries (`003710b3…`, `95a8e001…`, `8abc2891…`) is
   out of scope.
+- **The BLNT orphan id goes to [[0242]].** The reprice ends past 16:36 UTC so the
+  10 trades reach the classic id. This task deletes nothing on production: after
+  the reprice the orphan rows are copies, and they join 0242's residual cleanup,
+  which is where every other SAC-keyed row is removed.
 
 ## Implementation Plan
 
 1. Allow-list the three contracts and correct the order-book reason; fix what
    the count-pinning tests report; `cargo test -p coverage-sweep-probe`.
-2. Decide how the BLNT identity split is repaired, against [[0242]]: whether a
-   reprice writes the 10 trades under the classic id, and what happens to the
-   orphan rows, before anything below is run.
+2. Add BLNT's orphan id to [[0242]]'s residual list (done in its Heal log).
 3. After merge, in this order:
    1. `make -C infra diff-production`, read in full; then
       `make -C infra deploy-production-eventbridge`.
@@ -119,7 +128,7 @@ the window.
    3. `--discover-pools --dry-run` (expect `to_write=3`, `change="new"`), WRITE,
       dry run again (`to_write=0`).
    4. Reprice ledgers 64,809,271–65,150,000 (10-07 to 10-26 ~16:50 UTC), dry run
-      first. The end covers the orphan BLNT minutes, assuming step 2 keeps it.
+      first. The end covers the orphan BLNT minutes.
    5. `preroll-live-gap.sql` over that range. Never `preroll-amm-reprice.sql`.
    6. Invoke the probe in a later clock hour than the last run; expect
       `unclassified = 0` and the alarm in OK.
@@ -132,6 +141,6 @@ the window.
 - [ ] EventBridge deployed; the running probe carries the change
 - [ ] `prices.pool_registry FINAL` has `comet` rows for the three 0337 pools
 - [ ] `source = 'comet'` candles cover 2026-10-12–18 and 10-25 23:35–10-26 01:40 UTC
-- [ ] BLNT comet trades sit under one `asset_id`, or the split is handed to [[0242]]
-      with the reason recorded here
+- [ ] BLNT's 10 comet trades of 10-26 14:22–16:36 UTC exist under the classic id,
+      and the orphan id is on [[0242]]'s residual list
 - [ ] Manual probe run reads `unclassified = 0`; alarm back to OK
