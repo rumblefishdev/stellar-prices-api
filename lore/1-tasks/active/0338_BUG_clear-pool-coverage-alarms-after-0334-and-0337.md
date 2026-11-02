@@ -92,11 +92,26 @@ the window.
 - **The order books.** `CA5YJ5H2…` is grBENJI/USDC like `CAF5RWQG…`; `CBOSXSEZ…`
   and `CD35HSTR…` are AMA1/XUSDT.
 
-### What does not constrain this
+### What a reprice can and cannot recover
+
+`events-backfill` has no venue filter, and an enriched row sits at `version + 1`,
+above what the reprice writes for the same ledger. So a reprice fills an empty
+minute, and is discarded in a minute that already has an enriched row. That
+protects the other venues' USD values, and it limits what comes back here.
+
+Of `CASYAKK3…`'s 578 swaps up to 2026-10-19, 302 sit in minutes with no comet row
+and come back. Up to 286 sit in minutes that already hold an old-pool row: 282 on
+10-07–11 and 4 on 10-19. All of 10-12–18 comes back.
+
+### Timing
 
 - `prices-production-cleanup` is DISABLED ([[0200]]), so the 1m rows survive.
-- `mv_reconcile_*` look back 7 days and BE holds the events, so there is no hard
-  deadline, but every minute repriced here is outside that window.
+- `mv_reconcile_*` look back 7 days, and the runbook wants them stopped when a
+  pre-roll overlaps that window. A range ending 2026-10-27 00:00 UTC stops
+  overlapping on 2026-11-03 00:00 UTC.
+- The pre-roll's 1w and 1M rows for the buckets it cuts short lose on version, so
+  the reconcile MVs have to rebuild them: week of 10-26 and October are still in
+  their windows until about 2026-11-08.
 
 ## Decision
 
@@ -114,6 +129,11 @@ the window.
   10 trades reach the classic id. This task deletes nothing on production: after
   the reprice the orphan rows are copies, and they join 0242's residual cleanup,
   which is where every other SAC-keyed row is removed.
+- **The reprice is plain, with no `DELETE` of comet rows.** Up to 286 swaps of
+  2026-10-07–11 and 10-19 stay undercounted, which is recorded here as known.
+  Removing that residual needs comet `DELETE`s on `1m` and on the coarse tiers,
+  which is not worth the risk for one pool in five days.
+- **Two ranges, not one**, minute-aligned, so 10-19–23 is not rewritten for nothing.
 
 ## Implementation Plan
 
@@ -127,11 +147,15 @@ the window.
       pools of 0337 and reports a false `to_write=0`.
    3. `--discover-pools --dry-run` (expect `to_write=3`, `change="new"`), WRITE,
       dry run again (`to_write=0`).
-   4. Reprice ledgers 64,809,271–65,150,000 (10-07 to 10-26 ~16:50 UTC), dry run
-      first. The end covers the orphan BLNT minutes.
-   5. `preroll-live-gap.sql` over that range. Never `preroll-amm-reprice.sql`.
-   6. Invoke the probe in a later clock hour than the last run; expect
+   4. Invoke the probe in a later clock hour than the last run; expect
       `unclassified = 0` and the alarm in OK.
+   5. From 2026-11-03 00:15 UTC and before 2026-11-08: reprice ledgers
+      64,809,264–65,025,000 and 65,099,220–65,150,000, dry run first. The second
+      range ends past the orphan BLNT minutes.
+   6. `preroll-live-gap.sql` with `start_ts = '2026-10-07 00:00:00'`,
+      `end_ts = '2026-10-27 00:00:00'`. Never `preroll-amm-reprice.sql`.
+   7. Check the repriced 1m rows got `close_usd`; if not, `coarse-repair
+      --table price_ohlcv_1m --start-month 202610 --end-month 202610 --skip-snapshot`.
 4. Close [[0334]], [[0337]] and this task.
 
 ## Acceptance Criteria
@@ -140,7 +164,8 @@ the window.
 - [ ] The reason on the three older `4d6abb0d…` entries is corrected
 - [ ] EventBridge deployed; the running probe carries the change
 - [ ] `prices.pool_registry FINAL` has `comet` rows for the three 0337 pools
-- [ ] `source = 'comet'` candles cover 2026-10-12–18 and 10-25 23:35–10-26 01:40 UTC
+- [ ] `source = 'comet'` candles cover 2026-10-12–18 and 10-25 23:35–10-26 01:40 UTC,
+      on `1m` and on `1h`; the residual of 10-07–11 is recorded with its measured size
 - [ ] BLNT's 10 comet trades of 10-26 14:22–16:36 UTC exist under the classic id,
       and the orphan id is on [[0242]]'s residual list
 - [ ] Manual probe run reads `unclassified = 0`; alarm back to OK
