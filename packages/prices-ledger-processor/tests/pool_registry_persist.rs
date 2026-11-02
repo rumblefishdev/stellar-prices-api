@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use prices_ingest_core::{
-    AssetRegistry, OhlcvCandle, OracleSample, PoolRegistryRow, Registries, process_ledger,
+    AssetRegistry, DecimalsResolver, OhlcvCandle, OracleSample, PoolRegistryRow, Registries,
+    process_ledger,
 };
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
@@ -237,7 +238,8 @@ async fn harness(
         sink.clone(),
         AssetRegistry::from_existing(Vec::new()),
         registries,
-    );
+    )
+    .with_decimals_resolver(DecimalsResolver::live("http://127.0.0.1:1/".to_string()));
     (reconciler, sink)
 }
 

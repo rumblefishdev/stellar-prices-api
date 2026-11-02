@@ -259,12 +259,25 @@ the DROP and keep the output:
 SELECT source,
        count()            AS candles,
        sum(trade_count)   AS trades,
-       sum(volume_base)   AS volume_base,
-       sum(volume_quote)  AS volume_quote
+       sumIf(volume_base,
+             asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != '')
+         AND quote_asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != ''))
+                          AS volume_base,
+       sumIf(volume_quote,
+             asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != '')
+         AND quote_asset_id NOT IN (SELECT asset_id FROM prices.assets WHERE contract_address != ''))
+                          AS volume_quote
 FROM prices.price_ohlcv_1m FINAL
 WHERE toYYYYMM(timestamp) = <month>
 GROUP BY source ORDER BY source FORMAT TabSeparated;
 ```
+
+Volumes leave out every candle that touches a pure Soroban token (task 0329).
+The ingest now scales such a token's legs by its own `decimals()`, so its
+volume moves by design: an 18-decimal token's base volume falls by 10^11, a
+6-decimal one's rises tenfold. Trades are still counted on every candle.
+`reingest_0286.py` runs exactly this, and a month whose "before" was read
+without it gets volumes left uncompared, as a FINDING.
 
 (If you later need a row-level diff rather than these sums, attach the frozen
 parts to a scratch table with the `ATTACH PARTITION … FROM '/var/lib/clickhouse/
@@ -345,7 +358,9 @@ Re-run the step-4c query and compare, per source:
 | any source                                                                                                                                  | `count()` may differ: a minute that traded only dust still exists, so candles are not lost — but a minute whose every fill was dropped upstream for a zero amount never existed in either shape.                                                                                                                                                                                                                        |
 
 Differences in `open`/`high`/`low`/`close` are the POINT of the exercise and are
-not reconciled. Differences in volume are a defect. Record both.
+not reconciled. Differences in volume (on the candles step 4c compares) are a
+defect. Record both. So is a non-zero `trades dropped (decimals)` in §6: the
+script reads it and marks the month DEFECT.
 
 ### 4g. DROP the overlapping coarse partitions and pre-roll the month
 
@@ -451,7 +466,7 @@ month cannot be silently ordered the old way any more.
 
 What survives is the value check. `application_order` is `Int16`, and a negative
 value is not a position — `resolve_transaction_index` degrades it to 0 and counts
-it. The run's last summary line reports it:
+it. The run's summary reports it:
 
 ```
 negative apply order:      0
@@ -470,6 +485,20 @@ candles lack those swaps. The STOP names the pass. A binary built before 0242 pr
 no such line and is not checked. What to do:
 [`0242-sac-identity-heal.md`](0242-sac-identity-heal.md) §4c, and §4d for
 `--amm wait`, where `amm-done` does not read the line.
+
+Since task 0329 the summary ends with one more line:
+
+```
+trades dropped (decimals): 0
+```
+
+A pure Soroban token's legs are scaled by its `decimals()`, read over Soroban
+RPC the first time the run meets it and kept in `prices.asset_decimals`.
+**Anything but `0` means a token did not resolve and its trades are NOT in the
+month's candles.** The run WARNs naming the contract. Re-run the month once it
+resolves. With `--amm wait`, pass the line to `amm-done … --decimals N`: the
+script refuses an `amm.done` without it and marks a non-zero count DEFECT. The binary needs outbound HTTPS to `SOROBAN_RPC_URL` (default
+`https://mainnet.sorobanrpc.com`), and `prices.asset_decimals` must exist.
 
 ---
 
@@ -491,8 +520,52 @@ source). The MV `mv_ohlcv_1d_to_1M` keeps them current afterwards.
 `close_usd = 0` and `volume_quote_usd = 0`, so the enrichment worker will re-price
 the entire estate — this is the cost the ledger estimate in precondition 8 does
 NOT include. For scale: task 0268's campaign re-priced 9.94 M candles in ~24 min;
-0228 estimated ~190 M candles at ~4 h 40 m. This is all of them, and it runs on
-the same worker under the same concurrency.
+0228 estimated ~190 M candles at ~4 h 40 m. Those were one-shot runs.
+
+**Do not leave this to the hourly Lambda.** Its historical drain is bounded:
+one month per run, at most `BATCH_SIZE × MAX_BATCHES` = 200 000 rows, and
+`ENRICHMENT_ONE_SHOT` does not lift that (`frontier.rs` sets `one_shot = false`
+for every historical month). On 2026-10-12 the re-ingest left ~900 M priceable
+`1m` rows (2022-05 → 2026-08). At 200 k an hour that is ~190 days; the Lambda
+works ~75 s of each hour.
+
+Drain `1m` from fishuser-hero with `coarse-repair`, which takes `price_ohlcv_1m`
+in its fill-the-zeros mode only (no `--reset-*`, `--skip-snapshot` required).
+It runs the same pass as the Lambda, one month at a time to the end, and writes
+only rows still at zero, so the Lambda can keep running beside it. Same `tmux`
+and env as §7b-2 ①:
+
+```bash
+for M in $(seq 202205 202212) $(seq 202301 202312) $(seq 202401 202412) \
+         $(seq 202501 202512) $(seq 202601 "$END"); do
+  ./target/release/coarse-repair --transport hetzner --table price_ohlcv_1m \
+    --start-month "$M" --end-month "$M" --skip-snapshot --batch-size 50000 \
+    || { echo "STOPPED at $M"; break; }
+done 2>&1 | tee -a /tmp/0286_drain_1m.log
+```
+
+One month per command keeps each month's enumeration to a single partition, and
+a re-run skips what is already priced. Each batch scans the whole partition, so
+a bigger batch costs little more than a small one: measured on 202205, a 10 k
+batch took ~3.8 s, which models the range at ~2 days with 50 k and ~6–8 days
+with the default 10 k. Time the first month and re-plan from it.
+
+Memory follows the rows a statement reads, not the batch: ~70 MB per million
+rows read, ~2 GiB on 202205 (2026-10-12, `system.query_log`). The 2022-12 …
+2023-05 partitions are 2.5× that, and each priced row adds a version that
+`FINAL` reads until the merge, so they can reach the writer's ~7.5 GiB cap. On
+`Code: 241` (`MEMORY_LIMIT_EXCEEDED`), collapse the month's versions as
+`prices_admin`, then re-run the loop from that month:
+
+```bash
+chadmin "OPTIMIZE TABLE prices.price_ohlcv_1m PARTITION $M FINAL"
+```
+
+`--batch-size 20000` trims only the written part of the statement.
+
+The cluster is shared with the block explorer, and the loop keeps it busy
+around the clock. Check the explorer's latency while it runs. `Ctrl-C` is a
+safe pause at any point.
 
 **7b-2. Re-price the coarse tiers. The drain above never reaches them.** The
 enrichment worker prices `price_ohlcv_1m` and nothing else
@@ -511,8 +584,11 @@ over the whole history on all six tables. It does not read `1m`. It prices each
 coarse row from that table's own reference candles, with the same tiers as the
 worker, including the measured USDC rate on the pivot.
 
-- **Start only when the `1m` drain is finished.** Both passes load the same
-  shared cluster, and 7c/7e measure the finished state. **The frontier gauge
+- **Do not run it at the same time as the `1m` drain.** It does not read `1m`,
+  so it may go first, and on a re-ingest it should: clients read the coarse
+  tiers. But both passes load the same shared cluster, and 7c/7e measure the
+  finished state, so run them one after the other and measure after both.
+  Before 7c/7e, confirm the `1m` drain is finished. **The frontier gauge
   alone cannot tell you this.** `EnrichmentFrontierMonthsPending` counts only
   months that are NOT marked `exhausted` in `prices.enrichment_frontier`
   (`frontier.rs`, `months_to_sweep`). Almost every historical month was marked

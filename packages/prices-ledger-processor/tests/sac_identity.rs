@@ -211,6 +211,8 @@ fn an_unreadable_sac_set_ingests_without_candidates() {
         Err(SinkError::Write("Code: 60. Unknown table".to_string())),
     );
     assert!(!loaded);
+    // Minted as a `Contract`, so its decimals resolve like any Soroban token's.
+    assets.set_decimals(XCR_SAC.to_string(), 7);
     let out = run(vec![trade(XLM_SAC, XCR_SAC)], &mut assets);
     assert!(out.sac_unproven.is_empty(), "not a candidate, not skipped");
     assert_eq!(out.amm_ticks.len(), 1, "the trade still prices");
@@ -325,6 +327,7 @@ fn an_unproven_sac_trade_is_skipped_and_interns_nothing() {
 fn a_genuine_soroban_token_keeps_its_contract_identity() {
     let token = strkey(GENUINE_TOKEN);
     let mut assets = with_candidates(AssetRegistry::from_existing(vec![]));
+    assets.set_decimals(token.clone(), 7);
     let out = run(vec![trade(XLM_SAC, &token)], &mut assets);
     assert_eq!(out.amm_ticks.len(), 1);
     assert_eq!(

@@ -63,8 +63,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, OfferLookupCounts, OracleSample, PoolRegistryRow, Registries,
-    decode_object, extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
+    AssetRegistry, CandleAccumulator, DecimalsResolver, DecimalsRow, OfferLookupCounts,
+    OracleSample, PoolRegistryRow, Registries, decode_object, decode_resolving,
+    extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
     raw_trade_to_tick,
 };
 use tokio::sync::Mutex;
@@ -120,6 +121,10 @@ pub struct RunStats {
     /// resolved (task 0242 D2). Counted over the minutes this run WROTE, like
     /// `unregistered_pool_events`. 0 when healthy.
     pub sac_unproven_skipped: u64,
+    /// AMM trades dropped because a leg's token decimals did not resolve over
+    /// RPC, even after the second decode (task 0329). Counted over the minutes
+    /// this run WROTE, like `unregistered_pool_events`. 0 when healthy.
+    pub trades_missing_decimals: u64,
     /// Candle-INSERT latency for this run, or `None` when the run wrote no
     /// candles at all. `None` rather than a zeroed struct so an idle run
     /// publishes no `ClickHouseWriteLatencyMs` datapoint instead of a 0 ms one
@@ -141,6 +146,10 @@ pub struct ProcessingState {
     /// here only *after* the write succeeds, so a failed write is retried next
     /// run. Init: everything loaded at cold start is already in the table.
     pub persisted_pools: HashMap<String, PoolRegistryRow>,
+    /// Resolves Soroban token decimals a decode reports missing (task 0329).
+    /// Warm across invocations, like the registries, so a token that will not
+    /// resolve is not re-asked on every ledger.
+    pub decimals: DecimalsResolver,
 }
 
 /// The cold-start [`ProcessingState`] built from what was loaded.
@@ -164,6 +173,7 @@ fn initial_state(assets: AssetRegistry, mut registries: Registries) -> Processin
         assets,
         registries,
         persisted_pools,
+        decimals: DecimalsResolver::live_from_env(),
     }
 }
 
@@ -193,6 +203,13 @@ where
             sink,
             state: Mutex::new(initial_state(assets, registries)),
         }
+    }
+
+    /// Replace the decimals resolver (task 0329). Tests point it at an address
+    /// that refuses connections, so no test can reach a public RPC.
+    pub fn with_decimals_resolver(mut self, resolver: DecimalsResolver) -> Self {
+        self.state.get_mut().decimals = resolver;
+        self
     }
 
     /// One reconcile run for a LONG-RUNNING caller (the Lambda). Minutes the
@@ -263,6 +280,9 @@ where
         // (minute_start, contract) per trade skipped on an unproven SAC (task
         // 0242), per ledger for the same reason.
         let mut ledger_sac_unproven: Vec<(u32, String)> = Vec::new();
+        // (minute_start, trades, contracts) dropped because a token's decimals
+        // did not resolve (task 0329). Per ledger for the same reason as above.
+        let mut ledger_missing_decimals: Vec<(u32, u32, Vec<String>)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -285,8 +305,18 @@ where
                 for trade in trades {
                     sdex.merge(raw_trade_to_tick(&trade, &mut state.assets));
                 }
-                // Soroban AMM trades + oracle samples.
-                let sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
+                // Soroban AMM trades + oracle samples. Task 0329: a trade naming a
+                // token whose decimals are not known yet is dropped, not guessed;
+                // `decode_resolving` resolves it, persists it, and decodes again.
+                let registries = &mut state.registries;
+                let sob = decode_resolving(
+                    &mut state.decimals,
+                    &mut state.assets,
+                    ledger_sequence(lcm),
+                    |assets| process_ledger(lcm, registries, assets),
+                    async |rows: &[DecimalsRow]| self.sink.write_decimals(rows).await,
+                )
+                .await?;
                 for (source, tick) in sob.amm_ticks {
                     amm.entry(source).or_default().merge(tick);
                 }
@@ -308,6 +338,13 @@ where
                         .map(|c| (minute, c.clone())),
                 );
                 ledger_sac_unproven.extend(sob.sac_unproven.into_iter().map(|c| (minute, c)));
+                if sob.trades_missing_decimals > 0 {
+                    ledger_missing_decimals.push((
+                        minute,
+                        sob.trades_missing_decimals,
+                        sob.missing_decimals,
+                    ));
+                }
                 obj_max = obj_max.max(seq);
             }
             // Flag only this object's HIGHEST ledger as a valid cursor landing
@@ -335,6 +372,7 @@ where
                 pools_persisted: 0,
                 unregistered_pool_events: BTreeMap::new(),
                 sac_unproven_skipped: 0,
+                trades_missing_decimals: 0,
                 // Nothing was persisted, so no INSERT happened: no datapoint.
                 ch_write: None,
             });
@@ -496,6 +534,7 @@ where
                 pools_persisted,
                 unregistered_pool_events: BTreeMap::new(),
                 sac_unproven_skipped: 0,
+                trades_missing_decimals: 0,
                 ch_write: None,
             });
         };
@@ -589,6 +628,25 @@ where
                 "skipped trades on is_sac contracts with no SAC proof (task 0242)"
             );
         }
+        let flushed_missing_decimals: Vec<&(u32, u32, Vec<String>)> = ledger_missing_decimals
+            .iter()
+            .filter(|(minute, _, _)| *minute < flush_boundary)
+            .collect();
+        let trades_missing_decimals: u64 = flushed_missing_decimals
+            .iter()
+            .map(|(_, n, _)| *n as u64)
+            .sum();
+        if trades_missing_decimals > 0 {
+            let contracts: BTreeSet<&str> = flushed_missing_decimals
+                .iter()
+                .flat_map(|(_, _, c)| c.iter().map(String::as_str))
+                .collect();
+            tracing::warn!(
+                trades_missing_decimals,
+                ?contracts,
+                "dropped AMM trades whose token decimals did not resolve (task 0329)"
+            );
+        }
         info!(
             start,
             end = current,
@@ -614,6 +672,7 @@ where
             pools_persisted,
             unregistered_pool_events,
             sac_unproven_skipped: sac_unproven.len() as u64,
+            trades_missing_decimals,
             ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })
     }

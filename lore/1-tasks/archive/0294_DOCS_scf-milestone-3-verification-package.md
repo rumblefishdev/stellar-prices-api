@@ -2,17 +2,33 @@
 id: "0294"
 title: "SCF Milestone 3 verification package — evidence doc, form answers, video scenario, deviations"
 type: DOCS
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047", "0295", "0296", "0297", "0311"]
+related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047", "0295", "0296", "0297", "0311", "0101", "0139", "0274"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, scf, submission, evidence]
 milestone: 3
 links:
+  - "../../../docs/scf/milestone-3-evidence.md"
+  - "../../../docs/scf/milestone-3-rfp-deviations.md"
   - "../../../docs/scf/milestone-2-evidence.md"
   - "../../../docs/scf/milestone-2-rfp-deviations.md"
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-10-06
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Submitted: Aga sent the SCF Deliverable Verification form on 2026-10-06
+      with the shortened answers of #392. The package —
+      milestone-3-evidence.md (510 lines, 16-page PDF), four declared
+      deviations, the form answers, the video scenario and a 7:39 film —
+      merged in #354 (2026-10-05 17:27 UTC) and reached master in #391 three
+      minutes later; every repo link the PDF and the form make answered 200
+      on master. The PDF, the film and their folder are on Google Drive with
+      link sharing. The form's G- and C-address fields do not apply: the API
+      owns no Stellar account and no contract. Closing decisions and the gaps
+      found on the way out are under Design Decisions and Issues Encountered.
   - date: 2026-09-29
     status: active
     who: claude
@@ -206,23 +222,111 @@ issue with its task. Kept here so the package is not written from memory.
 
 ## Acceptance Criteria
 
-- [ ] `milestone-3-evidence.md` covers all 9 Tranche 3 criteria, each with the
-      observable it is graded against and a reproducible source
-- [ ] Every §9 Tranche 3 Work bullet is addressed, including the two without a
-      numbered criterion
-- [ ] `milestone-3-rfp-deviations.md` declares every known deviation, including
-      AC 1, the AC 5 companion numbers and the endpoint-group count
-- [ ] Every criterion that is open on 2026-09-18 is closed, declared as a
+- [x] `milestone-3-evidence.md` covers all 9 Tranche 3 criteria, each with the
+      observable it is graded against and a reproducible source — **§5**, each
+      with a command, a live URL or a CI run, and the date it was read.
+- [x] Every §9 Tranche 3 Work bullet is addressed, including the two without a
+      numbered criterion — **§6**: X-Ray tracing end to end and the CloudWatch
+      dashboard.
+- [x] `milestone-3-rfp-deviations.md` declares every known deviation, including
+      AC 1, the AC 5 companion numbers and the endpoint-group count — **four**:
+      AC 1 (the backfill finished early), AC 9 (two metrics flat since), AC 2
+      (Redocly and the portal's renderer in place of `openapi-validator` and
+      Swagger UI), AC 5 (scope and companion numbers). The endpoint-group count
+      turned out not to be a deviation (Design Decision 7).
+- [x] Every criterion that is open on 2026-09-18 is closed, declared as a
       deviation, or listed under "deliberately not claimed" with an owner —
-      none is silently absent
-- [ ] "What is deliberately not claimed" section present, each row with a
-      destination
-- [ ] Live endpoints + access table current, including how the Stellar team
-      reaches the dashboard
-- [ ] `milestone-3-form-answers.md` and `milestone-3-video-scenario.md` written
-- [ ] All cited figures re-run within days of submission, with the date beside
-      each
-- [ ] No claim in the package lacks a task, query or URL behind it
+      none is silently absent. AC 3, 4, 8 and 9 closed; AC 7 met on the
+      fresh-account runbook, not run in an empty account ([[0297]] reopens on a
+      reviewer's request, §8); AC 6's 22 wildcard-resource statements each
+      named with what limits them.
+- [x] "What is deliberately not claimed" section present, each row with a
+      destination — as **§7 Known issues** and **§8 Limitations**, each row
+      naming its task (Design Decision 6).
+- [x] Live endpoints + access table current, including how the Stellar team
+      reaches the dashboard — **§9**: read-only access per named reviewer
+      through IAM Identity Center ([[0295]]'s runbook).
+- [x] `milestone-3-form-answers.md` and `milestone-3-video-scenario.md` written
+      — the form went out with the shortened answers of #392.
+- [x] All cited figures re-run within days of submission, with the date beside
+      each — AC 2, 3, 4, 6 and 8 on 2026-10-05, AC 9's window 09-23 → 09-30.
+      **Two exceptions, both dated in the package:** AC 5 (2026-09-18, no
+      re-run by the decision of 09-28) and AC 1 (2026-10-01, Design Decision 3).
+- [x] No claim in the package lacks a task, query or URL behind it
+
+## Implementation Notes
+
+- `docs/scf/`: `milestone-3-evidence.md` (510 lines, §1–§10),
+  `milestone-3-rfp-deviations.md`, `milestone-3-form-answers.md`,
+  `milestone-3-video-scenario.md`, `screenshots/m3-ac2-api-reference.png`,
+  and `repo-links.lua`, which `build-pdf.sh` now runs. Side edits: the
+  load-test report, the 0295 dashboard-access runbook, the monitoring report
+  and the general overview.
+- PRs: #354 (the package), #391 (release to master), #392 (shortened answers).
+  The AC 2 lint and the AC 4 test counts come from the master run of the
+  earlier release #381 (37298469682).
+- Google Drive, link-shared: the evidence PDF, the film (15 clips stitched,
+  7:39) and the folder holding both.
+
+## Issues Encountered
+
+- **Dead links in the PDF.** Typst renders a relative Markdown link as an
+  in-document reference, so every link to a repo document went nowhere.
+  Reported on 2026-10-05; fixed by `repo-links.lua` (Design Decision 4).
+- **Two sentences written before the release reached Drive**: AC 7's
+  "on `master` from the next release" and the access table's "request by
+  e-mail". Fixed (b943f811, a5816d8e); each PDF went up as a new version under
+  the same Drive link, checked by its size each time.
+- **The film.** QuickTime's variable-frame-rate clips froze their picture, and
+  one clip's narration ran 12 s late; the stitch padded the frames and cut
+  12 s of silence to resync. The ffmpeg scripts were not kept in the repo.
+- **Not in the package:** [[0101]]'s AMM history holes (Soroswap
+  2026-07-06 → 07-11, Phoenix ~2 % short; blocked) are named in neither the
+  Milestone 2 nor the Milestone 3 known issues. Found at closing.
+
+## Design Decisions
+
+### From Plan
+
+1. **The M2 layout and the same four documents**: evidence per criterion with
+   its observable, source and date; deviations in their own document; form
+   answers and video scenario mirrored from M2.
+2. **Launch at 2026-09-23 09:40 CEST** for the AC 9 window and the narrative
+   ([[0296]]).
+
+### Emerged
+
+3. **AC 1 stays at its 2026-10-01 reading** (decided 2026-10-05). A re-read
+   that day found that the explorer's Galexie export stalled from 2026-10-01
+   19:08 to 10-02 09:07 CEST: no ledger reached the pipeline for 14 h,
+   `ledger-processor-no-invocations` and `rollup-freshness-1m` fired within
+   25 minutes, and `ledger-processor-lag` stayed in ALARM 09:17–13:27 while
+   the backlog drained. The [[0139]] window then held the writers
+   14:08–14:57. Both postdate the reading; neither is in the package.
+4. **Repo links in the PDF point at `blob/master`** (`repo-links.lua`): a PDF
+   has no repository beside it. `build-pdf.sh` stops if the filter no longer
+   rewrites.
+5. **No published address for dashboard access** (decided 2026-10-05): the
+   evidence says "on request", the submitted Field 4 is "None." and the access
+   line sits in AC 8.
+6. **"What is deliberately not claimed" became §7 Known issues and §8
+   Limitations.** M3 is the last tranche, so no row can point at a later
+   milestone; each names its task instead.
+7. **The endpoint-group count is not a deviation**: the evidence counts seven
+   `/v1` routes as the M2 package did, and the design document's §4 files the
+   same routes under five headings (evidence §5, AC 4).
+8. **Answers shortened before submission** (#392): about 3,700 characters
+   instead of 8,800, every figure and date unchanged, detail left to the PDF.
+9. **`ch-demo-queries.sql` not refreshed**: M3's evidence runs on the API,
+   CloudWatch and CI, and adds no ClickHouse query.
+10. **#391 released #373 ([[0274]], `price_basis`) to master before it was
+    deployed** — declared in #391's description. The package does not
+    describe that field.
+
+## Future Work
+
+None spawned. Post-delivery work stays with the tasks the evidence names in §7
+and §8.
 
 ## Notes
 

@@ -94,7 +94,7 @@ None of that needs a peer's price to be published as USDC's.
 
 ## Consequence for phase 3
 
-Primary and fallback stay what phase 1 chose (Chainlink, Bitstamp, Kraken):
+Primary and fallback stay what phase 1 chose (Chainlink, Bitstamp, third-party):
 all three *are* USDC/USD. The peer basket enters only as a validation input.
 The [[0172]] point stands separately: canonical Stellar USDT
 (`GCQTGZQQ…TG6V`) is an IOU that traded at ~0.13, and its `/ohlcv` series is

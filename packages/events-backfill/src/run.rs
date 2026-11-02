@@ -21,9 +21,10 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, BE_DATABASE, CandleAccumulator, DEFAULT_BACKOFF_MS, LedgerSoroban, OhlcvCandle,
-    OhlcvWriter, PRICES_DATABASE, RawSorobanEvent, Registries, UnresolvedPool, UnresolvedPoolSwap,
-    preload_sac_resolver, process_soroban_event_rows, retry_with_backoff,
+    AssetRegistry, BE_DATABASE, CandleAccumulator, DEFAULT_BACKOFF_MS, DecimalsResolver,
+    DecimalsRow, LedgerSoroban, OhlcvCandle, OhlcvWriter, PRICES_DATABASE, RawSorobanEvent,
+    Registries, UnresolvedPool, UnresolvedPoolSwap, decode_resolving, preload_sac_resolver,
+    process_soroban_event_rows, retry_with_backoff,
 };
 
 use crate::cli::Cli;
@@ -47,11 +48,48 @@ where
         .map_err(EventsBackfillError::from)
 }
 
-/// Run the shared seam over one ledger's events, merge the resulting ticks into
-/// the **run-level** per-source accumulators, then move every candle for a minute
-/// strictly older than this ledger's minute out of the accumulators and into the
-/// per-source write buffers. Synchronous (no I/O): buffered candles are written
-/// later, in batches, at chunk end.
+/// Run the shared seam over one ledger's events.
+///
+/// A trade naming a Soroban token whose decimals are not known yet is dropped by
+/// the decode, never guessed (task 0329). Those tokens are resolved over RPC,
+/// persisted (not in a dry-run), and the ledger is decoded again — decoding is
+/// deterministic and the first result is discarded whole. Whatever is still in
+/// `missing_decimals` afterwards is volume this run did not reprice.
+#[allow(clippy::too_many_arguments)]
+async fn decode_ledger(
+    ledger: u32,
+    closed_at: i64,
+    events: &[RawSorobanEvent],
+    reg: &mut Registries,
+    assets: &mut AssetRegistry,
+    decimals: &mut DecimalsResolver,
+    writer: &OhlcvWriter,
+    dry_run: bool,
+) -> Result<LedgerSoroban, EventsBackfillError> {
+    decode_resolving(
+        decimals,
+        assets,
+        ledger,
+        |assets| {
+            let mut out = LedgerSoroban::default();
+            process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
+            out
+        },
+        async |rows: &[DecimalsRow]| {
+            if dry_run {
+                return Ok(());
+            }
+            retry_write(|| async { writer.write_decimals(rows).await }).await
+        },
+    )
+    .await
+}
+
+/// Merge one decoded ledger's ticks into the **run-level** per-source
+/// accumulators, then move every candle for a minute strictly older than this
+/// ledger's minute out of the accumulators and into the per-source write
+/// buffers. Synchronous (no I/O): buffered candles are written later, in
+/// batches, at chunk end.
 ///
 /// Because events arrive in ledger (hence minute) order and the accumulators
 /// persist across chunks, only the current minute stays open — so a minute split
@@ -59,20 +97,17 @@ where
 /// RMT-colliding partials.
 #[allow(clippy::too_many_arguments)]
 fn accumulate_ledger(
-    ledger: u32,
+    out: LedgerSoroban,
     closed_at: i64,
-    events: &[RawSorobanEvent],
-    reg: &mut Registries,
-    assets: &mut AssetRegistry,
     accumulators: &mut HashMap<&'static str, CandleAccumulator>,
     buffers: &mut HashMap<&'static str, Vec<OhlcvCandle>>,
     ticks_by_source: &mut HashMap<&'static str, u64>,
     failed_by_source: &mut HashMap<&'static str, u64>,
     raw_unresolved: &mut Vec<UnresolvedPoolSwap>,
     sac_unproven: &mut Vec<String>,
+    missing_decimals: &mut u64,
 ) {
-    let mut out = LedgerSoroban::default();
-    process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
+    *missing_decimals += out.trades_missing_decimals as u64;
     for (source, tick) in out.amm_ticks {
         accumulators.entry(source).or_default().merge(tick);
         *ticks_by_source.entry(source).or_default() += 1;
@@ -205,6 +240,8 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
             "SAC proofs that did not verify: their swaps are skipped, not minted (task 0242 D2)"
         );
     }
+    writer.load_decimals(&mut assets).await?;
+    let mut decimals = DecimalsResolver::backfill_from_env();
     let mut reg = reprice_registry(writer.load_pool_registry().await?)?;
 
     // Every AMM pool has a `venue` entry (the registry superset); its strkeys are
@@ -248,6 +285,9 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // not cover this ledger" — it can only be a corrupt or unexpected row, and
     // any non-zero count means those fills ARE in the wrong order.
     let mut apply_order_fallbacks: u64 = 0;
+    // AMM trades the run could not reprice because a token's `decimals()` did
+    // not resolve (task 0329) — trades, not legs.
+    let mut missing_decimals: u64 = 0;
 
     // Run-level state (persists across chunks): one accumulator per source and
     // one write buffer per source. `flush_older_than` keeps the current minute
@@ -278,18 +318,27 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 if let Some(l) = cur_ledger
                     && !cur_missing
                 {
-                    accumulate_ledger(
+                    let out = decode_ledger(
                         l,
                         cur_closed_at,
                         &cur_events,
                         &mut reg,
                         &mut assets,
+                        &mut decimals,
+                        &writer,
+                        cli.dry_run,
+                    )
+                    .await?;
+                    accumulate_ledger(
+                        out,
+                        cur_closed_at,
                         &mut accumulators,
                         &mut buffers,
                         &mut ticks_by_source,
                         &mut failed_by_source,
                         &mut raw_unresolved,
                         &mut sac_unproven,
+                        &mut missing_decimals,
                     );
                 }
                 cur_ledger = Some(r.ledger_sequence);
@@ -372,18 +421,27 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         if let Some(l) = cur_ledger
             && !cur_missing
         {
-            accumulate_ledger(
+            let out = decode_ledger(
                 l,
                 cur_closed_at,
                 &cur_events,
                 &mut reg,
                 &mut assets,
+                &mut decimals,
+                &writer,
+                cli.dry_run,
+            )
+            .await?;
+            accumulate_ledger(
+                out,
+                cur_closed_at,
                 &mut accumulators,
                 &mut buffers,
                 &mut ticks_by_source,
                 &mut failed_by_source,
                 &mut raw_unresolved,
                 &mut sac_unproven,
+                &mut missing_decimals,
             );
         }
 
@@ -494,6 +552,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         dropped_swaps,
         apply_order_fallbacks,
         sac_unproven.len() as u64,
+        missing_decimals,
     );
     info!(
         elapsed_s = run_start.elapsed().as_secs(),
@@ -610,6 +669,7 @@ fn print_summary(
     dropped_swaps: u64,
     apply_order_fallbacks: u64,
     unproven_sac_swaps: u64,
+    missing_decimals: u64,
 ) {
     println!();
     println!("=== events-backfill complete ===");
@@ -641,6 +701,9 @@ fn print_summary(
     // Always printed, 0 included. Non-zero means swaps were skipped on SACs with
     // no proof, and the 0286 orchestrator STOPs on it (task 0242 D2).
     println!("{UNPROVEN_SAC_LABEL:<27}{unproven_sac_swaps}");
+    // Always printed, 0 included: non-zero means a token's `decimals()` did not
+    // resolve and its trades are NOT in this range's candles (task 0329).
+    println!("trades dropped (decimals): {missing_decimals}");
 }
 
 /// The registry the reprice reads events for: the LOADED `pool_registry` plus
@@ -709,6 +772,7 @@ mod tests {
         reg.soroswap
             .register(POOL.to_string(), T0.to_string(), T1.to_string());
         let mut assets = AssetRegistry::from_existing(vec![]);
+        assets.set_decimals(T1.to_string(), 7);
         let mut accs: HashMap<&'static str, CandleAccumulator> = HashMap::new();
         let mut buffers: HashMap<&'static str, Vec<OhlcvCandle>> = HashMap::new();
         let mut ticks: HashMap<&'static str, u64> = HashMap::new();
@@ -727,18 +791,25 @@ mod tests {
             ticks: &mut HashMap<&'static str, u64>,
             unresolved: &mut Vec<UnresolvedPoolSwap>,
         ) {
-            accumulate_ledger(
+            let mut out = LedgerSoroban::default();
+            process_soroban_event_rows(
                 ledger,
                 closed_at,
                 &[soroswap_swap(ledger, closed_at)],
                 reg,
                 assets,
+                &mut out,
+            );
+            accumulate_ledger(
+                out,
+                closed_at,
                 accs,
                 buffers,
                 ticks,
                 &mut HashMap::new(),
                 unresolved,
                 &mut Vec::new(),
+                &mut 0,
             );
         }
 
@@ -849,23 +920,27 @@ mod tests {
             .register(POOL.to_string(), T0.to_string(), XCR_SAC.to_string());
         let mut accs = HashMap::new();
         let mut unproven = Vec::new();
-        accumulate_ledger(
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
             100,
             1_700_000_000,
             &[soroswap_swap(100, 1_700_000_000)],
             &mut reg,
             assets,
+            &mut out,
+        );
+        accumulate_ledger(
+            out,
+            1_700_000_000,
             &mut accs,
             &mut HashMap::new(),
             &mut HashMap::new(),
             &mut HashMap::new(),
             &mut Vec::new(),
             &mut unproven,
+            &mut 0,
         );
-        let candles = accs
-            .values_mut()
-            .flat_map(CandleAccumulator::flush_all)
-            .collect();
+        let candles = accs.values_mut().flat_map(|a| a.flush_all()).collect();
         (candles, unproven)
     }
 
@@ -915,6 +990,7 @@ mod tests {
     }
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+    const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
 
     /// Task 0300 D3a: the static pools never mask an unseeded `pool_registry`
     /// — the guard is about the table, and still fires on an empty one.
@@ -935,9 +1011,10 @@ mod tests {
         loaded.venue.insert(AQUA.to_string(), Venue::Aquarius);
 
         let reg = reprice_registry(loaded).expect("a seeded table reprices");
-        assert_eq!(reg.venue.len(), 2);
+        assert_eq!(reg.venue.len(), 1 + prices_ingest_core::STATIC_POOLS.len());
         assert_eq!(reg.venue.get(AQUA), Some(&Venue::Aquarius));
         assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
+        assert_eq!(reg.venue.get(COMET_V1_1), Some(&Venue::Comet));
     }
 
     // ---- task 0139: only new identities, and before their candles ----------

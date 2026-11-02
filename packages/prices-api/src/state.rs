@@ -47,7 +47,8 @@ impl AppState {
         }
     }
 
-    /// Memoized reference ids; resolved once per state, then shared.
+    /// Memoized reference ids; resolved once per state, then shared. Not set
+    /// while XLM is untracked (see `handlers::resolve_usd_refs`).
     pub fn usd_refs(&self) -> &OnceCell<crate::assets::queries_ch::UsdRefs> {
         &self.usd_refs
     }

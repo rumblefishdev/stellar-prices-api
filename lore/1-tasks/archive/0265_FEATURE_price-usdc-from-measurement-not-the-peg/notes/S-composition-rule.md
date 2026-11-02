@@ -26,9 +26,9 @@ history:
 
 | step | rule | why (measured) |
 |---|---|---|
-| **primary** | Chainlink USDC/USD rounds, Ethereum mainnet proxy `0x8fFf…18f6` | real USD, verifiable by anyone with an RPC, no licence, 0.25 % deviation + 23 h heartbeat, from 2021-02-17; agrees with Bitstamp to 0.8 bps median calm / 4 bps stress and with Kraken to 0.6 bps |
+| **primary** | Chainlink USDC/USD rounds, Ethereum mainnet proxy `0x8fFf…18f6` | real USD, verifiable by anyone with an RPC, no licence, 0.25 % deviation + 23 h heartbeat, from 2021-02-17; agrees with Bitstamp to 0.8 bps median calm / 4 bps stress and with third-party to 0.6 bps |
 | **fallback** | Bitstamp USDC/USD, used only where the primary has **no observation in the bucket** | the only key-less real-USD book reaching 2021-01-01; same cluster as the primary |
-| **cross-check** | Kraken (OHLC last 720 d, trades for 2023-03) and Bitstamp | independent USD venues; USDT-quoted venues are excluded from arbitration because their cluster sits 3–4 bps off in calm and 20–30 bps off in stress (that is USDT/USD, not USDC/USD) |
+| **cross-check** | third-party (OHLC last 720 d, trades for 2023-03) and Bitstamp | independent USD venues; USDT-quoted venues are excluded from arbitration because their cluster sits 3–4 bps off in calm and 20–30 bps off in stress (that is USDT/USD, not USDC/USD) |
 | **disagreement** | if a cross-check differs from the primary by **> 25 bps** on the bucket close, keep the primary value and flag `measured-disputed` | 25 bps is 3.5× the calm p95 between USD sources (≤ 7 bps) and below the stress median between them (4 bps median, 33 bps max). No averaging: a median of venues is a number nobody printed, and the reviewer's question "where did 0.9681 come from" must have a one-word answer |
 | **gaps** | a bucket with no source publishes **no price** and `quality = missing` | forward-fill is the defect being removed. The only carry allowed is *inside the primary's own heartbeat* on the hourly grain: an hour with no round means "no 0.25 % move since the last round", and the row says `n_obs = 0` |
 
@@ -65,7 +65,7 @@ Against our series on the 2 042 common days: median |diff| 0.8 bps, p99
   max/min, close = last; `n_obs` = number of rounds. A day with one round is
   honestly flat (68 % of Chainlink days), which is why flatness is *not* a
   synthetic signal in phase 4.
-- **Candle from trades (Kraken):** standard OHLC over trade prints,
+- **Candle from trades (third-party):** standard OHLC over trade prints,
   `n_obs` = trades.
 - **Venues that were closed** (Binance 2022-09-26 → 2023-03-11 14:00) are
   simply absent for those buckets; they are never interpolated.

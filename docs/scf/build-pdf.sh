@@ -35,8 +35,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Default to the newest milestone. Passing "1" still rebuilds the Milestone 1
-# PDF byte-for-byte from its own source, so retargeting this script does not
-# strand the earlier package.
+# PDF from its own source, so retargeting this script does not strand the
+# earlier package (its repo links now render as GitHub URLs, see repo-links.lua).
 ARG="${1:-2}"
 case "$ARG" in
     *.md) SRC="$ARG" ;;
@@ -48,6 +48,11 @@ OUT="${SRC%.md}.pdf"
 command -v pandoc >/dev/null || { echo "❌ pandoc not found — see install notes at the top of this script"; exit 1; }
 command -v typst  >/dev/null || { echo "❌ typst not found  — see install notes at the top of this script"; exit 1; }
 [[ -f "$SRC" ]]               || { echo "❌ source not found: $SRC"; exit 1; }
+
+# A relative link must leave the PDF as its GitHub URL; inside a PDF it points nowhere.
+[[ "$(echo '[x](../a.md#b)' | pandoc -f gfm -t gfm --lua-filter=repo-links.lua)" \
+    == "[x](https://github.com/rumblefishdev/stellar-prices-api/blob/master/docs/a.md#b)" ]] \
+    || { echo "❌ repo-links.lua no longer rewrites relative links"; exit 1; }
 
 # pandoc < 3.1 has no native typst engine; fail early with a clear message
 # instead of a confusing "pdf-engine typst not found" further down.
@@ -65,6 +70,7 @@ pandoc "$SRC" -o "$OUT" \
     --from=gfm+wikilinks_title_after_pipe+attributes+yaml_metadata_block \
     --include-in-header=header.typ \
     --lua-filter=full-width-tables.lua \
+    --lua-filter=repo-links.lua \
     -V mainfont="Libertinus Serif" \
     -V monofont="DejaVu Sans Mono" \
     -V linkcolor:0066CC \

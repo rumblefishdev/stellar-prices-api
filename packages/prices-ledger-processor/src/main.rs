@@ -259,6 +259,11 @@ async fn handler(
                 m.extend(metrics::sac_candidates_unavailable_metrics(
                     !sac_candidates_loaded,
                 ));
+                // Task 0329 — trades dropped because a token's decimals did not
+                // resolve. Silent otherwise: the run succeeds without them.
+                m.extend(metrics::trades_missing_decimals_metrics(
+                    stats.trades_missing_decimals,
+                ));
                 if let Err(e) = metrics::publish(&cw, &env_name, &m).await {
                     warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
                 }

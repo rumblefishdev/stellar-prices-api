@@ -18,6 +18,7 @@ use tracing::info;
 
 use crate::bucket::OhlcvCandle;
 use crate::canonical::{AssetIdentity, AssetRegistry};
+use crate::decimals::DecimalsRow;
 use crate::error::IngestError;
 use crate::price::CANDLE_PRICE_SCALE;
 use crate::registry_io::PoolRegistryRow;
@@ -103,6 +104,37 @@ impl OhlcvWriter {
             "loaded asset registry from ClickHouse"
         );
         Ok(assets)
+    }
+
+    /// Load every resolved Soroban token decimals from `prices.asset_decimals`
+    /// into `registry` (task 0329), so a cold start scales known tokens
+    /// without an RPC call. The table must exist: an ingest that cannot read
+    /// it fails init rather than dropping every pure Soroban token's trades.
+    pub async fn load_decimals(&self, registry: &mut AssetRegistry) -> Result<(), IngestError> {
+        let rows = self
+            .client
+            .query("SELECT contract_address, decimals FROM prices.asset_decimals FINAL")
+            .fetch_all::<(String, u8)>()
+            .await?;
+        info!(tokens = rows.len(), "loaded soroban token decimals");
+        for (contract, decimals) in rows {
+            registry.set_decimals(contract, decimals.into());
+        }
+        Ok(())
+    }
+
+    /// Persist decimals a run resolved over RPC to `prices.asset_decimals`
+    /// (task 0329). A no-op on an empty slice.
+    pub async fn write_decimals(&self, rows: &[DecimalsRow]) -> Result<(), IngestError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("prices.asset_decimals")?;
+        for row in rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        Ok(())
     }
 
     /// Rehydrate the discovered AMM pool [`Registries`] from `prices.pool_registry`

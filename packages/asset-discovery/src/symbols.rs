@@ -19,24 +19,16 @@
 //! The three-way outcome policy *is* borrowed from `supply-worker::run_supply`,
 //! because it is what keeps the queue from starving: see [`Outcome`].
 
-use base64::Engine;
 use clickhouse::Client;
-use serde::Serialize;
-use stellar_xdr::{
-    ContractId, Hash, HostFunction, InvokeContractArgs, InvokeHostFunctionOp, Limits, Memo,
-    MuxedAccount, Operation, OperationBody, Preconditions, ReadXdr, ScAddress, ScString, ScSymbol,
-    ScVal, SequenceNumber, Transaction, TransactionEnvelope, TransactionExt, TransactionV1Envelope,
-    Uint256, VecM, WriteXdr,
+use prices_ingest_core::soroban_rpc::{Simulated, simulate};
+// Re-exported so `main.rs` and the RPC integration test keep their paths; the
+// envelope and the Absent/Transient boundary moved to `prices-ingest-core`
+// (task 0329), which the ingest's `decimals()` lookup shares.
+pub use prices_ingest_core::soroban_rpc::{
+    DEFAULT_SOROBAN_RPC, RPC_TIMEOUT_SECS, build_simulate_envelope, http_client,
 };
-
-/// Default public Soroban RPC endpoint (overridable via `SOROBAN_RPC_URL`).
-/// Needs no auth — same endpoint and same reasoning as `oracle-worker`.
-pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
-
-/// Per-request RPC timeout. Together with [`MAX_CONTRACTS_PER_RUN`] this is the
-/// stage's entire time bound: worst case is the product of the two, which must
-/// leave the ledger scan its headroom inside the Lambda's 5-minute limit.
-pub const RPC_TIMEOUT_SECS: u64 = 5;
+use serde::Serialize;
+use stellar_xdr::{ScString, ScSymbol, ScVal};
 
 /// How many unresolved contracts one run will attempt.
 ///
@@ -99,92 +91,6 @@ pub struct SymbolStats {
     pub skipped: usize,
 }
 
-/// An HTTP client bounded by [`RPC_TIMEOUT_SECS`].
-///
-/// Built here rather than at the call site so the stage's time bound stays next
-/// to the constant that states it.
-///
-/// # Panics
-///
-/// If the client cannot be built — in practice a TLS backend that failed to
-/// initialise, which is an environment fault at cold start, identical on every
-/// invocation. Deliberately not a silent fallback to `Client::default()`: that
-/// client carries **no timeout**, so the stage's whole `MAX_CONTRACTS_PER_RUN ×
-/// RPC_TIMEOUT_SECS` bound would quietly become unbounded, and 25 hung requests
-/// would eat the Lambda's five minutes ahead of the ledger scan that runs after
-/// it. A loud failure at startup beats an hourly discovery outage with no
-/// obvious cause.
-pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(RPC_TIMEOUT_SECS))
-        .build()
-        .expect("build an HTTP client with a timeout")
-}
-
-/// Base64 `TransactionEnvelope` invoking the zero-argument `func()` on
-/// `contract`, for a read-only `simulateTransaction` (source account / fee / seq
-/// are not checked by simulation).
-///
-/// `None` when `contract` is not a well-formed C-strkey — a data-integrity
-/// problem in `prices.assets`, permanent for that row, so the caller sentinels
-/// it rather than failing the run.
-pub fn build_simulate_envelope(contract: &str, func: &str) -> Option<String> {
-    let contract_hash = stellar_strkey::Contract::from_string(contract).ok()?.0;
-    let invoke = InvokeContractArgs {
-        contract_address: ScAddress::Contract(ContractId(Hash(contract_hash))),
-        function_name: ScSymbol(func.try_into().ok()?),
-        args: VecM::default(),
-    };
-    let op = Operation {
-        source_account: None,
-        body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
-            host_function: HostFunction::InvokeContract(invoke),
-            auth: VecM::default(),
-        }),
-    };
-    let tx = Transaction {
-        source_account: MuxedAccount::Ed25519(Uint256([0u8; 32])),
-        fee: 0,
-        seq_num: SequenceNumber(0),
-        cond: Preconditions::None,
-        memo: Memo::None,
-        operations: vec![op].try_into().ok()?,
-        ext: TransactionExt::V0,
-    };
-    let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
-        tx,
-        signatures: VecM::default(),
-    });
-    let xdr = envelope.to_xdr(Limits::none()).ok()?;
-    Some(base64::engine::general_purpose::STANDARD.encode(xdr))
-}
-
-#[derive(serde::Deserialize)]
-struct RpcResponse {
-    result: Option<RpcResult>,
-    /// JSON-RPC 2.0 reports failure *here*, with HTTP 200 — which is how public
-    /// endpoints signal quota exhaustion, a disabled method, and a node that is
-    /// not synced. Without this field such a body deserialises to
-    /// `result: None`, and every contract in the run sentinels permanently.
-    #[serde(default)]
-    error: Option<serde_json::Value>,
-}
-#[derive(serde::Deserialize)]
-struct RpcResult {
-    #[serde(default)]
-    results: Vec<RpcInvokeResult>,
-    #[serde(default)]
-    error: Option<String>,
-    /// Set when the contract's instance or Wasm is archived but restorable —
-    /// a live token, not one that lacks a symbol.
-    #[serde(default, rename = "restorePreamble")]
-    restore_preamble: Option<serde_json::Value>,
-}
-#[derive(serde::Deserialize)]
-struct RpcInvokeResult {
-    xdr: String,
-}
-
 /// Extract a UTF-8 string from a `symbol()` return value.
 ///
 /// Both arms are needed: the SEP-41 interface declares `Symbol`, but deployed
@@ -227,99 +133,21 @@ pub fn sanitize_symbol(raw: &str) -> Option<String> {
 ///
 /// Never returns an error: every failure mode is either Absent (permanent for
 /// this contract) or Transient (retry next run), which is exactly the decision
-/// the caller has to make.
+/// the caller has to make. The line between the two is
+/// [`prices_ingest_core::soroban_rpc::simulate`]'s.
 pub async fn resolve_symbol(http: &reqwest::Client, rpc_url: &str, contract: &str) -> Outcome {
-    let Some(envelope) = build_simulate_envelope(contract, "symbol") else {
-        tracing::warn!(contract, "not a well-formed contract address; sentinelling");
-        return Outcome::Absent;
-    };
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "simulateTransaction",
-        "params": { "transaction": envelope },
-    });
-
-    // A transport-level failure — connection, timeout, non-2xx (a 429 or 5xx
-    // from the public endpoint lands here), unparseable body — is systemic, not
-    // a fact about this contract. `error_for_status` is what keeps a
-    // rate-limited run from sentinelling every contract it touches.
-    let resp = match http
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-    {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(contract, error = %err, "symbol() rpc failed; retrying next run");
-            return Outcome::Transient;
-        }
-    };
-    let resp: RpcResponse = match resp.json().await {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(contract, error = %err, "symbol() rpc body unparseable; retrying next run");
-            return Outcome::Transient;
-        }
-    };
-
-    classify(resp, contract)
+    match simulate(http, rpc_url, contract, "symbol", None).await {
+        Simulated::Value(v) => symbol_outcome(&v, contract),
+        Simulated::Absent => Outcome::Absent,
+        // `as_of` is None, so this arm is unreachable in practice; retrying is
+        // the safe reading either way.
+        Simulated::Transient | Simulated::Behind => Outcome::Transient,
+    }
 }
 
-/// Decide what a parsed simulate response means for this contract.
-///
-/// The line between the two failure arms is **whether the simulation actually
-/// evaluated the contract**. If it did, its outcome is a fact that will repeat
-/// on every future run, so it sentinels. If we never got that far — a JSON-RPC
-/// error, archived state, an empty body — we learned nothing about the
-/// contract, so it must retry. Getting this backwards is unrecoverable in one
-/// direction only: a wrong `Transient` costs one RPC call per run, a wrong
-/// `Absent` publishes a permanent empty symbol that nothing re-polls.
-fn classify(resp: RpcResponse, contract: &str) -> Outcome {
-    // Arrives with HTTP 200, so `error_for_status` above cannot see it.
-    if let Some(err) = resp.error {
-        tracing::warn!(contract, error = %err, "symbol() rpc returned a json-rpc error; retrying next run");
-        return Outcome::Transient;
-    }
-    let Some(result) = resp.result else {
-        tracing::warn!(
-            contract,
-            "symbol() rpc returned neither result nor error; retrying next run"
-        );
-        return Outcome::Transient;
-    };
-    if result.restore_preamble.is_some() {
-        tracing::warn!(
-            contract,
-            "symbol() needs a state restore; retrying next run"
-        );
-        return Outcome::Transient;
-    }
-    // The simulation ran and the contract itself errored — deterministic, so a
-    // fact. This is the one arm that stays permanent.
-    if let Some(err) = result.error {
-        tracing::debug!(contract, error = %err, "symbol() simulate returned error; sentinelling");
-        return Outcome::Absent;
-    }
-    if result.results.is_empty() {
-        tracing::warn!(
-            contract,
-            "symbol() simulated without a result or an error; retrying next run"
-        );
-        return Outcome::Transient;
-    }
-
-    let raw = result
-        .results
-        .into_iter()
-        .next()
-        .and_then(|r| base64::engine::general_purpose::STANDARD.decode(r.xdr).ok())
-        .and_then(|bytes| ScVal::from_xdr(&bytes, Limits::none()).ok())
-        .as_ref()
-        .and_then(scval_to_string);
-
+/// A `symbol()` return value as an [`Outcome`].
+fn symbol_outcome(v: &ScVal, contract: &str) -> Outcome {
+    let raw = scval_to_string(v);
     match raw.as_deref().and_then(sanitize_symbol) {
         Some(s) => Outcome::Symbol(s),
         // It answered, and the answer is unusable. A fact — but a permanent and
@@ -529,50 +357,14 @@ mod tests {
         assert!(sanitize_symbol("v1.2_beta").is_some());
     }
 
-    fn classify_json(body: &str) -> Outcome {
-        classify(
-            serde_json::from_str(body).expect("test body parses"),
-            "C_TEST",
-        )
-    }
-
     #[test]
-    fn a_json_rpc_error_retries_instead_of_sentinelling() {
-        // JSON-RPC reports this with HTTP 200, so `error_for_status` cannot see
-        // it. Sentinelling here would name every contract in the run `""`
-        // permanently, with nothing that ever re-polls them.
-        let out = classify_json(
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not enabled"}}"#,
-        );
-        assert_eq!(out, Outcome::Transient);
-    }
-
-    #[test]
-    fn an_empty_or_archived_response_retries() {
-        // Neither result nor error: we learned nothing about the contract.
+    fn an_unusable_answer_is_absent() {
+        // Answered, but not a string: a fact about the contract, not a retry.
+        assert_eq!(symbol_outcome(&ScVal::U32(7), "C_TEST"), Outcome::Absent);
+        let sym = ScVal::Symbol(ScSymbol("XAUM".try_into().unwrap()));
         assert_eq!(
-            classify_json(r#"{"jsonrpc":"2.0","id":1}"#),
-            Outcome::Transient
-        );
-        // Archived-but-restorable state is a live token, not a symbol-less one.
-        assert_eq!(
-            classify_json(r#"{"result":{"results":[],"restorePreamble":{"minResourceFee":"1"}}}"#),
-            Outcome::Transient,
-        );
-        // Simulated clean, returned nothing at all — not a fact either.
-        assert_eq!(
-            classify_json(r#"{"result":{"results":[]}}"#),
-            Outcome::Transient
-        );
-    }
-
-    #[test]
-    fn a_contract_error_is_the_one_permanent_arm() {
-        // The simulation evaluated the contract and it errored. That repeats on
-        // every run, so it must leave the queue or it starves the tail.
-        assert_eq!(
-            classify_json(r#"{"result":{"results":[],"error":"HostError: missing symbol"}}"#),
-            Outcome::Absent,
+            symbol_outcome(&sym, "C_TEST"),
+            Outcome::Symbol("XAUM".to_string())
         );
     }
 
@@ -594,38 +386,5 @@ mod tests {
         assert_eq!(scval_to_string(&string).as_deref(), Some("SolvBTC"));
 
         assert_eq!(scval_to_string(&ScVal::U32(7)), None);
-    }
-
-    #[test]
-    fn builds_an_envelope_that_decodes_back_to_symbol_on_the_contract() {
-        // A locally-derived valid C-strkey: self-contained, no network, and it
-        // cannot rot the way a pasted mainnet address can.
-        let contract = stellar_strkey::Contract([7u8; 32]).to_string();
-        let b64 = build_simulate_envelope(&contract, "symbol").expect("valid contract address");
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(&b64)
-            .expect("valid base64");
-        let env = TransactionEnvelope::from_xdr(&raw, Limits::none()).expect("valid xdr");
-        let TransactionEnvelope::Tx(v1) = env else {
-            panic!("expected a v1 envelope")
-        };
-        let OperationBody::InvokeHostFunction(op) = &v1.tx.operations[0].body else {
-            panic!("expected InvokeHostFunction")
-        };
-        let HostFunction::InvokeContract(args) = &op.host_function else {
-            panic!("expected InvokeContract")
-        };
-        assert_eq!(args.function_name.0.to_utf8_string().unwrap(), "symbol");
-        assert_eq!(args.args.len(), 0, "symbol() takes no arguments");
-        assert_eq!(
-            args.contract_address,
-            ScAddress::Contract(ContractId(Hash([7u8; 32])))
-        );
-    }
-
-    #[test]
-    fn rejects_a_malformed_contract_address() {
-        assert_eq!(build_simulate_envelope("not-a-contract", "symbol"), None);
-        assert_eq!(build_simulate_envelope("", "symbol"), None);
     }
 }

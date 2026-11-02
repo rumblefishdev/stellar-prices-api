@@ -451,8 +451,13 @@ export interface EnvironmentConfig {
      * and the rationale below for `100` / `10000` is about the USDT metrics, not
      * about it. That ladder therefore pins its first rung at `1` in the stack
      * and borrows only the rungs above it from here, so raising the first rung
-     * to quiet a USDT ladder cannot hide a violation there. **Changing the
-     * higher rungs still re-tunes all three ladders.**
+     * to quiet a USDT ladder cannot hide a violation there. Task 0139 added
+     * two more on the same pinned ladder (`zeroLadder` in the stack):
+     * `AssetIdCollisions` and `AssetIdOrphanCandles`. Task 0236 adds the
+     * sixth, `CandleBandViolations`: all seven `price_ohlcv_*` tiers, `FINAL`,
+     * over a 48 h window widened by one bucket per tier, also healthy at
+     * exactly 0 and on `zeroLadder`. **Changing the higher rungs re-tunes all
+     * six ladders.**
      *
      * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
      * **standing condition** — it stays wrong until a person repairs it — so it

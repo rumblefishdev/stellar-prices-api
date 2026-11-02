@@ -20,7 +20,8 @@ def summary(unproven=None, fallbacks=True):
     """events-backfill's closing summary; `unproven=None` is a pre-0242 binary."""
     lines = ["=== events-backfill complete ===",
              "swaps dropped (unresolved):0",
-             "swaps failed dispatch:     0"]
+             "swaps failed dispatch:     0",
+             "trades dropped (decimals): 0"]
     if fallbacks:
         lines.append("negative apply order:      0")
     if unproven is not None:
@@ -68,11 +69,11 @@ class UnprovenSacLine(unittest.TestCase):
         orig, r.note = r.note, notes.append
         try:
             ms = St.d["months"]["202405"]
-            r.record_amm_summary(ms, 202405, {"fallbacks": 0, "dropped": 0, "unproven_sacs": None})
+            r.record_amm_summary(ms, 202405, {"fallbacks": 0, "dropped": 0, "unproven_sacs": None, "decimals": 0})
             self.assertIsNone(ms["unproven_sacs"])
             self.assertTrue(any("built before task 0242" in n for n in notes), notes)
             self.assertFalse(r.unproven_line_seen(St, 202406))
-            r.record_amm_summary(ms, 202405, {"fallbacks": 0, "dropped": 0, "unproven_sacs": 0})
+            r.record_amm_summary(ms, 202405, {"fallbacks": 0, "dropped": 0, "unproven_sacs": 0, "decimals": 0})
             self.assertTrue(r.unproven_line_seen(St, 202406))
             self.assertFalse(r.unproven_line_seen(St, 202405), "the month itself does not count")
         finally:

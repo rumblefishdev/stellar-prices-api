@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, OhlcvCandle, Registries, TradeTick, UnresolvedPoolSwap,
-    extract_trades, ledger_sequence, offer_lookup_counts, process_ledger, raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, DecimalsResolver, DecimalsRow, OhlcvCandle, Registries,
+    TradeTick, UnresolvedPoolSwap, decode_resolving, extract_trades, ledger_sequence,
+    offer_lookup_counts, process_ledger, raw_trade_to_tick,
 };
 
 use crate::error::BackfillError;
@@ -32,6 +33,10 @@ pub struct PartitionStats {
     pub skipped: usize,
     pub trade_ticks: usize,
     pub amm_ticks: usize,
+    /// AMM trades dropped because a token's decimals did not resolve over RPC
+    /// (task 0329). Their ledgers are still marked done, so a non-zero total
+    /// means a range to reprice.
+    pub trades_missing_decimals: usize,
     pub oracle_rows: usize,
     pub candles_written: usize,
     pub total_bytes: u64,
@@ -333,6 +338,7 @@ pub async fn index_partition(
     completed: &HashSet<u32>,
     registry: &mut AssetRegistry,
     reg: &mut Registries,
+    decimals: &mut DecimalsResolver,
     mode: ExtractMode,
     accs: &mut RunAccumulators,
     end: PartitionEnd,
@@ -401,7 +407,17 @@ pub async fn index_partition(
             // Only in Combined mode — pre-Soroban ledgers carry no Soroban
             // events, so SdexOnly skips the decode entirely.
             if mode == ExtractMode::Combined {
-                let sob = process_ledger(lcm, reg, registry);
+                // Task 0329: a trade naming a token whose decimals are unknown
+                // is dropped, not guessed — the same step as the live processor.
+                let sob = decode_resolving(
+                    decimals,
+                    registry,
+                    ledger_sequence(lcm),
+                    |assets| process_ledger(lcm, reg, assets),
+                    async |rows: &[DecimalsRow]| sink.write_decimals(rows).await,
+                )
+                .await?;
+                stats.trades_missing_decimals += sob.trades_missing_decimals as usize;
                 for (source, tick) in sob.amm_ticks {
                     accs.merge_amm(source, tick);
                     stats.amm_ticks += 1;
@@ -470,6 +486,7 @@ pub async fn index_partition(
         skipped = stats.skipped,
         trade_ticks = stats.trade_ticks,
         amm_ticks = stats.amm_ticks,
+        trades_missing_decimals = stats.trades_missing_decimals,
         oracle_rows = stats.oracle_rows,
         candles = stats.candles_written,
         bytes = stats.total_bytes,

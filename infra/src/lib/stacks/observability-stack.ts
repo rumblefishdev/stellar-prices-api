@@ -339,6 +339,7 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
   public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
+  public readonly ledgerProcessorTradesMissingDecimalsAlarm: cloudwatch.Alarm;
   /**
    * Task 0242 D2: live skipped trades on a token BE flags `is_sac` that no SAC
    * event proved, rather than minting it as a second identity.
@@ -402,6 +403,15 @@ export class ObservabilityStack extends cdk.Stack {
    * until the heal.
    */
   public readonly sacContractIdentitiesAlarm: cloudwatch.Alarm;
+
+  /**
+   * Stored candles on all seven `price_ohlcv_*` tiers that break the OHLC band
+   * or carry a price <= 0 (task 0236), keyed by count. Asserted by the probe at
+   * the source with zero tolerance, because task 0229's read-path clamp repairs
+   * a crossed candle on its way out of `/ohlcv` and so hides it from the API.
+   * The healthy reading is exactly 0.
+   */
+  public readonly ohlcBandAlarms: Record<string, cloudwatch.Alarm>;
   /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
@@ -1546,6 +1556,36 @@ export class ObservabilityStack extends cdk.Stack {
     this.ledgerProcessorSacCandidatesAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorSacCandidatesAlarm.addOkAction(snsAction);
 
+    // Task 0329 — live dropped trades whose Soroban token decimals did not
+    // resolve. The ingest scales each AMM leg by its token's `decimals()`, read
+    // over RPC on first sight, and never guesses: until the call answers, the
+    // token's trades produce no candle. Published only when non-zero.
+    this.ledgerProcessorTradesMissingDecimalsAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorTradesMissingDecimalsAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-trades-missing-decimals`,
+        alarmDescription:
+          'The ledger-processor dropped AMM trades because a Soroban token\'s decimals() did not resolve over RPC (task 0329). Those trades produce no candle. Either the RPC (SOROBAN_RPC_URL, default mainnet.sorobanrpc.com) was failing, in which case the token is asked again after 10 minutes, or the token has no usable decimals(), in which case it is not asked again until a cold start. The WARN "dropped AMM trades whose token decimals did not resolve" lists the contracts. Fix: once decimals() answers, reprice the dropped minutes with events-backfill. If it never will, insert the row into prices.asset_decimals by hand AND force a cold start (any configuration update of the ledger-processor function, e.g. aws lambda update-function-configuration --description): a warm processor reads that table only at cold start and keeps dropping the token until then. Reprice after the cold start.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'TradesMissingDecimals',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were dropped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorTradesMissingDecimalsAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorTradesMissingDecimalsAlarm.addOkAction(snsAction);
+
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage
     // sweep looks at EVERY contract emitting swap/trade-shaped events over a
@@ -1825,6 +1865,22 @@ export class ObservabilityStack extends cdk.Stack {
       'asset-id-orphan-candles',
       (count) =>
         `${count} or more price_ohlcv_1m candles of the last 2 h carry an asset_id or quote_asset_id that prices.assets does not hold. Since task 0139 a writer sends the identity and ClickHouse derives both ids; an orphan means a writer sent ids itself (a stale pre-0139 binary or Lambda version: RowBinary is width-exact, so an old u32 writer misaligns rather than failing) or wrote candles before their assets rows. Stop that writer first, then find it from the rows' source column. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
+      zeroLadder,
+    );
+    // Stored candles outside the OHLC band, or with a price <= 0, on all seven
+    // tiers (task 0236). Same ladder, same reasoning as the zero invariants
+    // above: the healthy reading is exactly 0, so the first rung carries the
+    // meaning and the rest say how fast it is growing. Since task 0229 the
+    // /ohlcv clamp repairs a crossed candle on the way out, so this is the only
+    // place a corrupt stored row is seen. See
+    // packages/rollup-freshness-probe/src/ohlc_band.rs and ADR-0011 section 3.
+    this.ohlcBandAlarms = usdSanityRungs(
+      'CandleBandViolations',
+      'OhlcBandAlarmCount',
+      'ohlc-band',
+      (count) =>
+        `${count} or more stored candles on price_ohlcv_{1m,15m,1h,4h,1d,1w,1M} (FINAL) are internally inconsistent: priced (pf_trade_count > 0) yet low > least(open, close), high < greatest(open, close) or low > high, or any price <= 0. Healthy is exactly 0 (prod baseline 2026-09-28). A priced _1m row with close = 0 also fires zero-invariant (expected overlap); low = 0 beside a positive close fires only this. The window is on BUCKET time, 48 h widened by one bucket per tier: a backfill into older buckets is NOT covered. The value sums tier-rows, so one bad minute can count up to seven times; a violation on a coarse tier with a clean _1m means a rollup defect. Find the writer before repairing - /ohlcv clamps since task 0229, so the API will not show it. Per-tier counts: probe log field ohlc_band_detail. See packages/rollup-freshness-probe/src/ohlc_band.rs and ADR-0011 s3. First rung is fixed at 1.`,
+      // The zero ladder above: the first rung is pinned at 1.
       zeroLadder,
     );
 

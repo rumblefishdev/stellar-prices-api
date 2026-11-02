@@ -540,8 +540,20 @@ COPIED_IDS = """(SELECT new_id FROM prices.asset_id_map_0139 GROUP BY new_id
 COLLIDING_IDS = "(SELECT new_id FROM prices.asset_id_map_0139 WHERE status = 'colliding')"
 MAP_RESTRICT = f" AND asset_id IN {COPIED_IDS} AND quote_asset_id IN {COPIED_IDS}"
 
-SUMS = """SELECT source, count(), sum(trade_count), sum(volume_base), sum(volume_quote)
-FROM prices.price_ohlcv_{tier} FINAL WHERE toYYYYMM(timestamp) = {m}{restrict}
+# Task 0329: the AMM path now scales a pure Soroban token's legs by its own
+# decimals, so a re-ingested month's volume moves BY DESIGN on every candle that
+# touches a contract token (an 18-decimal token's base volume falls by 10^11, a
+# 6-decimal one's rises tenfold). Volumes are therefore compared on the other
+# candles only; trades are still compared on all of them. The subquery reads
+# ids in whatever width `prices.assets` carries, so it holds on either side of
+# the 0139 swap.
+CONTRACT_IDS = "(SELECT asset_id FROM prices.assets WHERE contract_address != '')"
+NO_CONTRACT = f"asset_id NOT IN {CONTRACT_IDS} AND quote_asset_id NOT IN {CONTRACT_IDS}"
+VOL_SCOPE = "no-contract-0329"  # recorded on `before`, so an older reading is never compared
+
+SUMS = f"""SELECT source, count(), sum(trade_count),
+    sumIf(volume_base, {NO_CONTRACT}), sumIf(volume_quote, {NO_CONTRACT})
+FROM prices.price_ohlcv_{{tier}} FINAL WHERE toYYYYMM(timestamp) = {{m}}{{restrict}}
 GROUP BY source ORDER BY source"""
 
 OUTSIDE = f"""SELECT source,
@@ -692,14 +704,17 @@ def amm_summary(text, logfile, *, dry_run, unproven_line_seen=False):
     prints none, and phase 3 runs on one by design, the 0242 seed resolving its
     SACs (D4, PC6). Absent after an earlier month of this state printed it
     (`unproven_line_seen`), the host binary went back to a pre-0242 build: Stop.
+    `trades dropped (decimals):` came with task 0329; a binary without it still
+    scales every Soroban token at 7 decimals and must not write a month.
     """
     found = {}
-    for key, label in (("fallbacks", "negative apply order:"), ("dropped", "swaps dropped (unresolved):")):
+    for key, label in (("fallbacks", "negative apply order:"), ("dropped", "swaps dropped (unresolved):"),
+                       ("decimals", "trades dropped (decimals):")):
         hit = re.search(rf"^{re.escape(label)}\s*(\d+)", text, re.M)
         if not hit:
             raise Stop(f"events-backfill printed no `{label}` line — "
-                       f"see {logfile}. A binary without it predates task 0304: rebuild events-backfill "
-                       "from develop (on the CH host for --amm ssh)")
+                       f"see {logfile}. A binary without it predates task 0304 or 0329: rebuild "
+                       "events-backfill from develop (on the CH host for --amm ssh)")
         found[key] = int(hit.group(1))
     hit = re.search(rf"^{re.escape(UNPROVEN_SAC_LABEL)}\s*(\d+)", text, re.M)
     found["unproven_sacs"] = int(hit.group(1)) if hit else None
@@ -733,6 +748,7 @@ def record_amm_summary(ms, m, summary):
         note(f"{m}: events-backfill printed no `{UNPROVEN_SAC_LABEL}` line — a binary built before task 0242, "
              "so its SACs resolve only through assets.sac_address (the 0242 seed), and an unseeded one "
              "would mint a second identity (heal runbook §5a counts it)")
+    ms["decimals"] = summary["decimals"]
     if ms["dropped"]:
         note(f"{m}: {ms['dropped']} swaps dropped for unregistered pools — see prices.unresolved_pools")
     if ms["fallbacks"]:
@@ -861,6 +877,7 @@ def run_month(a, ch, st, m, pw):
         if not b:  # cleanup dropped whole 1m months on 2026-07-18; the coarse copy is the survivor
             b, ms["ref"] = sums(ch, "1h", m, post), "1h"
         ms["before"], ms["ids"] = b, "u64" if post else "u32"
+        ms["vol_scope"] = VOL_SCOPE
         if post:
             ms["outside_before"] = outside(ch, ms["ref"], m)
         done()
@@ -925,6 +942,7 @@ def run_month(a, ch, st, m, pw):
 
     if step("amm"):
         ms["fallbacks"] = "-"
+        ms.pop("decimals", None)  # only a parsed summary sets it; never carry a stale count
         if soroban and not ch.dry:
             base = f"~/events-backfill --start {S} --end {E} --clickhouse-url http://localhost:8123 --verbose"
             if a.amm == "mtls":
@@ -967,12 +985,13 @@ def run_month(a, ch, st, m, pw):
             else:
                 marker = mdir / "amm.done"
                 note(f"{m}: waiting for the host run —  read -rs CH_PW; CLICKHOUSE_PASSWORD=\"$CH_PW\" {base}"
-                     f"   then: reingest_0286.py amm-done {m} --fallbacks <negative apply order>")
+                     f"   then: reingest_0286.py amm-done {m} --fallbacks <negative apply order> "
+                     "--decimals <trades dropped (decimals)>")
                 while not marker.exists():
                     DASH["step"] = "waiting for amm-done"
                     RERENDER()
                     time.sleep(15)
-                ms["fallbacks"] = int(marker.read_text().strip() or 0)
+                ms["fallbacks"], ms["decimals"] = read_amm_done(marker)
         done()
 
     if step("reconcile"):
@@ -989,10 +1008,20 @@ def run_month(a, ch, st, m, pw):
                      "did not copy, back under their own identities — information, not reconciled")
         rank, amm_bits = 0, []  # 0 OK, 1 FINDING, 2 DEFECT
         damaged = m in LIVE_LOSS_MONTHS
+        scoped = ms.get("vol_scope") == VOL_SCOPE
+        if not scoped:
+            rank = 1
+            note(f"{m}: its before volumes were read before task 0329 took contract-token candles out of "
+                 "the comparison — volumes are NOT compared for this month, trades are")
+        if ms.get("decimals"):
+            rank = 2
+            note(f"{m}: {ms['decimals']} AMM trades dropped because a token's decimals() did not resolve "
+                 "— they are NOT in the candles; re-run the month once it resolves (task 0329)")
         for src in sorted(set(ms["before"]) | set(after)):
             b = ms["before"].get(src, {"trades": 0, "vb": "0", "vq": "0"})
             x = after.get(src, {"trades": 0, "vb": "0", "vq": "0"})
-            less = x["trades"] < b["trades"] or Decimal(x["vb"]) < Decimal(b["vb"]) or Decimal(x["vq"]) < Decimal(b["vq"])
+            less = x["trades"] < b["trades"] or scoped and (
+                Decimal(x["vb"]) < Decimal(b["vb"]) or Decimal(x["vq"]) < Decimal(b["vq"]))
             same = (x["trades"], Decimal(x["vb"]), Decimal(x["vq"])) == (b["trades"], Decimal(b["vb"]), Decimal(b["vq"]))
             gain = (x["trades"] - b["trades"]) / b["trades"] * 100 if b["trades"] else 0.0
             if less:
@@ -1105,7 +1134,17 @@ def cmd_status(a, ch, st):
 
 def cmd_amm_done(a, ch, st):
     (st.dir / str(a.month)).mkdir(exist_ok=True)
-    (st.dir / str(a.month) / "amm.done").write_text(str(a.fallbacks))
+    (st.dir / str(a.month) / "amm.done").write_text(f"{a.fallbacks} {a.decimals}")
+
+
+def read_amm_done(marker):
+    """(fallbacks, decimals) from an `amm.done`. A marker without the decimals
+    count predates task 0329 and is refused rather than read as zero."""
+    parts = marker.read_text().split()
+    if len(parts) < 2:
+        raise Stop(f"{marker} carries no `trades dropped (decimals)` count — re-record it with "
+                   "`amm-done <month> --fallbacks N --decimals N` from the run's summary")
+    return int(parts[0]), int(parts[1])
 
 
 def cmd_finish(a, ch, st):
@@ -1134,8 +1173,9 @@ def cmd_finish(a, ch, st):
         print(f"acceptance 2 — OHLC order on {t}: {bad} violations", flush=True)
     print("""
 Not automatic, by design (runbook §7b-7e, §8):
-  7b  the enrichment worker now re-prices the whole history on its own (hours). Capture
-      POST_RUN_0228_VERSION_BEFORE_1W / _1M BEFORE it starts.
+  7b  drain 1m with coarse-repair from this machine (days); the hourly Lambda alone takes
+      months. Then 7b-2, coarse-repair on 15m..1M. Capture
+      POST_RUN_0228_VERSION_BEFORE_1W / _1M BEFORE either starts.
   7c  cargo test -p enrichment-worker --test post_run_0228_it -- --ignored
   7e  the USDT-peg read (USDT by identity, runbook §7e): peg_written = 0, pivot_written > 0, on 1m and 1h
   8.3 XLM/USDC 1d closes on the seven dust days within 5 % of Bitstamp
@@ -1193,6 +1233,8 @@ def build_parser():
     p.add_argument("--yes", action="store_true")
     p.add_argument("--accept", action="append", help="YYYYMM whose failed reconciliation is understood and recorded")
     p.add_argument("--fallbacks", type=int, default=0)
+    p.add_argument("--decimals", type=int,
+                   help="amm-done: the run's `trades dropped (decimals)` line (task 0329)")
     p.add_argument("--ack-phase1-measured", action="store_true")
     p.add_argument("--ack-0285", action="store_true")
     p.add_argument("--ack-0300-binary", action="store_true",
@@ -1237,6 +1279,8 @@ def main():
     a = p.parse_args()
     if a.command in ("amm-done", "rollback", "release") and not a.month:
         p.error(f"{a.command} needs a month")
+    if a.command == "amm-done" and a.decimals is None:
+        p.error("amm-done needs --decimals: the run's `trades dropped (decimals)` line (task 0329)")
     if a.min_excluded_rows and not a.second_pass:
         p.error("--min-excluded-rows applies to --second-pass only")
     global LOG

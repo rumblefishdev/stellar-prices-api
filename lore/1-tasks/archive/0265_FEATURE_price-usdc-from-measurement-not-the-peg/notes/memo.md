@@ -61,7 +61,7 @@ assumed"; a consumer cannot tell it from "USDC unmeasured".
    low **0.8800** at 07:51:23 UTC.
 2. **Fallback: Bitstamp USDC/USD**, only where the primary has no
    observation (24 days: the 2021-01-25 → 02-16 tail and a few sparse days).
-   **Cross-check: Kraken and Bitstamp.** A daily close more than 25 bps from
+   **Cross-check: third-party and Bitstamp.** A daily close more than 25 bps from
    a cross-check keeps the primary value and is flagged `measured-disputed`
    (4 days in five years). No averaging: every published number is one
    venue's print.
@@ -86,7 +86,7 @@ assumed"; a consumer cannot tell it from "USDC unmeasured".
 ## Rationale
 
 - **Dispersion decides the source order.** USD sources (Chainlink, Bitstamp,
-  Kraken, Coin Metrics) agree to < 1 bps median; USDT-quoted venues agree
+  third-party, Coin Metrics) agree to < 1 bps median; USDT-quoted venues agree
   with each other to 1 bps but sit **3–4 bps** off the USD cluster in calm
   and **20–30 bps** off in stress — that offset is USDT/USD. So USDT-quoted
   candles are cross-checks after correction, never primaries. Binance
