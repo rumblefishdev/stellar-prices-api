@@ -336,9 +336,9 @@ class Reconcile(unittest.TestCase):
     def test_the_summary_needs_the_decimals_line(self):
         text = ("negative apply order:      0\nswaps dropped (unresolved):0\n"
                 "trades dropped (decimals): 2\n")
-        self.assertEqual(r.amm_summary(text, "log"), {"fallbacks": 0, "dropped": 0, "decimals": 2})
+        self.assertEqual(r.amm_summary(text, "log", dry_run=False), {"fallbacks": 0, "dropped": 0, "decimals": 2, "unproven_sacs": None})
         with self.assertRaisesRegex(r.Stop, "trades dropped"):
-            r.amm_summary(text.replace("trades dropped (decimals): 2\n", ""), "log")
+            r.amm_summary(text.replace("trades dropped (decimals): 2\n", ""), "log", dry_run=False)
 
     def test_amm_done_carries_the_decimals_count(self):
         st = state([202201], self.tmp.name)

@@ -686,7 +686,12 @@ def require_transport_flag(a):
             "(run it on the CH host as `default`) or --amm wait + amm-done.")
 
 
-def amm_summary(text, logfile):
+# events-backfill's task-0242 line (run.rs UNPROVEN_SAC_LABEL). Absent from a
+# pre-0242 binary, which passes (D4: phase 3 is not held for the code).
+UNPROVEN_SAC_LABEL = "unproven sac swaps:"
+
+
+def amm_summary(text, logfile, *, dry_run, unproven_line_seen=False):
     """Read events-backfill's closing summary, or Stop naming what is missing.
 
     Called after the --dry-run pass as well as the write, so a binary whose
@@ -694,6 +699,11 @@ def amm_summary(text, logfile):
     Python AttributeError after the month's AMM candles are already in.
     `negative apply order:` replaced `events with no apply order:` in task 0304;
     a binary without it predates that fix and cannot read BE's events anyway.
+
+    `unproven sac swaps:` (task 0242) may be absent: a binary built before 0242
+    prints none, and phase 3 runs on one by design, the 0242 seed resolving its
+    SACs (D4, PC6). Absent after an earlier month of this state printed it
+    (`unproven_line_seen`), the host binary went back to a pre-0242 build: Stop.
     `trades dropped (decimals):` came with task 0329; a binary without it still
     scales every Soroban token at 7 decimals and must not write a month.
     """
@@ -706,12 +716,38 @@ def amm_summary(text, logfile):
                        f"see {logfile}. A binary without it predates task 0304 or 0329: rebuild "
                        "events-backfill from develop (on the CH host for --amm ssh)")
         found[key] = int(hit.group(1))
+    hit = re.search(rf"^{re.escape(UNPROVEN_SAC_LABEL)}\s*(\d+)", text, re.M)
+    found["unproven_sacs"] = int(hit.group(1)) if hit else None
+    if found["unproven_sacs"] is None and unproven_line_seen:
+        raise Stop(f"events-backfill printed no `{UNPROVEN_SAC_LABEL}` line, but an earlier month of this "
+                   "state did: the binary on the host is now one built before task 0242, which mints an "
+                   f"unproven SAC as a second identity — see {logfile}. Put the 0242 build back "
+                   "(docs/runbooks/0242-sac-identity-heal.md §4e) and `run` again")
+    if found["unproven_sacs"]:
+        m = Path(logfile).parent.name
+        state = (f"This was the --dry-run pass: no AMM candle was written, but {m}'s 1m partition is "
+                 "already dropped and holds SDEX-only candles. Fix it today and `run` again, or "
+                 f"`rollback {m}`" if dry_run else
+                 f"This was the write pass: {m}'s AMM candles are in without those swaps. `rollback {m}`")
+        raise Stop(f"events-backfill skipped {found['unproven_sacs']} swaps because their SAC could not be "
+                   f"proven (task 0242 D2) — the contracts are in the WARN in {logfile}. {state}: "
+                   "docs/runbooks/0242-sac-identity-heal.md §4c")
     return found
+
+
+def unproven_line_seen(st, m):
+    """Whether a month of this state other than `m` recorded `unproven sac swaps:` (task 0242)."""
+    return any(v.get("unproven_sacs") is not None for k, v in st.d["months"].items() if k != str(m))
 
 
 def record_amm_summary(ms, m, summary):
     """Keep the write pass's figures on the month and note the ones that need reading."""
     ms["fallbacks"], ms["dropped"] = summary["fallbacks"], summary["dropped"]
+    ms["unproven_sacs"] = summary["unproven_sacs"]
+    if ms["unproven_sacs"] is None:
+        note(f"{m}: events-backfill printed no `{UNPROVEN_SAC_LABEL}` line — a binary built before task 0242, "
+             "so its SACs resolve only through assets.sac_address (the 0242 seed), and an unseeded one "
+             "would mint a second identity (heal runbook §5a counts it)")
     ms["decimals"] = summary["decimals"]
     if ms["dropped"]:
         note(f"{m}: {ms['dropped']} swaps dropped for unregistered pools — see prices.unresolved_pools")
@@ -933,7 +969,8 @@ def run_month(a, ch, st, m, pw):
                     code, text = stream(cmd, env, mdir / "events-backfill.log")
                     if code != 0 or "=== events-backfill complete ===" not in text:
                         raise Stop(f"events-backfill {' '.join(flag)} exit {code} — see {mdir}/events-backfill.log")
-                    summary = amm_summary(text, mdir / "events-backfill.log")
+                    summary = amm_summary(text, mdir / "events-backfill.log", dry_run=bool(flag),
+                                          unproven_line_seen=unproven_line_seen(st, m))
                 record_amm_summary(ms, m, summary)
             elif a.amm == "ssh":
                 for flag in (" --dry-run", ""):
@@ -942,7 +979,8 @@ def run_month(a, ch, st, m, pw):
                                         mdir / "events-backfill.log", stdin_text=pw)
                     if code != 0 or "=== events-backfill complete ===" not in text:
                         raise Stop(f"events-backfill{flag} exit {code} — see {mdir}/events-backfill.log")
-                    summary = amm_summary(text, mdir / "events-backfill.log")
+                    summary = amm_summary(text, mdir / "events-backfill.log", dry_run=bool(flag),
+                                          unproven_line_seen=unproven_line_seen(st, m))
                 record_amm_summary(ms, m, summary)
             else:
                 marker = mdir / "amm.done"

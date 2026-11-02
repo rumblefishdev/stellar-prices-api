@@ -212,6 +212,10 @@ pub const DEFAULT_USER: &str = "default";
 /// The `prices` logical store. Every table in `schema/init.sql` lives here.
 pub const PROD_DATABASE: &str = "prices";
 
+/// BE's database on the shared cluster, holding `soroban_events` and
+/// `soroban_contracts`. The one definition for every reader of BE's tables.
+pub const BE_DATABASE: &str = "default";
+
 /// Canonical mainnet issuer of USDC (Circle). **Load-bearing join key** for the
 /// USD-close path: the backfill interns the USDC identity under this issuer, the
 /// enrichment peg tier and `resolve_reference_ids` match `prices.assets` on it,

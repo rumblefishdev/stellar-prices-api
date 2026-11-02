@@ -56,6 +56,7 @@
     "chDiskFreePercent": 20,
     "dlqEscalationDepths": [10, 50],
     "usdSanityEscalationCounts": [1, 100, 10000],
+    "sacContractIdentitiesActionsEnabled": false,
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
       "channelIdSsmParam": "/prices/production/slack-channel-id"
