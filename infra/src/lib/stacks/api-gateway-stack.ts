@@ -554,9 +554,9 @@ export class ApiGatewayStack extends cdk.Stack {
     // below — declared outside the `cacheEnabled` branch, because with the stage
     // cache off is exactly when an unbounded anonymous route costs the most.
     // `/api/{proxy+}` directly under the root: the bundle's paths share the
-    // prefix but never reach the gateway — the page lives on another host
-    // (task 0194) and only its backend calls come here, on the API's own
-    // hostname. The OpenAPI alias `/api/api-docs-json` rides on this same
+    // prefix (`/api/prices-api/`, task 0339) but never reach the gateway — the
+    // page lives on another host (task 0194) and only its backend calls come
+    // here, on the API's own hostname. The OpenAPI alias `/api/api-docs-json` rides on this same
     // proxy.
     const portalProxy = this.api.root
       .addResource('api')
@@ -568,14 +568,15 @@ export class ApiGatewayStack extends cdk.Stack {
     // The preflight for the bundle's cross-origin calls (task 0194).
     //
     // The bundle is served from `config.portalWebOrigin` — another
-    // application's distribution, whose `/api/*` behaviour is a static SPA
-    // that rewrites every extensionless path to its `index.html`. A
-    // same-origin `fetch('/api/config')` from there gets the bundle back as
-    // `200 text/html`, so the bundle calls this API on `config.apiDomain`
-    // instead, and a browser asks before a non-simple request crosses an
-    // origin: the revoke's marker header (`PORTAL_REQUEST_HEADER`) is one, and
-    // so is any `DELETE`. Answered here by a MOCK integration rather than by
-    // the Lambda — no invocation, and the `max-age` has to be set by whoever
+    // application's distribution, whose `/api/*` behaviour is a `301` into a
+    // static SPA (`/api/prices-api/*`) that rewrites every extensionless path
+    // to its `index.html`. A same-origin `fetch('/api/config')` from there
+    // gets the bundle back as `200 text/html`, so the bundle calls this API on
+    // `config.apiDomain` instead, and a browser asks before a non-simple
+    // request crosses an origin: the revoke's marker header
+    // (`PORTAL_REQUEST_HEADER`) is one, and so is any `DELETE`. Answered here
+    // by a MOCK integration rather than by the Lambda — no invocation, and
+    // the `max-age` has to be set by whoever
     // answers the preflight, which is the gateway — with the handler adding
     // `Access-Control-Allow-Origin` on the actual responses (`portal::apply`
     // in the Rust crate names the same one origin).

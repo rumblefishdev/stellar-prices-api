@@ -8,7 +8,7 @@
  * landing page went through this file rather than through a literal. Task
  * 0163's curl-by-curl walkthrough is still owed to the quick start's snippets.
  *
- * All root-relative and all under `/prices-api/`, because on the shared host
+ * All root-relative and all under `/api/prices-api/`, because on the shared host
  * the root belongs to the block explorer (task 0194): a link to
  * `/api-docs-json` there opens the explorer's page, not the document.
  */
@@ -39,9 +39,9 @@ export const PUBLIC_API_BASE_URL =
  * Same-origin, the alias under the portal prefix (`portal::OPENAPI_PATH` in
  * the API), not the root `/api-docs-json` that partners and the spec's
  * `servers` block use — the two are the same bytes from the same handler. On
- * the shared host (task 0194) the alias is a static-SPA path like every other
- * `/api/*` there, so this points at the root copy on the API's own hostname
- * instead.
+ * the shared host (task 0194) the alias is no backend path: `/api/*` there is
+ * a `301` into this static SPA (explorer task 0660), so this points at the
+ * root copy on the API's own hostname instead.
  *
  * ⚠️ This is also what `docs/ApiReference.tsx` **fetches**, cross-origin, to
  * render the reference — which is why `GET /api-docs-json` answers
@@ -74,8 +74,8 @@ export const OPENAPI_JSON = API_ORIGIN
  *
  * The file itself is `public/openapi.json`, the committed output of `npm run
  * openapi:extract`; CI diffs the two so the copy cannot drift from what the API
- * serves. It ships as `/prices-api/openapi.json` — a path with an extension,
- * which the explorer's `/prices-api/*` behaviour serves as a file rather than
+ * serves. It ships as `/api/prices-api/openapi.json` — a path with an extension,
+ * which the explorer's `/api/prices-api/*` behaviour serves as a file rather than
  * rewriting to `index.html` (it rewrites only extensionless paths).
  */
 export const OPENAPI_JSON_DOWNLOAD = `${ROUTER_BASENAME}/openapi.json`;
@@ -94,10 +94,10 @@ export const OPENAPI_JSON_FILENAME = 'stellar-prices-api-openapi.json';
  * absolute href for the plain `<a>`s on the landing page.
  *
  * On the shared host this URL works BECAUSE it is a route: the explorer's
- * `/prices-api/*` behaviour rewrites every extensionless path to
- * `/prices-api/index.html`, so `/prices-api/docs` boots this bundle and the
+ * `/api/prices-api/*` behaviour rewrites every extensionless path to
+ * `/api/prices-api/index.html`, so `/api/prices-api/docs` boots this bundle and the
  * router renders the reference. A static `docs/` folder in the bundle would
- * have been reachable only as `/prices-api/docs/index.html`, which is why the
+ * have been reachable only as `/api/prices-api/docs/index.html`, which is why the
  * reference is a page and not a static folder.
  *
  * Until 2026-09-01 `API_REFERENCE` was an alias of {@link OPENAPI_JSON} —
@@ -166,10 +166,10 @@ export const LOGIN_ANCHOR = 'login';
 
 /**
  * The login route, relative to the router's basename — so
- * `/prices-api/login` once `ROUTER_BASENAME` is applied.
+ * `/api/prices-api/login` once `ROUTER_BASENAME` is applied.
  *
- * A hard refresh on this path resolves because the host's `/prices-api/*`
- * behaviour rewrites every extensionless path to `/prices-api/index.html` —
+ * A hard refresh on this path resolves because the host's `/api/prices-api/*`
+ * behaviour rewrites every extensionless path to `/api/prices-api/index.html` —
  * a rule, not an
  * allow-list, so adding a route here needs nothing on the hosting side. (Our
  * own distribution kept a per-route allow-list in `DirectoryIndexFn`; it was

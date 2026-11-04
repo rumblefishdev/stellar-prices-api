@@ -7,8 +7,9 @@
  * session cookie on `SameSite=Lax`; the backend names this page's origin in
  * its CORS answer.
  *
- * The shared host (task 0194) cannot offer that: its `/api/*` behaviour is a
- * `301` to `/prices-api/*`, a static SPA with no route to any backend. So the
+ * The shared host (task 0194) cannot offer that: under its `/api/` there is
+ * the explorer's portal hub, this bundle (`/api/prices-api/*`, a static SPA)
+ * and a `301` into it for every other path — no route to any backend. So the
  * bundle built for it carries the API's own hostname (`API_ORIGIN`, from
  * `VITE_PORTAL_API_ORIGIN`) and the same URLs become absolute — cross-origin,
  * but **same-site**, which is what keeps the `SameSite=Lax` cookie flowing: the
@@ -247,9 +248,10 @@ async function getJson<T>(url: string): Promise<T> {
     // A `200` that is not JSON is the signature of the most likely routing
     // regression there is here: a backend call that reached a static host — a
     // bundle built WITHOUT `VITE_PORTAL_API_ORIGIN` and synced to the shared
-    // host, where `/api/config` is redirected to `/prices-api/config`, which
-    // the S3 behaviour rewrites to `/prices-api/index.html` and answers as
-    // `200 text/html` (what task 0194 saw on 2026-08-31, before the redirect).
+    // host, where `/api/config` is redirected to `/api/prices-api/config`,
+    // which the S3 behaviour rewrites to `/api/prices-api/index.html` and
+    // answers as `200 text/html` (what task 0194 saw on 2026-08-31, before the
+    // redirect).
     // Left unwrapped, that surfaces as a bare `SyntaxError` about an unexpected
     // `<` — no status, no URL, and no hint that the cause is where the request
     // went. Carry the status so the page can say which URL lied.

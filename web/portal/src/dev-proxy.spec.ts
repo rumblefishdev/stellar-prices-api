@@ -21,8 +21,9 @@ type ResolvedConfig = {
 const PROXY_TARGET = 'https://portal.example.invalid';
 
 /**
- * The portal backend's proxy rule is a regex key (the bundle shares `/api/`,
- * task 0194), so look it up by shape rather than by literal.
+ * The portal backend's proxy rule is a regex key (the bundle shares `/api/`:
+ * `/api/prices-api/` since task 0339), so look it up by shape rather than by
+ * literal.
  */
 const backendRule = (proxy: Record<string, ProxyEntry> | undefined) => {
   const key = Object.keys(proxy ?? {}).find((k) => k.startsWith('^/api/'));
@@ -94,13 +95,16 @@ describe('dev proxy', () => {
     // Vite's own dev-server paths and the app's pages share the prefix and
     // must NOT be proxied, or the dev server cannot serve itself.
     for (const bundle of [
-      '/api/',
-      '/api/index.html',
-      '/api/@vite/client',
-      '/api/src/main.tsx',
-      '/api/assets/index.js',
-      '/api/login',
-      '/api/dashboard',
+      '/api/prices-api/',
+      '/api/prices-api/index.html',
+      '/api/prices-api/@vite/client',
+      '/api/prices-api/src/main.tsx',
+      '/api/prices-api/assets/index.js',
+      '/api/prices-api/login',
+      '/api/prices-api/dashboard',
+      // Bundle paths ending in a backend segment's name stay the bundle's.
+      '/api/prices-api/config',
+      '/api/prices-api/key',
       '/api/keys', // not `/api/key` — the `(/|\?|$)` guard
       '/api/configuration', // and the query arm did not widen it into a prefix match
     ]) {
