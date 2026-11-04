@@ -170,13 +170,14 @@ export interface EnvironmentConfig {
    * not a resource under it.
    *
    * Why the portal needs it at all: the bundle is served from another
-   * application's distribution (`portalWebOrigin`), whose `/prices-api/*`
+   * application's distribution (`portalWebOrigin`), whose `/api/prices-api/*`
    * behaviour is a static SPA — every extensionless path under it is rewritten
-   * to `/prices-api/index.html` at the edge and answered `200 text/html`, and
-   * `/api/config` there is a `301` into it (task 0326). There is nothing on
-   * that host for a same-origin call to reach, so the bundle calls this
-   * hostname directly, cross-origin and same-site — the pattern the explorer's
-   * own SPA uses for its API.
+   * to `/api/prices-api/index.html` at the edge and answered `200 text/html`,
+   * and `/api/config` there is a `301` into it (explorer task 0660; that host's
+   * `/api/` is not this API's). There is nothing on that host for a
+   * same-origin call to reach, so the bundle calls this hostname directly,
+   * cross-origin and same-site — the pattern the explorer's own SPA uses for
+   * its API.
    *
    * `hostedZoneName` must be a suffix of `domainName`, and the zone must live
    * in this account: the certificate's validation record and the alias records
