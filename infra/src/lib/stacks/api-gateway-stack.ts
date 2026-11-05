@@ -1087,6 +1087,35 @@ export class ApiGatewayStack extends cdk.Stack {
       target: alias,
     });
 
+    // The API's host on the sorobanscan.com zone (task 0340): one more
+    // custom domain on the same stage and root base path, beside `apiDomain`,
+    // which keeps serving. No record here: that zone's DNS is Cloudflare's, in
+    // soroban-infrastructure's `cloudflare/`, which takes the regional target
+    // below. The certificate is referenced, not created: DNS validation in that
+    // zone is not this stack's to write. The `*.sorobanscan.com` one (explorer
+    // task 0661) is in use by the explorer's API domains, so ACM keeps renewing
+    // it, unlike the unattached wildcard the `apiDomain` note above avoids.
+    if (config.sorobanscanApiDomain) {
+      const sorobanscanApiDomain = this.api.addDomainName(
+        'SorobanscanApiDomain',
+        {
+          domainName: config.sorobanscanApiDomain.domainName,
+          certificate: acm.Certificate.fromCertificateArn(
+            this,
+            'SorobanscanApiCertificate',
+            config.sorobanscanApiDomain.certificateArn,
+          ),
+          endpointType: apigateway.EndpointType.REGIONAL,
+          securityPolicy: apigateway.SecurityPolicy.TLS_1_2,
+        },
+      );
+      new cdk.CfnOutput(this, 'SorobanscanApiRegionalTarget', {
+        value: sorobanscanApiDomain.domainNameAliasDomainName,
+        description:
+          'CNAME target of the sorobanscan.com API host (soroban-infrastructure)',
+      });
+    }
+
     new cdk.CfnOutput(this, 'ApiCustomDomain', {
       value: `https://${config.apiDomain.domainName}`,
       description: 'The API on its own hostname (root base path → this stage)',

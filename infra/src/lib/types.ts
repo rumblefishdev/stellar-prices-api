@@ -190,6 +190,19 @@ export interface EnvironmentConfig {
   };
 
   /**
+   * A second hostname for the same API on the `sorobanscan.com` zone (task
+   * 0340), beside `apiDomain`, which keeps serving. That zone's DNS is
+   * Cloudflare's (soroban-infrastructure's `cloudflare/`), so this stack writes
+   * no record: its record takes the `SorobanscanApiRegionalTarget` output.
+   * `certificateArn` names an issued certificate in this region that covers
+   * `domainName`. Unset: no second hostname.
+   */
+  readonly sorobanscanApiDomain?: {
+    readonly domainName: string;
+    readonly certificateArn: string;
+  };
+
+  /**
    * The origin the portal's bundle is served from —
    * `https://sorobanscan.rumblefish.dev`, scheme and host, no path.
    *
@@ -822,6 +835,26 @@ export function validateConfig(config: EnvironmentConfig): void {
       errors.push(
         `apiDomain.hostedZoneId must be a Route 53 hosted zone id, got: "${hostedZoneId}"`,
       );
+    }
+    if (config.sorobanscanApiDomain) {
+      const second = config.sorobanscanApiDomain;
+      if (
+        !hostname.test(second.domainName ?? '') ||
+        second.domainName === domainName
+      ) {
+        errors.push(
+          `sorobanscanApiDomain.domainName must be a lowercase hostname other than apiDomain.domainName, got: "${second.domainName}"`,
+        );
+      }
+      if (
+        !/^arn:aws:acm:[a-z0-9-]+:\d{12}:certificate\/[0-9a-f-]{36}$/.test(
+          second.certificateArn ?? '',
+        )
+      ) {
+        errors.push(
+          `sorobanscanApiDomain.certificateArn must be an ACM certificate ARN, got: "${second.certificateArn}"`,
+        );
+      }
     }
     if (
       typeof config.portalWebOrigin !== 'string' ||
