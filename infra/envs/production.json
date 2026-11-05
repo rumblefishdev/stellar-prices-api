@@ -20,6 +20,10 @@
     "hostedZoneId": "Z10396861CRMUIWWA8TL9",
     "hostedZoneName": "sorobanscan.rumblefish.dev"
   },
+  "sorobanscanApiDomain": {
+    "domainName": "prices-api.sorobanscan.com",
+    "certificateArn": "arn:aws:acm:eu-central-1:750702271865:certificate/c937aeef-20b3-4e94-ba90-ade97c7d00ec"
+  },
   "portalWebOrigin": "https://sorobanscan.rumblefish.dev",
   "apiHandler": {
     "memoryMb": 512,
