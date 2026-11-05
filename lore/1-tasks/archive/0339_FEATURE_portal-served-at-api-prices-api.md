@@ -2,12 +2,13 @@
 id: "0339"
 title: "Serve the portal at /api/prices-api/ on the explorer's host"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0326", "0194"]
 tags: ["portal", "hosting", "effort-small"]
 links:
   - https://github.com/rumblefishdev/soroban-block-explorer/pull/699
+  - https://github.com/rumblefishdev/stellar-prices-api/pull/410
 history:
   - date: 2026-11-03
     status: active
@@ -17,6 +18,14 @@ history:
       host (team decision): /api/prices-api/ now, /api/x402-facilitator/ and
       /api/sorobanscan/ later, /api/ a hub. Explorer side:
       soroban-block-explorer task 0660, PR #699.
+  - date: 2026-11-05
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Compute with the new PORTAL_HOME deployed with 0242's §4e (develop
+      43a28399). The OAuth callback lands on /api/prices-api/ directly, a
+      Discord sign-in round-trip passed on production, and the dead
+      prices-api/ bucket prefix (18 objects) is dropped after a local copy.
 ---
 
 # Serve the portal at /api/prices-api/ on the explorer's host
@@ -31,10 +40,11 @@ product portals. The explorer (task 0660, PR #699) serves
 same path under `/api/prices-api`, query string kept. Same kind of move as
 [[0326]].
 
-## Status: Active
+## Status: Completed
 
-**Current state:** code and docs on the branch; nothing deployed. Next: the
-deploy order below, explorer PR #699 first.
+**Current state:** live on production. The bundle under `api/prices-api/`
+(2026-11-04, with the explorer's 0660), Compute with the new `PORTAL_HOME`
+(2026-11-05), the old `prices-api/` prefix gone.
 
 ## Context
 
@@ -76,13 +86,18 @@ Then:
 
 ## Acceptance Criteria
 
-- [ ] Portal boots at `/api/prices-api/`, `/api/prices-api/dashboard`,
+- [x] Portal boots at `/api/prices-api/`, `/api/prices-api/dashboard`,
       `/api/prices-api/docs` (hard refresh included)
-- [ ] Discord sign-in round-trip lands on `/api/prices-api/?…` (after
+- [x] Discord sign-in round-trip lands on `/api/prices-api/?…` (after
       Compute; until then via the `301`), done by a person on production
-- [ ] `/prices-api/?utm_source=stellar-skill` → one `301` to
+      (2026-11-05). An errored callback answers `303` to
+      `https://sorobanscan.rumblefish.dev/api/prices-api/?signin=failed`.
+- [x] `/prices-api/?utm_source=stellar-skill` → one `301` to
       `/api/prices-api/?utm_source=stellar-skill`
-- [ ] Old `prices-api/` prefix dropped from the bucket once the above holds
+- [x] Old `prices-api/` prefix dropped from the bucket once the above holds
+      (`production-soroban-explorer-api-spa`, 18 objects, 2026-11-05; copy in
+      `~/Backups/explorer-prices-api-prefix-2026-11-05/` on stkrolikiewicz's
+      laptop, the bucket is unversioned)
 
 ## Design Decisions
 
@@ -110,6 +125,9 @@ Then:
 5. **Task created on the branch, not on `develop`.** Asked for explicitly
    (nothing pushed straight to `develop`), against the usual rule in
    `lore/CLAUDE.md`.
+6. **Compute shipped with 0242's §4e**, not alone: `develop` already held
+   #390, whose D9 holds Compute until after phase-3 stage D. The 301 kept
+   sign-in working until then.
 
 ## Implementation Notes
 
