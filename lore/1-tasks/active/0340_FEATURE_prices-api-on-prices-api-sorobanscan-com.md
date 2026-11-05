@@ -37,10 +37,26 @@ on 2026-11-03 (explorer task 0659, step 6).
 
 ## Status: Active
 
-**Current state:** Step 1 in progress. The explorer serves on `sorobanscan.com`
-since 2026-11-05 and keeps the portal on its old host with
+**Current state:** Steps 1 and 2 done (2026-11-05). `prices-api.sorobanscan.com`
+answers through Cloudflare like the old host: `/health` and `/api/config` 200,
+`/v1/…` without a key 403. Nothing uses it yet: the portal, `apiBaseUrl` and
+the Discord redirect stay on the old host. Next: Step 3, Adam's redirect URI,
+then Step 4. The explorer keeps the portal on its old host with
 `pricesPortalOnLegacyHost`: the new host answers `302` to the old one (explorer
 task 0664).
+
+- Done: Step 1. #411, deployed with `make deploy-production-apigateway` from
+  `3dc847d7`. The stack's first deploy since 2026-09-24 also shipped 0309's
+  `404` for unmapped routes. Regional target
+  `d-in7vpbow2m.execute-api.eu-central-1.amazonaws.com`.
+- Done: Step 2. soroban-infrastructure#9: a proxied CNAME, `prices_api_origin`.
+- Decided (2026-11-05): proxied, like the rest of `sorobanscan.com` behind
+  Cloudflare, with no rules of its own yet. The zone's single Free-plan rate
+  limit (100 / 10 s per IP) stays the explorer API's, because a paid plan here
+  allows 25 requests/s; API Gateway's usage plans keep limiting. Managed WAF
+  comes after watching the traffic. An `X-Edge-Secret` origin lock comes only
+  with Step 5, while the old host and `execute-api` still answer. The backend
+  reads no client IP.
 
 ## Context
 
@@ -74,10 +90,8 @@ old domain keeps serving.
 
 ### Step 2: The record (soroban-infrastructure)
 
-`prices-api.sorobanscan.com` → that regional target. Decide first: DNS-only, as
-the API is today (API Gateway straight, no Cloudflare), or proxied with an
-`X-Edge-Secret` lock like the explorer API. The Free plan has one rate-limit
-rule for the whole zone, already the explorer API's.
+`prices-api.sorobanscan.com` → that regional target, proxied (see Decided). The
+Free plan has one rate-limit rule for the whole zone, already the explorer API's.
 
 ### Step 3: Discord
 
