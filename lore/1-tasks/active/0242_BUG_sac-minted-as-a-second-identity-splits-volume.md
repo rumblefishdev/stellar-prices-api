@@ -245,6 +245,10 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - Comet's `pool_registry` row is present (1).
 - **2026-11-02, a new split (found in [[0338]]).** BLNT's SAC `CCBNWP5L…` traded on Comet from 2026-10-26 14:22 UTC, before SDEX interned its classic at 18:42, so 10 trades sit on the `soroban` id 14236029787030528679. The "no contract row since BURNMKR" of the October window no longer holds.
   - The reprice in 0338 rewrites those trades under the classic id, so the rows left on that id are copies. Add it to the residual cleanup. It does not fall under PC9, because the classic exists.
+- **2026-11-05, deploy (runbook §4e).** After stage D. Pre-check as `prices_writer` from fishuser-hero (Adam): 4,137 distinct `is_sac` contracts readable. `deploy-production-compute` (11:33 UTC) and `deploy-production-eventbridge` (11:35) from `develop` `43a28399`; the previous CodeSha256s are in `~/heal-0242/deployed-before.tsv` on stkrolikiewicz's laptop. Observability not deployed (§6).
+  - Cold start: `loaded the is_sac contract set` with `sac_contracts` 4137, then `resumed cursor from ClickHouse` at 65318468. No WARN.
+  - `SacUnprovenSkipped` and `SacCandidatesUnavailable`: no datapoints in the first hour.
+  - Probe: `sac_contract_rows` **40**, not the runbook's baseline 36 (`sac_contract_scanned` 74, `be_sac_contracts` 4137). The old build ran until this deploy, so contract rows minted since the October baseline (BLNT above among them) count too. §5 counts its residual from today's number, not from 36.
 
 ## Acceptance Criteria
 
