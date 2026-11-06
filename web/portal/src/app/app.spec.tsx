@@ -1918,7 +1918,7 @@ describe('navigation off the landing page', () => {
     // Rumble Fish (task 0301) — both were images that led nowhere.
     expect(
       screen.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
-    ).toBe('https://sorobanscan.rumblefish.dev/');
+    ).toBe('https://sorobanscan.com/');
     expect(
       screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
     ).toBe('https://rumblefish.dev');
@@ -1967,7 +1967,7 @@ describe('navigation off the landing page', () => {
       const nav = within(await screen.findByRole('navigation', { name: bar }));
       expect(
         nav.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
-      ).toBe('https://sorobanscan.rumblefish.dev/');
+      ).toBe('https://sorobanscan.com/');
     },
   );
 

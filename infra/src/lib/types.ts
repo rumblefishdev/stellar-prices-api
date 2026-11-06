@@ -204,7 +204,7 @@ export interface EnvironmentConfig {
 
   /**
    * The origin the portal's bundle is served from —
-   * `https://sorobanscan.rumblefish.dev`, scheme and host, no path.
+   * `https://sorobanscan.com`, scheme and host, no path.
    *
    * Two things hang off it and only these two: it is the one origin the
    * portal routes' CORS answer names (`allowOrigins` on the gateway's

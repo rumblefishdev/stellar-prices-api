@@ -70,7 +70,8 @@ use crate::config::AppConfig;
 /// `/api/` is the portal's backend on the API's own hostname. The bundle shared
 /// the prefix from task 0194 (2026-08-31) until task 0326 moved it to
 /// `sorobanscan.rumblefish.dev/prices-api/`, and shares it again since task
-/// 0339 at `sorobanscan.rumblefish.dev/api/prices-api/` (the explorer answers
+/// 0339 at `/api/prices-api/` on the explorer's host, `sorobanscan.com` since
+/// task 0340 (the explorer answers
 /// `301` there on every other `/api/…`, `/prices-api…` and `/pricing-api…`).
 /// Nothing routes between them either way, because they are on different
 /// HOSTS — the bundle is served from the block explorer's distribution, and

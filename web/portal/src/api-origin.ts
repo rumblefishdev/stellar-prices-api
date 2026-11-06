@@ -17,7 +17,7 @@
  * explorer's, not the backend's, and the two are on different hosts. That
  * deployment is built with
  *
- *     VITE_PORTAL_API_ORIGIN=https://prices-api.sorobanscan.rumblefish.dev
+ *     VITE_PORTAL_API_ORIGIN=https://prices-api.sorobanscan.com
  *
  * and every backend URL becomes absolute, cross-origin and same-site. The
  * three things that layout needs are all on the backend's side — one

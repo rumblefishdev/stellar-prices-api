@@ -35,7 +35,7 @@ const BASE_PATH = '/api/prices-api/';
  * show is everything else, with one origin and no build variable to set.
  *
  * `DEV_API_PROXY_TARGET` should be the **API's own hostname**
- * (`https://prices-api.sorobanscan.rumblefish.dev`), not the execute-api
+ * (`https://prices-api.sorobanscan.com`), not the execute-api
  * URL: the custom domain serves all four of these paths at exactly the shape
  * this proxy forwards, whereas execute-api serves them under `/{stage}` and
  * would need a rewrite here that production does not perform.

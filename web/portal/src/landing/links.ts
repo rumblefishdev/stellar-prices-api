@@ -195,7 +195,7 @@ export const LANDING = `${ROUTER_BASENAME}/`;
  * how a visitor gets back to the rest of it. Absolute, not `/`: on the shared
  * host the root is the explorer's, but under the dev server `/` is nothing.
  */
-export const EXPLORER = 'https://sorobanscan.rumblefish.dev/';
+export const EXPLORER = 'https://sorobanscan.com/';
 
 /** Rumble Fish's own site — where the footer's mark leads. */
 export const RUMBLEFISH_SITE = 'https://rumblefish.dev';
