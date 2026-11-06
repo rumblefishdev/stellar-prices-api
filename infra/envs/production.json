@@ -14,7 +14,7 @@
   },
   "apiGatewayCacheEnabled": true,
   "coverageSweepEnabled": true,
-  "apiBaseUrl": "https://prices-api.sorobanscan.rumblefish.dev",
+  "apiBaseUrl": "https://prices-api.sorobanscan.com",
   "apiDomain": {
     "domainName": "prices-api.sorobanscan.rumblefish.dev",
     "hostedZoneId": "Z10396861CRMUIWWA8TL9",
@@ -24,7 +24,7 @@
     "domainName": "prices-api.sorobanscan.com",
     "certificateArn": "arn:aws:acm:eu-central-1:750702271865:certificate/c937aeef-20b3-4e94-ba90-ade97c7d00ec"
   },
-  "portalWebOrigin": "https://sorobanscan.rumblefish.dev",
+  "portalWebOrigin": "https://sorobanscan.com",
   "apiHandler": {
     "memoryMb": 512,
     "timeoutSeconds": 15
