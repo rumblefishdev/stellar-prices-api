@@ -131,13 +131,14 @@ destroy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
 # The portal (task 0194; the only deploy path since task 0195).
-# `https://sorobanscan.rumblefish.dev/api/prices-api/` is served by the block explorer's
+# `https://sorobanscan.com/api/prices-api/` is served by the block explorer's
 # distribution (EA2TLS5SS5M87) from ITS bucket, which nothing in this repo
 # deploys — this sync is the only way a build reaches it. Built with the API's
 # own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
 # `web/portal/src/api-origin.ts`): on that host `/api/prices-api/*` is a static SPA, so
-# the bundle must call the backend on `apiDomain.domainName` rather than
-# relatively. `--skip-nx-cache` because the variable is not an Nx input — a
+# the bundle must call the backend on its own host rather than relatively:
+# `sorobanscanApiDomain.domainName` since task 0340 (same-site with the
+# portal), else `apiDomain.domainName`. `--skip-nx-cache` because the variable is not an Nx input — a
 # cached build would hand back whichever variant ran last, and the relative
 # one is indistinguishable from this one until a visitor opens the page.
 #
@@ -154,7 +155,7 @@ EXPLORER_DISTRIBUTION_ID ?= EA2TLS5SS5M87
 # `// empty`, so a renamed key yields `https://` rather than `https://null`.
 # Either is refused by `check-portal-api-origin` below before a build can bake
 # it in; a missing `jq` produces the same empty value and the same refusal.
-PORTAL_API_ORIGIN ?= https://$(shell jq -r '.apiDomain.domainName // empty' envs/production.json)
+PORTAL_API_ORIGIN ?= https://$(shell jq -r '(.sorobanscanApiDomain.domainName // .apiDomain.domainName) // empty' envs/production.json)
 
 # `$(shell …)` swallows a failed `jq` — binary missing, key renamed — into the
 # value, and the value is baked into the bundle: every backend call then goes
