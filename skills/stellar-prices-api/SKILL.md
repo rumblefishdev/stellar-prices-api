@@ -59,7 +59,7 @@ KEY=${STELLAR_PRICES_API_KEY:-$(sed -n 's/^\(export \)*STELLAR_PRICES_API_KEY=//
 **If the key is missing, stop and ask the user for it.** Do not call the API
 without a key, and do not guess or invent prices. Tell the user how to get one:
 
-1. Open https://sorobanscan.rumblefish.dev/api/prices-api/?utm_source=stellar-skill
+1. Open https://sorobanscan.com/api/prices-api/?utm_source=stellar-skill
 2. Click **Sign in with Discord**. The account must be a member of the
    [Stellar Developers Discord](https://discord.gg/stellardev), must have passed
    the server's membership screening, and must be older than 5 minutes.
@@ -89,12 +89,12 @@ Handle the key like a secret:
 
 ## Basics
 
-|                      |                                                                             |
-| -------------------- | --------------------------------------------------------------------------- |
-| Base URL             | `https://prices-api.sorobanscan.rumblefish.dev/v1`                          |
-| Auth header          | `x-api-key: <key>`. `Authorization: Bearer` is rejected with 403.           |
-| Spec (no key needed) | `https://prices-api.sorobanscan.rumblefish.dev/api-docs-json` (OpenAPI 3.1) |
-| Human docs           | https://sorobanscan.rumblefish.dev/api/prices-api/docs                      |
+|                      |                                                                   |
+| -------------------- | ----------------------------------------------------------------- |
+| Base URL             | `https://prices-api.sorobanscan.com/v1`                           |
+| Auth header          | `x-api-key: <key>`. `Authorization: Bearer` is rejected with 403. |
+| Spec (no key needed) | `https://prices-api.sorobanscan.com/api-docs-json` (OpenAPI 3.1)  |
+| Human docs           | https://sorobanscan.com/api/prices-api/docs                       |
 
 The spec describes every parameter and field in detail. Fetch it whenever
 something is not covered here.
@@ -159,7 +159,7 @@ options send the `stellar-prices-skill/1` user agent and make an HTTP error
 visible (`curl: (22) … 403`) instead of letting `jq` print nulls.
 
 ```bash
-API=https://prices-api.sorobanscan.rumblefish.dev/v1
+API=https://prices-api.sorobanscan.com/v1
 KEY=${STELLAR_PRICES_API_KEY:-$(sed -n 's/^\(export \)*STELLAR_PRICES_API_KEY=//p' .env 2>/dev/null | head -1 | tr -d "\"'\r")}
 H=(-sS --fail-with-body -H "x-api-key: $KEY" -A "stellar-prices-skill/1")
 USDC=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN

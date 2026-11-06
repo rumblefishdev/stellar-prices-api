@@ -94,7 +94,7 @@ pub struct AppConfig {
     /// [`Self::load_portal_eligibility`], or directly by a test.
     pub portal_eligibility: Option<crate::portal::eligibility::EligibilitySettings>,
     /// The origin the portal's bundle is served from, when that is not this
-    /// backend's own host (task 0194): `https://sorobanscan.rumblefish.dev`.
+    /// backend's own host (task 0194): `https://sorobanscan.com`.
     ///
     /// Read from `PORTAL_WEB_ORIGIN`, which `compute-stack.ts` sets from
     /// `portalWebOrigin` — the same value `api-gateway-stack.ts` names in the

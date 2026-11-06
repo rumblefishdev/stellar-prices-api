@@ -170,7 +170,7 @@ to their own infrastructure at any time if needed.
 | **EventBridge Scheduler**            | Scheduled triggers          | Cron/rate rules for all periodic Lambda workers                                                                                                                                                                                                                                                   |
 | **Secrets Manager**                  | Credentials & mTLS material | Per-env client `{cert,key,ca}` for Caddy:443 mTLS (single JSON bundle secret per identity, named by `MTLS_SECRET_NAME`); Soroswap/Aquarius API keys; oracle contract address                                                                                                                      |
 | **CloudWatch + X-Ray**               | Observability               | API latency, error rates, ingestion lag, Lambda duration/concurrency, backfill progress; mTLS cert NotAfter alarm                                                                                                                                                                                 |
-| **S3** (API docs)                    | Documentation hosting       | self-service onboarding portal + API reference, served from the block explorer's bucket and CloudFront distribution at `sorobanscan.rumblefish.dev/api/prices-api/`; the OpenAPI document is served by the API itself                                                                             |
+| **S3** (API docs)                    | Documentation hosting       | self-service onboarding portal + API reference, served from the block explorer's bucket and CloudFront distribution at `sorobanscan.com/api/prices-api/`; the OpenAPI document is served by the API itself                                                                                        |
 
 **Components no longer in the Prices API budget** (eliminated by ADR 0007):
 
@@ -523,7 +523,7 @@ PARTITION` statements over HTTPS-mTLS to Caddy:443.
 
 ## 4. API Endpoints Design
 
-**Base URL:** `https://prices-api.sorobanscan.rumblefish.dev/v1`
+**Base URL:** `https://prices-api.sorobanscan.com/v1`
 
 **Authentication and errors.** Every `/v1` request carries an `x-api-key` header, which API Gateway
 checks before the request reaches the handler (§1.1, §7). An error therefore has one of two bodies,

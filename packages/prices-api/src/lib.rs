@@ -136,8 +136,8 @@ fn app_inner(
     // on a host whose root belongs to another application (task 0194).
     //
     // `Access-Control-Allow-Origin: *`, on both copies (task 0195). The
-    // portal's Swagger UI is a page on `sorobanscan.rumblefish.dev` fetching
-    // this document from `prices-api.sorobanscan.rumblefish.dev` — cross-origin,
+    // portal's Swagger UI is a page on `sorobanscan.com` fetching this
+    // document from `prices-api.sorobanscan.com` — cross-origin,
     // and read by `fetch`, not by navigation, so without an allow header the
     // browser refuses to hand the bytes to the page. `*` rather than the
     // portal's origin, deliberately: the document is anonymous, public and
