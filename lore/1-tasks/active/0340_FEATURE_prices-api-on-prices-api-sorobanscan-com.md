@@ -37,13 +37,31 @@ on 2026-11-03 (explorer task 0659, step 6).
 
 ## Status: Active
 
-**Current state:** Steps 1 and 2 done (2026-11-05). `prices-api.sorobanscan.com`
-answers through Cloudflare like the old host: `/health` and `/api/config` 200,
-`/v1/…` without a key 403. Nothing uses it yet: the portal, `apiBaseUrl` and
-the Discord redirect stay on the old host. Next: Step 3, Adam's redirect URI,
-then Step 4. The explorer keeps the portal on its old host with
-`pricesPortalOnLegacyHost`: the new host answers `302` to the old one (explorer
-task 0664).
+**Current state:** Steps 1–4 done (2026-11-06). The portal runs on
+`https://sorobanscan.com/api/prices-api/` against `prices-api.sorobanscan.com`,
+a Discord sign-in passed there, and the old portal host answers `301`. The old
+API host `prices-api.sorobanscan.rumblefish.dev` keeps serving API-key clients.
+Next: Step 5 (docs, the skill, the API examples, then the old host's fate).
+
+- Done: Step 3 (2026-11-06, Adam). The Discord application holds the new
+  redirect URI beside the old one. Checked by an authorize link that showed the
+  consent screen with `https://prices-api.sorobanscan.com`.
+- Done: Step 4 (2026-11-06, about 08:57–09:00 UTC). #412 merged as `8ed247d3`.
+  - `redirect_uri` in `prices/production/portal-discord-oauth` → the new
+    callback. The previous version `c34106e0…` is kept as `AWSPREVIOUS`.
+  - `deploy-production-apigateway` and `-compute`: CORS, `API_BASE_URL`,
+    `PORTAL_WEB_ORIGIN`.
+  - `sync-portal-explorer`, with the bundle built against the new host.
+  - Explorer: `pricesPortalOnLegacyHost: false`, release #719, Delivery from
+    a laptop.
+  - Checked: preflight from `sorobanscan.com` answers `204` with that origin and
+    credentials; sign-in starts with the new `redirect_uri`; the callback lands
+    on `https://sorobanscan.com/api/prices-api/`; a person signed in.
+- Found (2026-11-06): CI on #412 pinned two copies of `apiBaseUrl`:
+  `PUBLIC_API_BASE_URL` in `web/portal/src/landing/links.ts` and `servers` in
+  `web/portal/public/openapi.json`. Both moved with it. The logo's `EXPLORER`
+  link still names the old explorer host (it answers `301`), because nine
+  `app.spec.tsx` cases pin it. Change it with Step 5.
 
 - Done: Step 1. #411, deployed with `make deploy-production-apigateway` from
   `3dc847d7`. The stack's first deploy since 2026-09-24 also shipped 0309's
@@ -120,10 +138,11 @@ there.
 
 - [ ] `https://prices-api.sorobanscan.com/v1/…` answers like the old host,
       with the same API keys.
-- [ ] A Discord sign-in round-trip completes on
-      `https://sorobanscan.com/api/prices-api/`, done by a person on production.
-- [ ] `https://sorobanscan.rumblefish.dev/api/prices-api/…` answers `301` to
-      the same path on `sorobanscan.com` (explorer flag off).
+- [x] A Discord sign-in round-trip completes on
+      `https://sorobanscan.com/api/prices-api/`, done by a person on production
+      (2026-11-06).
+- [x] `https://sorobanscan.rumblefish.dev/api/prices-api/…` answers `301` to
+      the same path on `sorobanscan.com` (explorer flag off, 2026-11-06).
 - [ ] Docs, the skill and the API examples name the new host.
 - [ ] **Docs updated** — README, `docs/runbooks/portal-oauth-deploy-prep.md`,
       `infra/README.md`.
