@@ -42,7 +42,7 @@ on 2026-11-03 (explorer task 0659, step 6).
 a Discord sign-in passed there, and the old portal host answers `301`. The old
 API host `prices-api.sorobanscan.rumblefish.dev` keeps serving API-key clients.
 Step 5's docs part is in progress on `feat/0340_docs-name-new-host`. Still
-open: a key test on the new host, then the old host's fate.
+open: the old host's fate. A key test on the new host passed (2026-11-06).
 
 - Step 5, docs (2026-11-06): the endpoint reference, the overview, the OAuth
   runbook, the skill, the portal's logo link and the comments that state the
@@ -149,8 +149,8 @@ there.
 
 ## Acceptance Criteria
 
-- [ ] `https://prices-api.sorobanscan.com/v1/…` answers like the old host,
-      with the same API keys.
+- [x] `https://prices-api.sorobanscan.com/v1/…` answers like the old host,
+      with the same API keys (checked with a key, 2026-11-06).
 - [x] A Discord sign-in round-trip completes on
       `https://sorobanscan.com/api/prices-api/`, done by a person on production
       (2026-11-06).
