@@ -395,7 +395,7 @@ bundle):
 
 ```bash
 curl -sS --fail-with-body --cert ~/prices-mtls/prices_writer.crt --key ~/prices-mtls/prices_writer.key \
-  --cacert ~/prices-mtls/ca.crt https://ch.sorobanscan.rumblefish.dev/ \
+  --cacert ~/prices-mtls/ca.crt https://ch.sorobanscan.com/ \
   --data-binary "SELECT count() FROM (SELECT DISTINCT contract_id FROM default.soroban_contracts WHERE is_sac)"
 ```
 

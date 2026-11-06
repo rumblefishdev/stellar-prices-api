@@ -192,7 +192,7 @@ no separate push step — so `/backfill/status` updates in real time. Needs the
 `aws-mtls` build and the operator's client bundle:
 
 ```bash
-CH_DOMAIN=ch.sorobanscan.rumblefish.dev \
+CH_DOMAIN=ch.sorobanscan.com \
 MTLS_CERT_PATH=… MTLS_KEY_PATH=… MTLS_CA_PATH=… \
 target/release/sdex-backfill --transport hetzner \
     --mode combined --start 50457424 --end <TIP> --verbose

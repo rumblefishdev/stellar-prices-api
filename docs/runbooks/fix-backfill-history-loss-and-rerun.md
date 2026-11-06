@@ -192,7 +192,7 @@ cat > ~/run-full-backfill.sh <<'SCRIPT'
 #!/usr/bin/env bash
 set -uo pipefail
 
-export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export CH_DOMAIN=ch.sorobanscan.com
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
@@ -312,7 +312,7 @@ Set `START = min(current_ledger over the combined streams) + 1` (≈ **62,592,00
 ### 6b.2 Run the bounded gap-fill (tmux, same certs as 6.1)
 
 ```bash
-export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export CH_DOMAIN=ch.sorobanscan.com
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt

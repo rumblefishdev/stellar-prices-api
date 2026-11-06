@@ -317,7 +317,7 @@ Then, **one writer per source** (see the warning below):
 ```bash
 tmux new -s reingest
 
-export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export CH_DOMAIN=ch.sorobanscan.com
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
@@ -689,10 +689,10 @@ cargo build --release -p enrichment-worker --features aws-mtls --bin coarse-repa
 chadmin() { curl -sS --fail-with-body --cacert ~/prices-mtls/ca.crt \
   --cert ~/prices-mtls/prices-admin-production.crt \
   --key ~/prices-mtls/prices-admin-production.key \
-  "https://ch.sorobanscan.rumblefish.dev/" --data-binary "$1"; }
+  "https://ch.sorobanscan.com/" --data-binary "$1"; }
 chadmin "SELECT currentUser() FORMAT TSV"   # must print prices_admin
 
-export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export CH_DOMAIN=ch.sorobanscan.com
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt

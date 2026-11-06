@@ -83,7 +83,7 @@ Binary lands at `./target/release/coarse-repair`.
 Point at the writer certs (same env as sdex-backfill):
 
 ```bash
-export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export CH_DOMAIN=ch.sorobanscan.com
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt

@@ -50,7 +50,7 @@ this is an operator procedure rather than something the apply path does.
 **local dev ClickHouse** and exits 0 — a clean result that says nothing whatever
 about ch-prod-01. Every command below is written for the Hetzner host.
 
-Prod's HTTP endpoint (`ch.sorobanscan.rumblefish.dev`) is mTLS-only behind Caddy
+Prod's HTTP endpoint (`ch.sorobanscan.com`) is mTLS-only behind Caddy
 and `prices_clickhouse::client()` builds a plaintext client, so there is no path
 from a local machine to prod for this binary. Run it **on the host, against the
 loopback port** — the same pattern as
