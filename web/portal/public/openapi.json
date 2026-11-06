@@ -10,7 +10,7 @@
   },
   "servers": [
     {
-      "url": "https://prices-api.sorobanscan.rumblefish.dev"
+      "url": "https://prices-api.sorobanscan.com"
     }
   ],
   "paths": {

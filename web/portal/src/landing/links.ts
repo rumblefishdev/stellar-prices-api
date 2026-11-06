@@ -29,8 +29,7 @@ import { ROUTER_BASENAME } from '../base-path';
  * advertises — so a reader following the quick start and a reader following
  * the spec are sent to the same place.
  */
-export const PUBLIC_API_BASE_URL =
-  'https://prices-api.sorobanscan.rumblefish.dev/v1';
+export const PUBLIC_API_BASE_URL = 'https://prices-api.sorobanscan.com/v1';
 
 /**
  * The OpenAPI document itself — the raw JSON, linked beside the rendered
@@ -66,8 +65,8 @@ export const OPENAPI_JSON = API_ORIGIN
  * ⚠️ Bundle-relative, and it must stay that way. `download` is honoured only
  * on a SAME-ORIGIN href — a browser given a cross-origin one ignores the
  * attribute and navigates instead. On the shared host the page is on
- * `sorobanscan.rumblefish.dev` while `API_ORIGIN` is
- * `prices-api.sorobanscan.rumblefish.dev`, so an `API_ORIGIN`-prefixed href
+ * `sorobanscan.com` while `API_ORIGIN` is
+ * `prices-api.sorobanscan.com`, so an `API_ORIGIN`-prefixed href
  * renders the JSON in a tab. In dev it would look fine — there the href goes
  * through the Vite proxy and IS same-origin — which is why
  * `links.spec.ts` asserts this value does not move when `API_ORIGIN` is set.

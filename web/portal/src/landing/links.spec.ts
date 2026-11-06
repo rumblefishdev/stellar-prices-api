@@ -34,7 +34,7 @@ describe('PUBLIC_API_BASE_URL', () => {
  * `API_ORIGIN` to what the shared-host build sets and re-imports.
  */
 describe('OPENAPI_JSON_DOWNLOAD', () => {
-  const SHARED_HOST_ORIGIN = 'https://prices-api.sorobanscan.rumblefish.dev';
+  const SHARED_HOST_ORIGIN = 'https://prices-api.sorobanscan.com';
 
   async function linksWith(apiOrigin: string) {
     vi.resetModules();
