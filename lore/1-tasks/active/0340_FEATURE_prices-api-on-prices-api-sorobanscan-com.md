@@ -41,7 +41,20 @@ on 2026-11-03 (explorer task 0659, step 6).
 `https://sorobanscan.com/api/prices-api/` against `prices-api.sorobanscan.com`,
 a Discord sign-in passed there, and the old portal host answers `301`. The old
 API host `prices-api.sorobanscan.rumblefish.dev` keeps serving API-key clients.
-Next: Step 5 (docs, the skill, the API examples, then the old host's fate).
+Step 5's docs part is in progress on `feat/0340_docs-name-new-host`. Still
+open: a key test on the new host, then the old host's fate.
+
+- Step 5, docs (2026-11-06): the endpoint reference, the overview, the OAuth
+  runbook, the skill, the portal's logo link and the comments that state the
+  current hosts name `sorobanscan.com`. The skill reaches readers from
+  `master` (its `copyValue`, 0318), so after the next develop→master merge.
+  - Kept on the old host on purpose: dated SCF evidence and runbooks; the
+    cache verification and the k6 load test, because they measure API
+    Gateway and the new host puts Cloudflare in front. They need another
+    target before the old host retires.
+  - The Stellar catalog entry (stellar/stellar-dev-skill#141, merged) names
+    `sorobanscan.rumblefish.dev/prices-api/`; it reaches the portal in one
+    `301`.
 
 - Done: Step 3 (2026-11-06, Adam). The Discord application holds the new
   redirect URI beside the old one. Checked by an authorize link that showed the
@@ -143,9 +156,10 @@ there.
       (2026-11-06).
 - [x] `https://sorobanscan.rumblefish.dev/api/prices-api/…` answers `301` to
       the same path on `sorobanscan.com` (explorer flag off, 2026-11-06).
-- [ ] Docs, the skill and the API examples name the new host.
-- [ ] **Docs updated** — README, `docs/runbooks/portal-oauth-deploy-prep.md`,
-      `infra/README.md`.
+- [x] Docs, the skill and the API examples name the new host (2026-11-06;
+      dated evidence kept as submitted).
+- [x] **Docs updated** — README, `docs/runbooks/portal-oauth-deploy-prep.md`,
+      `infra/README.md` (no host left in it).
 
 ## Notes
 
