@@ -1253,7 +1253,7 @@ def build_parser():
     p.add_argument("--state-dir", default="~/reingest-0286")
     p.add_argument("--repo", default=subprocess.run(["git", "rev-parse", "--show-toplevel"],
                                                     capture_output=True, text=True).stdout.strip() or ".")
-    p.add_argument("--ch-url", default="https://ch.sorobanscan.rumblefish.dev")
+    p.add_argument("--ch-url", default="https://ch.sorobanscan.com")
     p.add_argument("--database", default="prices")
     # Defaults are the bundles ON the campaign machine (fishuser-hero), per the
     # 2026-09-21 decision: prices_admin, NOT dev_shared. The admin cert is the

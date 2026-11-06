@@ -49,10 +49,10 @@ Set up the CH shell once, in `tmux`:
 tmux new -s rekey0139
 mkdir -p ~/rekey-0139
 set -o pipefail
-CH=https://ch.sorobanscan.rumblefish.dev/
+CH=https://ch.sorobanscan.com/
 WCERT=(--cert ~/.certs/adamkot-write.crt --key ~/.certs/adamkot-write.key --cacert ~/prices-mtls/ca.crt)
 rk() {
-  ~/rekey-0139/prices-clickhouse-rekey "$@" --mtls-domain ch.sorobanscan.rumblefish.dev \
+  ~/rekey-0139/prices-clickhouse-rekey "$@" --mtls-domain ch.sorobanscan.com \
     --mtls-cert ~/.certs/adamkot-write.crt --mtls-key ~/.certs/adamkot-write.key \
     --mtls-ca ~/prices-mtls/ca.crt 2>&1 | tee -a ~/rekey-0139/window.log
 }
@@ -733,7 +733,7 @@ B=window   # next-day | period-close | month
 sed -n "/<!-- 0139-postcheck:$B -->/,/<!-- \/0139-postcheck:$B -->/p" \
   docs/runbooks/0139-asset-id-migration.md | grep '^SELECT ' | while IFS= read -r q; do
   r=$(printf '%s' "$q" | curl --fail-with-body -sS --cert "$READ_CERT" --key "$READ_KEY" \
-    --cacert "$PRICES_CA" "https://ch.sorobanscan.rumblefish.dev/${M:+?param_m=$M}" --data-binary @-)
+    --cacert "$PRICES_CA" "https://ch.sorobanscan.com/${M:+?param_m=$M}" --data-binary @-)
   printf '%s\t%s\n' "$r" "$q"
 done
 ```

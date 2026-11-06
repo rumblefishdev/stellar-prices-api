@@ -376,7 +376,7 @@ This shows that the sweep would have caught SushiSwap V3 in April 2026.
 
    ```bash
    curl --fail-with-body -sS --cert "$READ_CERT" --key "$READ_KEY" --cacert "$PRICES_CA" \
-     "https://ch.sorobanscan.rumblefish.dev/?param_lo=61926675&param_hi=62147853&default_format=TSVWithNames" \
+     "https://ch.sorobanscan.com/?param_lo=61926675&param_hi=62147853&default_format=TSVWithNames" \
      --data-binary @query.sql
    ```
 

@@ -73,7 +73,7 @@ set -a; . ./.env.local; set +a
 
 cargo run --release -p pool-registry-seed -- \
   --network mainnet \
-  --ch-domain ch.sorobanscan.rumblefish.dev \
+  --ch-domain ch.sorobanscan.com \
   --mtls-cert-path /path/to/prices_writer.crt \
   --mtls-key-path  /path/to/prices_writer.key \
   --mtls-ca-path   /path/to/ca.crt
