@@ -2,7 +2,8 @@
 id: "0341"
 title: "Accept a classic asset's SAC C… address as an alias — today it answers 404"
 type: FEATURE
-status: backlog
+status: active
+assignee: mkowalski
 related_adr: []
 related_tasks: ["0242", "0139"]
 tags: [layer-backend, api, identity, external-request, priority-medium, effort-small]
@@ -12,6 +13,10 @@ links:
   - "../../../packages/prices-api/src/assets/handlers.rs"
   - "../../../packages/prices-ingest-core/src/writer.rs"
 history:
+  - date: "2026-11-10"
+    status: active
+    who: mkowalski
+    note: "Activated for implementation."
   - date: "2026-11-10"
     status: backlog
     who: mkowalski
