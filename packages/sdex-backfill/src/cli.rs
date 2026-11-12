@@ -67,7 +67,7 @@ pub struct Cli {
     pub clickhouse_url: String,
 
     /// Caddy host fronting the Hetzner CH, for `--transport hetzner` (e.g.
-    /// ch.sorobanscan.rumblefish.dev). The client connects to `https://{domain}`.
+    /// ch.sorobanscan.com). The client connects to `https://{domain}`.
     #[arg(long, env = "CH_DOMAIN")]
     pub ch_domain: Option<String>,
 

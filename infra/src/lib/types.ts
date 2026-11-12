@@ -170,13 +170,14 @@ export interface EnvironmentConfig {
    * not a resource under it.
    *
    * Why the portal needs it at all: the bundle is served from another
-   * application's distribution (`portalWebOrigin`), whose `/prices-api/*`
+   * application's distribution (`portalWebOrigin`), whose `/api/prices-api/*`
    * behaviour is a static SPA — every extensionless path under it is rewritten
-   * to `/prices-api/index.html` at the edge and answered `200 text/html`, and
-   * `/api/config` there is a `301` into it (task 0326). There is nothing on
-   * that host for a same-origin call to reach, so the bundle calls this
-   * hostname directly, cross-origin and same-site — the pattern the explorer's
-   * own SPA uses for its API.
+   * to `/api/prices-api/index.html` at the edge and answered `200 text/html`,
+   * and `/api/config` there is a `301` into it (explorer task 0660; that host's
+   * `/api/` is not this API's). There is nothing on that host for a
+   * same-origin call to reach, so the bundle calls this hostname directly,
+   * cross-origin and same-site — the pattern the explorer's own SPA uses for
+   * its API.
    *
    * `hostedZoneName` must be a suffix of `domainName`, and the zone must live
    * in this account: the certificate's validation record and the alias records
@@ -189,8 +190,21 @@ export interface EnvironmentConfig {
   };
 
   /**
+   * A second hostname for the same API on the `sorobanscan.com` zone (task
+   * 0340), beside `apiDomain`, which keeps serving. That zone's DNS is
+   * Cloudflare's (soroban-infrastructure's `cloudflare/`), so this stack writes
+   * no record: its record takes the `SorobanscanApiRegionalTarget` output.
+   * `certificateArn` names an issued certificate in this region that covers
+   * `domainName`. Unset: no second hostname.
+   */
+  readonly sorobanscanApiDomain?: {
+    readonly domainName: string;
+    readonly certificateArn: string;
+  };
+
+  /**
    * The origin the portal's bundle is served from —
-   * `https://sorobanscan.rumblefish.dev`, scheme and host, no path.
+   * `https://sorobanscan.com`, scheme and host, no path.
    *
    * Two things hang off it and only these two: it is the one origin the
    * portal routes' CORS answer names (`allowOrigins` on the gateway's
@@ -451,8 +465,13 @@ export interface EnvironmentConfig {
      * and the rationale below for `100` / `10000` is about the USDT metrics, not
      * about it. That ladder therefore pins its first rung at `1` in the stack
      * and borrows only the rungs above it from here, so raising the first rung
-     * to quiet a USDT ladder cannot hide a violation there. **Changing the
-     * higher rungs still re-tunes all three ladders.**
+     * to quiet a USDT ladder cannot hide a violation there. Task 0139 added
+     * two more on the same pinned ladder (`zeroLadder` in the stack):
+     * `AssetIdCollisions` and `AssetIdOrphanCandles`. Task 0236 adds the
+     * sixth, `CandleBandViolations`: all seven `price_ohlcv_*` tiers, `FINAL`,
+     * over a 48 h window widened by one bucket per tier, also healthy at
+     * exactly 0 and on `zeroLadder`. **Changing the higher rungs re-tunes all
+     * six ladders.**
      *
      * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
      * **standing condition** — it stays wrong until a person repairs it — so it
@@ -477,6 +496,14 @@ export interface EnvironmentConfig {
      * Must be strictly increasing positive integers.
      */
     readonly usdSanityEscalationCounts: readonly number[];
+    /**
+     * Actions of the `SacContractIdentities` alarm (task 0242 D6). Starts
+     * `false`: production holds 36 SAC contract identities until the 0242 heal,
+     * so an enabled alarm would latch from its first datum. The last step of
+     * docs/runbooks/0242-sac-identity-heal.md sets it `true`. A config key, not
+     * a console toggle, because the next CDK deploy would undo the toggle.
+     */
+    readonly sacContractIdentitiesActionsEnabled: boolean;
     /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
@@ -809,6 +836,26 @@ export function validateConfig(config: EnvironmentConfig): void {
         `apiDomain.hostedZoneId must be a Route 53 hosted zone id, got: "${hostedZoneId}"`,
       );
     }
+    if (config.sorobanscanApiDomain) {
+      const second = config.sorobanscanApiDomain;
+      if (
+        !hostname.test(second.domainName ?? '') ||
+        second.domainName === domainName
+      ) {
+        errors.push(
+          `sorobanscanApiDomain.domainName must be a lowercase hostname other than apiDomain.domainName, got: "${second.domainName}"`,
+        );
+      }
+      if (
+        !/^arn:aws:acm:[a-z0-9-]+:\d{12}:certificate\/[0-9a-f-]{36}$/.test(
+          second.certificateArn ?? '',
+        )
+      ) {
+        errors.push(
+          `sorobanscanApiDomain.certificateArn must be an ACM certificate ARN, got: "${second.certificateArn}"`,
+        );
+      }
+    }
     if (
       typeof config.portalWebOrigin !== 'string' ||
       !/^https:\/\/[a-z0-9.-]+(:\d+)?$/.test(config.portalWebOrigin)
@@ -1079,6 +1126,11 @@ export function validateConfig(config: EnvironmentConfig): void {
       // gets muted.
       errors.push(
         `opsAlarms.currentPricesFreshnessSeconds must be an integer above the healthy peak of ${CURRENT_PRICES_HEALTHY_PEAK_SECONDS}s (60 s refresh interval + 40 s worst accepted refresh), or the alarm fires on a healthy table; got: ${ops.currentPricesFreshnessSeconds}`,
+      );
+    }
+    if (typeof ops.sacContractIdentitiesActionsEnabled !== 'boolean') {
+      errors.push(
+        `opsAlarms.sacContractIdentitiesActionsEnabled must be a boolean, got: ${ops.sacContractIdentitiesActionsEnabled}`,
       );
     }
     if (

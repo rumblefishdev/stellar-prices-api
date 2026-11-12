@@ -5,9 +5,10 @@ Stellar DEX (SDEX order book) and the Soroban AMMs (Soroswap, Phoenix, Aquarius,
 SushiSwap V3), with a public REST API and a self-service portal for API
 keys.
 
-- **API:** `https://prices-api.sorobanscan.rumblefish.dev` (key-gated `/v1/*`;
-  the OpenAPI document is public at `/api-docs-json`)
-- **Portal (key sign-up):** `https://sorobanscan.rumblefish.dev/prices-api/`
+- **API:** `https://prices-api.sorobanscan.com` (key-gated `/v1/*`; the
+  OpenAPI document is public at `/api-docs-json`). The old host
+  `https://prices-api.sorobanscan.rumblefish.dev` still answers.
+- **Portal (key sign-up):** `https://sorobanscan.com/api/prices-api/`
 - **Endpoint reference:** [`docs/scf/api-endpoints.md`](docs/scf/api-endpoints.md)
 - **Architecture overview:** [`docs/prices-api-general-overview.md`](docs/prices-api-general-overview.md)
 

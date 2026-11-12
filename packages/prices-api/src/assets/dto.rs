@@ -582,7 +582,8 @@ pub struct Candle {
     /// `chainlink` or `bitstamp` (task 0267, task 0265's composed history).
     ///
     /// ⚠️ **Populated only on canonical USDC's OWN synthesized series** (§6, the
-    /// `ohlcv_peg_series` path). `None` on every other asset — not because those
+    /// `ohlcv_peg_series` path), and on native XLM's own series before 2021-02-01, as
+    /// `third-party` (`ohlcv_native_usd`). `None` on every other asset — not because those
     /// candles have no provenance, but because the candle TABLES carry no
     /// provenance column to report it from. That gap is task 0268's Issue 9 and
     /// is deliberately out of scope here; a value invented for those rows would
@@ -613,8 +614,8 @@ pub struct Candle {
     ///   better than the $1 assumption it replaces, but a different instrument
     ///   on a different venue.
     ///
-    /// Same scope as [`Candle::source`]: non-null only on USDC's own synthesized
-    /// series, `None` everywhere else and on the peg fallback.
+    /// Same scope as [`Candle::source`]: non-null only on the synthesized USDC and
+    /// pre-2021 XLM series, `None` everywhere else and on the peg fallback.
     pub quality: Option<String>,
 }
 

@@ -19,7 +19,9 @@ use crate::state::AppState;
 ///
 /// Validates the whole list first (400 if any identifier is malformed or the
 /// batch is empty / over `MAX_BATCH`). Assets with no current-price row are
-/// returned in `not_found` rather than failing the request. Uncached.
+/// returned in `not_found` rather than failing the request. A found entry is
+/// named by the asset's canonical identifier, so a SAC address answers under
+/// its classic name (task 0242 D5); `not_found` echoes what was asked. Uncached.
 #[utoipa::path(
     post,
     path = "/prices/batch",
@@ -28,8 +30,12 @@ use crate::state::AppState;
     description = "The same snapshot `GET /assets/{asset_identifier}/price` returns, for up to 100 assets\nin \
      one request. The whole list is validated first: a malformed identifier, an empty list\nor \
      more than 100 entries fails the entire request with a 400. Assets without a current\nprice \
-     are listed in `not_found` instead of failing the call. Results follow the order of\nthe \
-     request; a duplicated identifier is answered each time. Not cached.",
+     are listed in `not_found` instead of failing the call. `prices` follows the order of the\nrequest \
+     with the not-found identifiers left out, and a duplicated identifier is answered each\ntime. \
+     Each entry's `asset` is the canonical identifier of the asset found: a classic asset's\nStellar \
+     Asset Contract address is answered as `CODE:ISSUER` (or `native`), so a request naming\nboth \
+     forms gets two identical entries. `not_found` echoes each identifier as it was asked,\nin \
+     canonical form. Not cached.",
     request_body = BatchRequest,
     responses(
         (status = 200, description = "Current prices + not-found list", body = BatchResponse),
@@ -67,6 +73,14 @@ pub async fn post_batch(
         }
     }
 
+    // A SAC address answers as its classic (task 0242); `not_found` still
+    // echoes what was asked.
+    let asked: Vec<String> = ids.iter().map(AssetIdentifier::to_canonical).collect();
+    let ids = match queries_ch::resolve_sac_aliases(state.ch(), ids).await {
+        Ok(ids) => ids,
+        Err(e) => return errors::db_error(&e, "asset lookup"),
+    };
+
     // One query for the whole batch (vs. a per-asset N+1 loop), then map each
     // requested identifier back to its row by natural-identity key.
     let rows = match queries_ch::current_prices_batch(state.ch(), &ids).await {
@@ -78,7 +92,7 @@ pub async fn post_batch(
 
     let mut prices = Vec::new();
     let mut not_found = Vec::new();
-    for id in &ids {
+    for (id, asked) in ids.iter().zip(asked) {
         match by_key.get(&queries_ch::IdentKey::of(id)) {
             Some(row) => prices.push(PriceResponse::from_row(
                 id.to_canonical(),
@@ -96,7 +110,7 @@ pub async fn post_batch(
                     price_basis: row.price_basis.clone(),
                 },
             )),
-            None => not_found.push(id.to_canonical()),
+            None => not_found.push(asked),
         }
     }
 

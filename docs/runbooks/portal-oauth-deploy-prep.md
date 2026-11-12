@@ -51,9 +51,10 @@ for this.
 - `export AWS_PROFILE=soroban-admin`, `export AWS_REGION=eu-central-1`.
 - The two hostnames, both from `infra/envs/production.json` since [0194]
   (2026-08-31): the **page** is served at `portalWebOrigin`
-  (`https://sorobanscan.rumblefish.dev`, the block explorer's distribution)
-  and the **backend** — where the callback lands and the session cookie is
-  set — at `apiDomain.domainName` (`https://prices-api.sorobanscan.rumblefish.dev`).
+  (`https://sorobanscan.com`, the block explorer's distribution) and the
+  **backend** — where the callback lands and the session cookie is set — at
+  `apiBaseUrl` (`https://prices-api.sorobanscan.com`, the
+  `sorobanscanApiDomain` since task 0340).
   The redirect URI below names the API host. (Our own CloudFront distribution
   and its `/prices/production/portal-distribution-domain` parameter were
   retired by [0195]; nothing reads that parameter any more.)
@@ -74,12 +75,13 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
 
    `<portal-host>` is **the host the backend answers on**, not the host the
    page is served from — since task 0194 those are two hostnames:
-   `prices-api.sorobanscan.rumblefish.dev` runs the callback and sets the
-   session cookie, `sorobanscan.rumblefish.dev/prices-api/` is the page it sends the
-   visitor back to (`PORTAL_WEB_ORIGIN`). Register the former. In production:
+   `prices-api.sorobanscan.com` runs the callback and sets the
+   session cookie, `sorobanscan.com/api/prices-api/` is the page it
+   sends the visitor back to (`PORTAL_WEB_ORIGIN`). Register the former. In
+   production:
 
    ```
-   https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback
+   https://prices-api.sorobanscan.com/api/auth/callback
    ```
 
    ⚠️ **Assume the match is character-exact.** Discord's documentation states
@@ -297,12 +299,9 @@ finishing a slice. Before it happens, both must be true:
   which takes out `/v1` as well — the read is skipped entirely while the portal
   is closed, so this is a failure mode that only appears at the moment of
   opening).
-- The gateway maps the portal prefix as a greedy `{proxy+}`. The four sign-in
-  routes are at **depth 3** (`auth/login`), and the deployed mapping at the time
-  of writing is the intermediate `{proxy}` + `{proxy}/{sub}` pair, which answers
-  `403 Missing Authentication Token` at that depth (`404 {"code": "not_found"}`
-  since task 0309). Task 0205 ships the committed shape. (Task 0187's `/key` is
-  at depth 3 as well, so it is the same deploy.)
+- The gateway maps the portal prefix as a greedy `{proxy+}`, because the four
+  sign-in routes and task 0187's `/key` are at **depth 3** (`auth/login`).
+  Measured live on 2026-10-06 (task 0205).
 - **`ApiGatewayStack` has deployed at least once since task 0187 merged**, so
   that `/prices/production/pricing-api-free-plan-id` exists. See §7 — if it does
   not, opening the portal fails Lambda init and takes `/v1` down with it.
@@ -342,10 +341,11 @@ from a scratch guild.
 
 ## 6. Moving the callback to another host — ordering
 
-Done once already: on 2026-08-31 ([0194]) the callback moved from our
-CloudFront distribution to `prices-api.sorobanscan.rumblefish.dev`, in the
-order below, and the old distribution was retired afterwards ([0195]). Kept
-as the procedure for the next move, whenever the API host changes again.
+Done twice, in the order below: on 2026-08-31 ([0194]) the callback moved
+from our CloudFront distribution to `prices-api.sorobanscan.rumblefish.dev`,
+and the old distribution was retired afterwards ([0195]); on 2026-11-06
+(task 0340) it moved to `prices-api.sorobanscan.com`, and the old URI stays
+registered beside it. Kept as the procedure for the next move.
 
 While a move is in progress the backend is reachable at **two** hostnames.
 The redirect URI is registered per-URL, and our stored `redirect_uri` is a

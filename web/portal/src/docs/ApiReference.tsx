@@ -64,7 +64,7 @@ import {
  * {@link OPENAPI_JSON} when it opens, so what a reader sees is what the
  * deployed handler describes — the drift task 0124 spent a task preventing.
  * On the shared host that fetch is cross-origin (the page on
- * `sorobanscan.rumblefish.dev`, the document on the API's own hostname),
+ * `sorobanscan.com`, the document on the API's own hostname),
  * which is why `GET /api-docs-json` answers `Access-Control-Allow-Origin: *`
  * (`packages/prices-api/src/lib.rs`).
  *

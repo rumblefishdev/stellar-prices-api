@@ -203,26 +203,13 @@ directly through execute-api after the failed first attempt (see below):
 `/health` `200`, `/api-docs-json` `200`, `/v1/assets` `403`, and
 `Prices-production-{ApiGateway,Compute}` both `UPDATE_COMPLETE`.
 
-> **Production does not match this record, and the deploy is [[0205]].** Every
-> acceptance criterion above holds live, but four properties that landed after
-> the 2026-08-13 deploy exist only in code:
->
-> - the gateway maps `ANY {proxy}` + `{proxy}/{sub}` with **no throttle** —
->   neither the original `{proxy+}` nor decision 12's shape, left there by the
->   2026-08-14 deploy attempt. Behaviour is correct at depth 1-2 and `403` at
->   depth 3.
-> - the access-log bucket, `Cache-Control` on the uploaded objects and the
->   trailing-slash redirect are code-only; `/api-tokens` answers `403
->   AccessDenied` rather than `302`.
-> - `Prices-production-Compute` **was** deployed (2026-08-14 09:42) as a side
->   effect of `cdk deploy` pulling in dependency stacks — the Makefile targets
->   do not pass `--exclusively`. So [[0183]]'s handler and `PORTAL_ENABLED=false`
->   are live ahead of that task's merge, and `/config` now answers
->   `200 {"enabled":false}` with `no-store`.
->
-> [[0205]] carries the three deploys, the reason there are three rather than
-> one, and the probes to re-run. It also owns deleting this note and its twin in
-> `docs/scf/api-endpoints.md`.
+> **Resolved 2026-10-06 by [[0205]].** A note here described production as of
+> 2026-08-14: the intermediate `{proxy}` + `{proxy}/{sub}` mapping with no
+> throttle, and the access logs, upload `Cache-Control` and trailing-slash
+> redirect still code-only. None of it is live any more — the prefix moved to
+> `/api` ([[0235]]), the gateway serves the greedy `/api/{proxy+}` with the
+> per-verb throttle, and the `PortalHosting` stack was deleted on 2026-08-31
+> ([[0194]], [[0195]]). See [[0205]]'s live re-measurement.
 
 ## Issues Encountered
 

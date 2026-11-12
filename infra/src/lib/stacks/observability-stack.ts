@@ -339,6 +339,17 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
   public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
+  public readonly ledgerProcessorTradesMissingDecimalsAlarm: cloudwatch.Alarm;
+  /**
+   * Task 0242 D2: live skipped trades on a token BE flags `is_sac` that no SAC
+   * event proved, rather than minting it as a second identity.
+   */
+  public readonly ledgerProcessorSacUnprovenAlarm: cloudwatch.Alarm;
+  /**
+   * Task 0242: a live container started without BE's `is_sac` set, so it mints
+   * an unproven SAC as a `Contract` identity instead of skipping it.
+   */
+  public readonly ledgerProcessorSacCandidatesAlarm: cloudwatch.Alarm;
   /**
    * Task 0100: the weekly coverage sweep found swap/trade emitters in neither
    * `pool_registry` nor the committed allow-list (layer 3).
@@ -386,6 +397,21 @@ export class ObservabilityStack extends cdk.Stack {
    * 0139): a writer sent ids, not identities. Keyed by count.
    */
   public readonly assetIdOrphanCandleAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * Contract identities in `assets FINAL` that are SACs (task 0242 D6). Actions
+   * behind `opsAlarms.sacContractIdentitiesActionsEnabled`: the baseline is 36
+   * until the heal.
+   */
+  public readonly sacContractIdentitiesAlarm: cloudwatch.Alarm;
+
+  /**
+   * Stored candles on all seven `price_ohlcv_*` tiers that break the OHLC band
+   * or carry a price <= 0 (task 0236), keyed by count. Asserted by the probe at
+   * the source with zero tolerance, because task 0229's read-path clamp repairs
+   * a crossed candle on its way out of `/ohlcv` and so hides it from the API.
+   * The healthy reading is exactly 0.
+   */
+  public readonly ohlcBandAlarms: Record<string, cloudwatch.Alarm>;
   /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
@@ -1468,6 +1494,98 @@ export class ObservabilityStack extends cdk.Stack {
     this.ledgerProcessorUnregisteredPoolAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorUnregisteredPoolAlarm.addOkAction(snsAction);
 
+    // Task 0242 D2 — live skipped trades on an unproven SAC. A SAC leg resolves
+    // to its classic asset only when the same transaction carries the SAC's own
+    // transfer/mint/burn/clawback event; a token BE flags `is_sac` with no such
+    // proof is skipped rather than minted as a second identity. Same shape as
+    // the 0291 alarm above: `SacUnprovenSkipped` is published only when
+    // non-zero.
+    this.ledgerProcessorSacUnprovenAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorSacUnprovenAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-sac-unproven`,
+        alarmDescription:
+          'The ledger-processor skipped AMM trades with a leg that BE flags is_sac (default.soroban_contracts) but that no SAC transfer/mint/burn/clawback event in the same transaction proved (task 0242 D2). Those trades produce no candle; they are skipped rather than minted as a second, Contract identity of the asset. The WARN "skipped trades on is_sac contracts with no SAC proof (task 0242)" lists the contracts. Fix: docs/runbooks/0242-sac-identity-heal.md.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'SacUnprovenSkipped',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were skipped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorSacUnprovenAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorSacUnprovenAlarm.addOkAction(snsAction);
+
+    // Task 0242 — the cold start could not read BE's `is_sac` set and the
+    // processor runs on without it rather than failing Init (review of 0242).
+    // Each run of such a container publishes one `SacCandidatesUnavailable`;
+    // nothing is published while the set is loaded.
+    this.ledgerProcessorSacCandidatesAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorSacCandidatesAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-sac-candidates-unavailable`,
+        alarmDescription:
+          'The ledger-processor cold-started without BE\'s is_sac contract set (default.soroban_contracts unreadable as prices_writer: grant, rename or a BE migration). Ingest continues, but until a cold start reads the set again an unproven SAC is minted as a Contract identity instead of being skipped (task 0242). The WARN "is_sac contract set unreadable" carries the error. Fix the read, then force a cold start; SacContractIdentities shows any identity minted meanwhile. Runbook: docs/runbooks/0242-sac-identity-heal.md.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'SacCandidatesUnavailable',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only while the set is missing: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorSacCandidatesAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorSacCandidatesAlarm.addOkAction(snsAction);
+
+    // Task 0329 — live dropped trades whose Soroban token decimals did not
+    // resolve. The ingest scales each AMM leg by its token's `decimals()`, read
+    // over RPC on first sight, and never guesses: until the call answers, the
+    // token's trades produce no candle. Published only when non-zero.
+    this.ledgerProcessorTradesMissingDecimalsAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorTradesMissingDecimalsAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-trades-missing-decimals`,
+        alarmDescription:
+          'The ledger-processor dropped AMM trades because a Soroban token\'s decimals() did not resolve over RPC (task 0329). Those trades produce no candle. Either the RPC (SOROBAN_RPC_URL, default mainnet.sorobanrpc.com) was failing, in which case the token is asked again after 10 minutes, or the token has no usable decimals(), in which case it is not asked again until a cold start. The WARN "dropped AMM trades whose token decimals did not resolve" lists the contracts. Fix: once decimals() answers, reprice the dropped minutes with events-backfill. If it never will, insert the row into prices.asset_decimals by hand AND force a cold start (any configuration update of the ledger-processor function, e.g. aws lambda update-function-configuration --description): a warm processor reads that table only at cold start and keeps dropping the token until then. Reprice after the cold start.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'TradesMissingDecimals',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were dropped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorTradesMissingDecimalsAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorTradesMissingDecimalsAlarm.addOkAction(snsAction);
+
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage
     // sweep looks at EVERY contract emitting swap/trade-shaped events over a
@@ -1749,6 +1867,56 @@ export class ObservabilityStack extends cdk.Stack {
         `${count} or more price_ohlcv_1m candles of the last 2 h carry an asset_id or quote_asset_id that prices.assets does not hold. Since task 0139 a writer sends the identity and ClickHouse derives both ids; an orphan means a writer sent ids itself (a stale pre-0139 binary or Lambda version: RowBinary is width-exact, so an old u32 writer misaligns rather than failing) or wrote candles before their assets rows. Stop that writer first, then find it from the rows' source column. Runbook: docs/runbooks/0139-asset-id-migration.md. First rung is fixed at 1.`,
       zeroLadder,
     );
+    // Stored candles outside the OHLC band, or with a price <= 0, on all seven
+    // tiers (task 0236). Same ladder, same reasoning as the zero invariants
+    // above: the healthy reading is exactly 0, so the first rung carries the
+    // meaning and the rest say how fast it is growing. Since task 0229 the
+    // /ohlcv clamp repairs a crossed candle on the way out, so this is the only
+    // place a corrupt stored row is seen. See
+    // packages/rollup-freshness-probe/src/ohlc_band.rs and ADR-0011 section 3.
+    this.ohlcBandAlarms = usdSanityRungs(
+      'CandleBandViolations',
+      'OhlcBandAlarmCount',
+      'ohlc-band',
+      (count) =>
+        `${count} or more stored candles on price_ohlcv_{1m,15m,1h,4h,1d,1w,1M} (FINAL) are internally inconsistent: priced (pf_trade_count > 0) yet low > least(open, close), high < greatest(open, close) or low > high, or any price <= 0. Healthy is exactly 0 (prod baseline 2026-09-28). A priced _1m row with close = 0 also fires zero-invariant (expected overlap); low = 0 beside a positive close fires only this. The window is on BUCKET time, 48 h widened by one bucket per tier: a backfill into older buckets is NOT covered. The value sums tier-rows, so one bad minute can count up to seven times; a violation on a coarse tier with a clean _1m means a rollup defect. Find the writer before repairing - /ohlcv clamps since task 0229, so the API will not show it. Per-tier counts: probe log field ohlc_band_detail. See packages/rollup-freshness-probe/src/ohlc_band.rs and ADR-0011 s3. First rung is fixed at 1.`,
+      // The zero ladder above: the first rung is pinned at 1.
+      zeroLadder,
+    );
+
+    // SAC contract identities (task 0242 D6). A SAC is a facet of its classic
+    // asset; a contract row of assets FINAL that is a SAC is the 0242 defect.
+    // One alarm, not the ladder: usdSanityRungs takes no actionsEnabled, and the
+    // actions must start off because production reads 36 until the heal
+    // (13 split pairs + 23 SACs whose classic was never held, 2026-10-05).
+    // Actions off does not stop evaluation: the alarm sits in ALARM, red on the
+    // Row-0 strip, until the heal. It stays on the strip, which shows every
+    // alarm (SCF Tranche 3 AC 8); the description says the red is expected.
+    this.sacContractIdentitiesAlarm = new cloudwatch.Alarm(
+      this,
+      'SacContractIdentitiesAlarm',
+      {
+        alarmName: `prices-${config.envName}-sac-contract-identities`,
+        alarmDescription:
+          "Contract rows of prices.assets FINAL whose address is a SAC: the sac_address of a classic row, or a contract BE flags is_sac in default.soroban_contracts (task 0242 D6). Baseline 36 until the 0242 heal, which is why actions start disabled (opsAlarms.sacContractIdentitiesActionsEnabled) and the state reads ALARM until then: that red tile on the dashboard's alarm strip is expected, not an incident. After the heal it reads 0, and a non-zero value means a SAC was minted as a Contract identity: a second asset_id for an asset we hold, splitting its candles and volume. Find it: SELECT asset_id, contract_address FROM prices.assets FINAL WHERE contract_address IN (SELECT sac_address FROM prices.assets WHERE sac_address != '') OR contract_address IN (SELECT contract_id FROM default.soroban_contracts WHERE is_sac). Runbook: docs/runbooks/0242-sac-identity-heal.md.",
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'SacContractIdentities',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        actionsEnabled: config.opsAlarms.sacContractIdentitiesActionsEnabled,
+      },
+    );
+    this.sacContractIdentitiesAlarm.addAlarmAction(snsAction);
+    this.sacContractIdentitiesAlarm.addOkAction(snsAction);
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
     // `prices-clickhouse-drift` and NOTHING RAN IT — a check nobody runs is a

@@ -98,7 +98,7 @@ Load an external USDC/USD daily (or hourly) series into `prices.usd_rate` for th
 pre-oracle window, keyed on the canonical Stellar identity.
 
 - **Source:** USDC/USD on centralized venues trades against actual dollars and
-  reaches back to 2018 — CoinGecko, Kraken, CryptoCompare. Pick one, record which
+  reaches back to 2018 — CoinGecko, third-party, CryptoCompare. Pick one, record which
   and at what granularity; a daily close is enough for a peg.
 - **`method` must be its own value**, NOT `'oracle'`. `'oracle'` means a
   Reflector reading we polled ourselves. Something like `'external'`, added to

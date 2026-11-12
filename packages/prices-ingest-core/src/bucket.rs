@@ -843,7 +843,7 @@ mod tests {
     /// The fixture is the shape that actually reaches this: a Soroban AMM fill
     /// whose raw i128 amounts PASS the rounding bound (both above 1000, product
     /// of the shifted factors far above 10^6) yet whose quotient is enormous —
-    /// 1001 units in against 7.9e28 out. After `AMM_AMOUNT_SCALE` the price is
+    /// 1001 units in against 7.9e28 out. Scaled at 7 decimals the price is
     /// ~7.9e25, well past the 10^24 an integer part may reach, and so is the
     /// vwap derived from the same two volumes. Clamping the volume sums alone
     /// would leave `vwap` to be saturated by `decimal_to_i128` at `i128::MAX`

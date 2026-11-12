@@ -202,14 +202,53 @@ Prior art: soroban-block-explorer ADR 0051 (a SAC is a facet of the classic asse
   - **One PR** with ordered commit slices: resolver + live, then `events-backfill`, then probe + alarm, then API alias. This overrides the ~400-line norm for this task.
   - The heal is a runbook section, with no window.
   - The new `events-backfill` binary is swapped on ch-prod-01 only between phase-3 stages, never during an `amm` step.
+- **D8 Observability after the cleanup (Adam, 2026-10-06).** The PR deploys Compute and EventBridge only. Observability, with both 0242 alarms, is deployed in runbook §6, after §5, with the `SacContractIdentities` actions already on.
+  - Why: deployed earlier, that alarm would sit in ALARM on the dashboard's Row-0 alarm strip through stage C, stage D and the cleanup. That strip is [[0294]]'s SCF evidence (all alarms OK).
+  - Cost: until §6 no alarm watches `SacUnprovenSkipped`. The runbook has the operator read the metric by hand after the cold start and at least daily.
+  - Constraint on the team: no `make deploy-production-observability` from `develop` between the merge and §6. Such a deploy creates the alarms early, and the red tile's description says it is expected.
+- **D9 Compute after stage D (Adam, 2026-10-06, from Oskar's review of PR #390).** Compute (live + API) deploys after phase-3 stage D and before the §5 cleanup.
+  - Why: the API alias answers a SAC address as its classic. Until stage C has rebuilt a SAC's months under the classic id, that classic holds only part of the history, so `GET /v1/assets/{C…}/ohlcv` would lose the pre-heal AMM series. Group B is the visible case: its classics were seeded on 2026-10-06.
+  - Cost: the new live code lands two or three days later. The seed already resolves every known SAC on the old live after its next cold start.
 
 Plan choices confirmed by Adam on 2026-10-05 (GSD plan `261005-htu`):
 
 - **PC3 Fail closed at the live cold start.** If the Lambda cannot read BE's `is_sac` set, Init fails, like the other cold reads. An empty set would mint `Contract` identities, which D2 forbids. The cost: if BE's `default.soroban_contracts` breaks, live ingest stops until it is fixed.
 - **PC6 A summary without the new line passes.** The orchestrator STOPs only when `unproven sac swaps:` is present and non-zero. A binary built before 0242 prints no such line, so phase 3 keeps running on it, which is why D4 holds.
+Changed by Adam on 2026-10-06, after Oskar's review of PR #390:
+
+- **PC3 reversed: fail open.** An unreadable `is_sac` set no longer fails Init. The container ingests with no candidates, logs a WARN and publishes `SacCandidatesUnavailable` on every run, with an alarm on it (deployed in §6, D8).
+  - Why: the candidates guard only a SAC trade with no in-band proof, which happened 0 times in 338,601 legs. Failing closed stopped SDEX, oracle and AMM ingest over one BE table.
+  - The probe's `SacContractIdentities` counts any identity minted meanwhile.
+- **PC6 amended.** A month without the `unproven sac swaps:` line gets a visible note. Once a month of the same state has printed the line, a later month without it is a STOP: the host binary went back to a pre-0242 build. Stage C on the pre-0242 binary is unaffected.
 - **PC9 Residual rows of a SAC with no classic.** Such a row is the only copy of its trades, so it is never deleted silently. The operator either re-runs that month through phase 3 or records the loss on this task. The rows are copied beside the 72 metadata rows for rollback. The 202404 Z/Q row, from stage B before the seed, is the expected case.
 
 Open: **U3**. About 75.6k Soroswap swaps on BLTA/BLTB/BLTC/PPRIME/LumenJoule produce no candle under any id, and the cause is not established. It must be settled before AC3 promises numbers for those assets.
+Stays in scope of 0242 (Adam, 2026-10-05): this task closes everything that concerns SACs.
+
+**U3 settled (2026-10-05).** Neither the dust rule nor an ingest bug: those swaps were missing from the candle tables because of the 0139 re-key.
+- Each of the five SAC contract identities shared its old UInt32 id with an unrelated classic asset: 123376 LumenJoule/BTC, 123377 BLTB/ETH, 123378 BLTA/AST, 123379 BLTC/ASC1148, 123380 PPRIME/KWD.
+- `asset_id_map_0139` therefore marks all five `colliding`. The re-key copies only `mapped` and `sentinel` (`rekey.rs` `COPYABLE`), so their candles stayed in `price_ohlcv_*__pre0139`.
+- Before 0139, the 1h counts matched BE's swaps exactly for 202603–202606.
+- Jul–Sep were already short before 0139: the 07-09 Soroswap gap (0101) and burst minutes before the 0282 fix.
+- Locally, five real transactions from 202603–202609 produce candles under the classic identity on the 0242 branch.
+
+No code fix is needed. Phase 3 stage C, run with the 29-row seed, rebuilds them under the classic ids. AC3 for these five then rests on stage C's post-check; the BLT assets will have volume but no price, because their fills are dust.
+
+The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap was indexed, and phase 3 covers that under 0290. STELLA, TESTTTT, TEST77 and TEST12 have pools with no swaps.
+
+**October window (measured 2026-10-05, `dev_read`).** Since 2026-10-01, no candle on any tier is keyed on the 36 SAC ids, and no contract row has been minted since BURNMKR. No decision is needed now. The runbook re-checks months after 202609 before the cleanup, and any non-zero result goes through PC9.
+
+## Heal log
+
+- **2026-10-06, seed (runbook §3).** Stage B finished 202404. The seed ran at 10:29:11 UTC as `dev_shared`, straight from `seed-0242.sql` rather than through the staged variant of §3. There is therefore no `bak_0242_seed_stage`, and `bak_0242_seed` was created afterwards from the 29 rows with that `created_at`.
+  - Check: `29 29 / 29 / 0`, with collisions at 0. No candle under any seeded id on any tier.
+  - Comet's `pool_registry` row is present (1).
+- **2026-11-02, a new split (found in [[0338]]).** BLNT's SAC `CCBNWP5L…` traded on Comet from 2026-10-26 14:22 UTC, before SDEX interned its classic at 18:42, so 10 trades sit on the `soroban` id 14236029787030528679. The "no contract row since BURNMKR" of the October window no longer holds.
+  - The reprice in 0338 rewrites those trades under the classic id, so the rows left on that id are copies. Add it to the residual cleanup. It does not fall under PC9, because the classic exists.
+- **2026-11-05, deploy (runbook §4e).** After stage D. Pre-check as `prices_writer` from fishuser-hero (Adam): 4,137 distinct `is_sac` contracts readable. `deploy-production-compute` (11:33 UTC) and `deploy-production-eventbridge` (11:35) from `develop` `43a28399`; the previous CodeSha256s are in `~/heal-0242/deployed-before.tsv` on stkrolikiewicz's laptop. Observability not deployed (§6).
+  - Cold start: `loaded the is_sac contract set` with `sac_contracts` 4137, then `resumed cursor from ClickHouse` at 65318468. No WARN.
+  - `SacUnprovenSkipped` and `SacCandidatesUnavailable`: no datapoints in the first hour.
+  - Probe: `sac_contract_rows` **40**, not the runbook's baseline 36 (`sac_contract_scanned` 74, `be_sac_contracts` 4137). The old build ran until this deploy, so contract rows minted since the October baseline (BLNT above among them) count too. §5 counts its residual from today's number, not from 36.
 
 ## Acceptance Criteria
 

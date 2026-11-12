@@ -128,6 +128,11 @@ three outcomes:
   permanent family-wide ignore would hide the next pool of a real venue.
 - **(c) A router, aggregator or other non-AMM contract.** Add a permanent
   `[[contract]]` entry with `reason` and `task`. Never register it.
+  If the same non-AMM wasm keeps deploying new instances, each new one pages
+  on its own. Add one `[[wasm]]` entry with `not_a_venue = true` in place of
+  `until` instead (task 0336: the securities-financing ledger `f3dd3edf…`,
+  four new instances in one week). Do this only when the code itself rules out
+  a market, not because the instances seen so far are small.
 
 Also look at:
 
@@ -147,7 +152,8 @@ Also look at:
 `packages/coverage-sweep-probe/allowlist.toml`:
 
 - `cargo test -p coverage-sweep-probe` validates it: reason and task on every
-  entry, `until` on every `[[wasm]]` entry, valid `C…` strkeys, 64-lowercase-hex
+  entry, `until` on every `[[wasm]]` entry except a `not_a_venue` one (which
+  must not have it), valid `C…` strkeys, 64-lowercase-hex
   hashes, no duplicates, no unknown keys.
 - The list is compiled into the binary, so an edit **ships only with an
   EventBridge deploy** (§4.4).
@@ -370,7 +376,7 @@ This shows that the sweep would have caught SushiSwap V3 in April 2026.
 
    ```bash
    curl --fail-with-body -sS --cert "$READ_CERT" --key "$READ_KEY" --cacert "$PRICES_CA" \
-     "https://ch.sorobanscan.rumblefish.dev/?param_lo=61926675&param_hi=62147853&default_format=TSVWithNames" \
+     "https://ch.sorobanscan.com/?param_lo=61926675&param_hi=62147853&default_format=TSVWithNames" \
      --data-binary @query.sql
    ```
 

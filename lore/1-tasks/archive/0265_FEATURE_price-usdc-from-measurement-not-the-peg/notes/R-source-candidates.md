@@ -34,7 +34,7 @@ result the brief expected. [data]
 | source | quote | hourly min close (UTC) | 2023-03-11 daily close | daily low |
 |---|---|---|---|---|
 | Bitstamp | USD | **0.8627** @ 03-11 07:00 | 0.9685 | 0.8053 |
-| Kraken (from 580 028 trades) | USD | 0.9010 @ 03-11 12:00 | 0.9670 | 0.8740 |
+| third-party (from 580 028 trades) | USD | 0.9010 @ 03-11 12:00 | 0.9670 | 0.8740 |
 | Chainlink on-chain (3 240 rounds read, 2021-02-17 → today) | USD | **0.8800** @ 03-11 07:51:23, 243 rounds that day | 0.9681 | 0.8800 |
 | OKX | USDT | 0.8787 @ 03-11 07:00 | 0.9607 | 0.8698 |
 | Bybit | USDT | 0.8840 @ 03-11 07:00 | 0.9611 | 0.8500 |
@@ -58,7 +58,7 @@ trough: the Fed's FEDS Note (2025-12-17) says "at its trough, USDC traded at
 | Bitstamp | 2021-01-01 | 0 | — (API silent before 2021; listing date n/v) |
 | Chainlink | 2021-02-17 | 1 (of 2 026 days) | 3 phase aggregators, round ids non-contiguous; 3 240 rounds total |
 | Bybit | 2021-10-22 | 0 | — |
-| Kraken OHLC | 2024-09-14 | 0 | endpoint caps at 720 candles; older history only via trades |
+| third-party OHLC | 2024-09-14 | 0 | endpoint caps at 720 candles; older history only via trades |
 
 Our own series starts 2021-01-25 ([[0247]]). So the **only** key-less USD
 sources that reach our start are Coin Metrics (daily, non-commercial licence)
@@ -72,9 +72,9 @@ From `data/dispersion_daily.csv` (calm = every common day outside 2023-03-08..18
 | pair | common days | median calm | p95 calm | max calm | median stress | max stress |
 |---|---|---|---|---|---|---|
 | Chainlink – Bitstamp (USD–USD) | 2025 | **0.8** | 6.8 | 36 | **4.0** | 33 |
-| Chainlink – Kraken (USD–USD) | 721 | **0.6** | 1.7 | 2.8 | — | — |
+| Chainlink – third-party (USD–USD) | 721 | **0.6** | 1.7 | 2.8 | — | — |
 | Chainlink – Coin Metrics (USD–USD) | 2024 | 0.9 | 5.0 | 83 | 2.1 | 25 |
-| Bitstamp – Kraken (USD–USD) | 721 | 0.8 | 2.3 | 6.3 | — | — |
+| Bitstamp – third-party (USD–USD) | 721 | 0.8 | 2.3 | 6.3 | — | — |
 | Bitstamp – Coin Metrics (USD–USD) | 2072 | 0.9 | 6.5 | 105 | 2.4 | 33 |
 | Binance – Bybit (USDT–USDT) | 1614 | **1.0** | 3.0 | 48 | 1.5 | 19 |
 | Binance – OKX (USDT–USDT) | 2274 | 1.0 | 5.0 | 610 | 1.0 | 15 |
@@ -128,7 +128,7 @@ times, nothing verified. [docs]
    cost hundreds, history from 2021-02-17. Cost: a few thousand `eth_call`s
    once, then one call per new round; no key needed today.
 2. **Fallback and cross-check: Bitstamp USDC/USD** (from 2021-01-01, real USD
-   book, free, hourly), with Kraken trades as the second USD venue where the
+   book, free, hourly), with third-party trades as the second USD venue where the
    two need arbitration.
 3. **Reject as primary:** every USDT-quoted venue (cluster offset above),
    Binance specifically (gap on the event), Coin Metrics (licence), CoinGecko

@@ -8,13 +8,16 @@
  * was an origin on the same table as the bundle; task 0195 retired that
  * distribution, so production only ever runs the absolute form below.)
  *
- * On the shared host (task 0194) it is not: `sorobanscan.rumblefish.dev/api/*`
- * is a `301` to `/prices-api/*` (task 0326), a static SPA behaviour that
- * rewrites every extensionless path to `/prices-api/index.html`, so a
- * relative `fetch('/api/config')` there gets this bundle back as
- * `200 text/html`. That deployment is built with
+ * On the shared host (task 0194) it is not. There `/api/` is the explorer's
+ * portal hub, `/api/prices-api/*` is this bundle — a static SPA behaviour that
+ * rewrites every extensionless path to `/api/prices-api/index.html` — and
+ * every other `/api/*` is a `301` into it (explorer task 0660), so a relative
+ * `fetch('/api/config')` there gets this bundle back as `200 text/html`. The
+ * bundle sitting under `/api/` too changes nothing: that `/api/` is the
+ * explorer's, not the backend's, and the two are on different hosts. That
+ * deployment is built with
  *
- *     VITE_PORTAL_API_ORIGIN=https://prices-api.sorobanscan.rumblefish.dev
+ *     VITE_PORTAL_API_ORIGIN=https://prices-api.sorobanscan.com
  *
  * and every backend URL becomes absolute, cross-origin and same-site. The
  * three things that layout needs are all on the backend's side — one

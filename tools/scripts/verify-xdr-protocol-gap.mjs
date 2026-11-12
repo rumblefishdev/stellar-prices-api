@@ -61,11 +61,11 @@
 // crates.io's newest `stellar-xdr` was 28.0.1 — the issue asked for a bump
 // nobody could make. So a LAGGING reading also asks crates.io:
 //
-//   WAITING  no published stable major reaches core_supported. The protocol is
+//   WAITING  no published stable major in (ours, core_supported]. The protocol is
 //            announced, there is nothing to bump to yet. NOT fatal, even under
 //            --watch: a red run and an issue are for something someone can
 //            act on, and here nobody can. The report says so and exits 0.
-//   LAGGING  a stable major that reaches core_supported is on crates.io. Bump
+//   LAGGING  a stable major in (ours, core_supported] is on crates.io. Bump
 //            now (after BE's xdr-parser). Fatal under --watch.
 //
 // BEHIND asks crates.io the same way (task 0325): mainnet on a protocol with no
@@ -74,6 +74,13 @@
 // that DOES change XDR and is voted before its crate ships stays green here;
 // that stall shows as frozen candles, which the rollup-freshness and
 // ledger-processor-no-invocations alarms catch within the hour.
+//
+// "A crate for protocol N" means a major ABOVE ours and NOT ABOVE N (task
+// 0330). Upstream skipped 29: crates.io went 28.0.1 → 30.0.0, and 30.0.0
+// carries protocol 30's XDR. Reading only max_stable_version (30 ≥ 29) made
+// the watch report BEHIND for a protocol 28 already decodes. Each protocol is
+// asked separately: mainnet on crate-less 29 with core on 30 and a crate 30
+// published is LAGGING.
 // ponytail: compares protocol numbers; comparing the crate's XDR commit with
 // core's (`src/protocol-curr/xdr`) is the exact check if this misfires again.
 //
@@ -199,19 +206,36 @@ const publishedCrate = async () => {
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-  const { crate } = await response.json();
+  const { crate, versions } = await response.json();
   const stable = crate?.max_stable_version;
-  const major = Number(String(stable).match(/^(\d+)\.\d+\.\d+$/)?.[1]);
-  if (!Number.isInteger(major))
-    throw new Error(`unexpected crate document: max_stable_version=${stable}`);
+  if (!/^\d+\.\d+\.\d+$/.test(String(stable)) || !Array.isArray(versions))
+    throw new Error(
+      `unexpected crate document: max_stable_version=${stable}, ` +
+        `versions=${Array.isArray(versions) ? versions.length : versions}`,
+    );
 
   const newest = crate.max_version;
   return {
     stable,
-    major,
     preRelease: newest && newest !== stable ? newest : null,
+    releases: versions
+      .filter((v) => !v.yanked && /^\d+\.\d+\.\d+$/.test(v.num))
+      .map((v) => v.num),
   };
 };
+
+/**
+ * The newest stable release a bump for `protocol` could use: a major above
+ * our pin and NOT above `protocol`. A later major carries a later protocol's
+ * XDR (task 0330: upstream skipped 29, and 30.0.0 is protocol 30, not 29).
+ */
+const bumpTarget = (crate, protocol) =>
+  crate.releases
+    .filter((v) => {
+      const major = Number(v.split('.')[0]);
+      return major > pinned && major <= protocol;
+    })
+    .sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))[0];
 
 // -------------------------------------------------------------------- run --
 
@@ -282,9 +306,14 @@ if (behind || pinned < network.supported) {
     process.exit(0);
   }
 
+  // Asked per protocol: mainnet can sit on one with no crate (29) while core
+  // already supports the next one, which has a crate (30). That is LAGGING.
+  const forMainnet = behind && bumpTarget(crate, network.current);
+  const forCore = bumpTarget(crate, network.supported);
+
   // The `— WAITING: no stellar-xdr` wording is matched by master's
   // xdr-protocol-watch.yml to close an open issue as "not actionable yet".
-  if (crate.major < needed) {
+  if (!forMainnet && !forCore) {
     console.log(
       [
         behind
@@ -294,13 +323,21 @@ if (behind || pinned < network.supported) {
         `  ${summary} | newest on crates.io ${crate.stable}` +
           (crate.preRelease ? ` (pre-release ${crate.preRelease})` : ''),
         '',
+        ...(Number(crate.stable.split('.')[0]) > needed
+          ? [
+              `stellar-xdr ${crate.stable} carries a later protocol's XDR, so it is not`,
+              `a bump target for ${needed}.`,
+              '',
+            ]
+          : []),
         ...(behind
           ? [
               'Mainnet has voted, but there is no crate to bump to: either the',
               'protocol changed no XDR (29 kept the XDR of 28) or the crate is late.',
               'A real decode wall shows as frozen candles — the rollup-freshness and',
               'ledger-processor-no-invocations alarms. The watch fails and opens an',
-              `issue the day a stable stellar-xdr ${needed}.x appears on crates.io.`,
+              `issue the day a stable stellar-xdr ${needed}.x appears on crates.io,`,
+              'or core supports a protocol whose crate is published.',
             ]
           : [
               'Nothing to do yet: there is no crate to bump to, and mainnet has not',
@@ -312,11 +349,11 @@ if (behind || pinned < network.supported) {
     process.exit(0);
   }
 
-  if (behind)
+  if (forMainnet)
     die(
       `error: stellar-xdr ${pinned} is BEHIND mainnet protocol ${network.current}.`,
       '',
-      `  ${summary} | newest on crates.io ${crate.stable}`,
+      `  ${summary} | newest on crates.io ${crate.stable} | bump to ${forMainnet}`,
       '',
       'This is the proto27 condition: the decode wall is live or one ledger',
       'away, and a stalled ledger-processor drains its queue and logs nothing.',
@@ -331,8 +368,8 @@ if (behind || pinned < network.supported) {
     '',
     `  ${summary} | newest on crates.io ${crate.stable}`,
     '',
-    `stellar-xdr ${crate.stable} is published — the bump is possible now.`,
-    'Mainnet has not voted yet, so nothing is broken — this is the lead time.',
+    `stellar-xdr ${forCore} is published — the bump is possible now.`,
+    `Mainnet has not voted ${network.supported} yet, so nothing is broken — this is the lead time.`,
     'Open the bump before the vote. BE must bump xdr-parser first, and check',
     "the crate's XDR commit, not only its version number.",
   ];

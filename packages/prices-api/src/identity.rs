@@ -4,7 +4,8 @@
 //! of three textual forms:
 //!   - `native`                       → the native XLM asset
 //!   - `{code}:{issuer}`              → a classic credit asset (issuer is a G-strkey)
-//!   - `{contract_address}`          → a Soroban token / SAC (a C-strkey)
+//!   - `{contract_address}`          → a Soroban token / SAC (a C-strkey); a classic
+//!     asset's SAC is aliased to that classic (task 0242)
 //!
 //! This module only *parses + validates the shape* (real strkey CRC validation
 //! via `stellar-strkey`). Resolving a parsed identity to the internal

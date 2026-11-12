@@ -131,13 +131,14 @@ destroy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
 # The portal (task 0194; the only deploy path since task 0195).
-# `https://sorobanscan.rumblefish.dev/prices-api/` is served by the block explorer's
+# `https://sorobanscan.com/api/prices-api/` is served by the block explorer's
 # distribution (EA2TLS5SS5M87) from ITS bucket, which nothing in this repo
 # deploys — this sync is the only way a build reaches it. Built with the API's
 # own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
-# `web/portal/src/api-origin.ts`): on that host `/prices-api/*` is a static SPA, so
-# the bundle must call the backend on `apiDomain.domainName` rather than
-# relatively. `--skip-nx-cache` because the variable is not an Nx input — a
+# `web/portal/src/api-origin.ts`): on that host `/api/prices-api/*` is a static SPA, so
+# the bundle must call the backend on its own host rather than relatively:
+# `sorobanscanApiDomain.domainName` since task 0340 (same-site with the
+# portal), else `apiDomain.domainName`. `--skip-nx-cache` because the variable is not an Nx input — a
 # cached build would hand back whichever variant ran last, and the relative
 # one is indistinguishable from this one until a visitor opens the page.
 #
@@ -154,7 +155,7 @@ EXPLORER_DISTRIBUTION_ID ?= EA2TLS5SS5M87
 # `// empty`, so a renamed key yields `https://` rather than `https://null`.
 # Either is refused by `check-portal-api-origin` below before a build can bake
 # it in; a missing `jq` produces the same empty value and the same refusal.
-PORTAL_API_ORIGIN ?= https://$(shell jq -r '.apiDomain.domainName // empty' envs/production.json)
+PORTAL_API_ORIGIN ?= https://$(shell jq -r '(.sorobanscanApiDomain.domainName // .apiDomain.domainName) // empty' envs/production.json)
 
 # `$(shell …)` swallows a failed `jq` — binary missing, key renamed — into the
 # value, and the value is baked into the bundle: every backend call then goes
@@ -193,13 +194,13 @@ verify-portal-guild:
 	cd .. && node tools/scripts/verify-discord-guild.mjs --ssm --env production
 
 sync-portal-explorer: build-portal-explorer verify-portal-guild
-	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/prices-api/ \
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/prices-api/ \
 	  --exclude '*' --include 'assets/*' \
 	  --cache-control 'public, max-age=31536000, immutable'
-	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/prices-api/ \
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/prices-api/ \
 	  --exclude 'assets/*' \
 	  --cache-control 'public, max-age=0, must-revalidate'
-	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/prices-api/*'
+	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/prices-api/*'
 
 deploy-production-eventbridge: build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --exclusively --require-approval broadening

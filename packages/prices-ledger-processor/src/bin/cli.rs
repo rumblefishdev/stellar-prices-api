@@ -83,6 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let sink = ClickHouseSink::plaintext(&args.clickhouse_url);
         sink.preflight().await?;
+        // `load_registry`, not the Lambda's `load_ingest_registry`, by design: a
+        // local ClickHouse has no BE `default.soroban_contracts`, so this registry
+        // has no `is_sac` candidates and still mints an unproven SAC as a
+        // `Contract` identity (task 0242 D2 applies to the Lambda only).
         let registry = sink.load_registry().await?;
         let pool_registry = sink.load_pool_registry().await?;
         let reconciler = Reconciler::new(fetcher, cursor, sink, registry, pool_registry);
