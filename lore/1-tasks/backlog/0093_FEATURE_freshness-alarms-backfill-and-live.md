@@ -33,6 +33,20 @@ history:
       review (ledgerProcessorLagSeconds = 120, production.json:48). The deployed
       state is NOT yet confirmed: describe-alarms was not run (AWS SSO expired),
       so that is now an AC. Original text kept below.
+  - date: 2026-11-13
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Deployed state CONFIRMED (AC 2 ticked, evidence under it), from the
+      2026-11-13 CloudWatch monitoring review. The gap is live, not theoretical.
+      sdex-push-freshness (Tranche-1 AC #5) has had no datapoint since
+      2026-07-27, and PushAgeSeconds no longer appears in list-metrics for
+      either stream. On origin/develop (66724665) the lock is at
+      packages/sdex-backfill/src/sink.rs:390-397, the gating at
+      packages/backfill-freshness-probe/src/lib.rs:133, and the "can never
+      fire" comment at observability-stack.ts:941-945. The line numbers in the
+      2026-09-25 entry are older. amm-push-freshness ([[0176]]) can still fire.
+      Sibling findings went to [[0344]]-[[0347]].
 ---
 
 # Backfill watchdog that can actually fire + doorbell-lag review
@@ -69,11 +83,26 @@ deployed, but that is not proof of what is live ([[cdk-is-not-the-state-of-produ
       routes to Slack.~~ **Met by [[0137]]:** `prices-production-rollup-freshness-1m`
       (created per table at `observability-stack.ts:949-951`), live on prod since
       2026-08-12.
-- [ ] The operator confirms the deployed state with `aws cloudwatch describe-alarms`
+- [x] The operator confirms the deployed state with `aws cloudwatch describe-alarms`
       (profile `soroban-readonly`, `eu-central-1`) on
       `prices-production-{rollup-freshness-1m,ledger-processor-lag,sdex-push-freshness,amm-push-freshness}`.
       The command, its date, and each alarm's state, threshold and actions are
       recorded here.
+      **2026-11-13**, `aws cloudwatch describe-alarms --alarm-names …` (all four
+      send their ALARM and OK actions to SNS `prices-production-ops-alarms`):
+
+      | alarm | state since | threshold | period × eval (dta) | missing |
+      |---|---|---|---|---|
+      | rollup-freshness-1m | OK 2026-11-06 15:06 UTC | > 900 s | 900 s × 2 (1) | notBreaching |
+      | ledger-processor-lag | OK 2026-10-21 12:26 UTC | > 120 s | 60 s × 5 (5) | notBreaching |
+      | sdex-push-freshness | OK 2026-07-08 12:15 UTC | > 604800 s | 900 s × 1 (1) | notBreaching |
+      | amm-push-freshness | OK 2026-09-08 13:33 UTC | > 604800 s | 900 s × 1 (1) | notBreaching |
+
+      `get-metric-statistics Prices/Backfill PushAgeSeconds`, daily, 2026-07-01..11-13:
+      `sdex_archive` 22 days with data, last **2026-07-27**. `soroban_amm` 65 days,
+      last 2026-09-08. `list-metrics --namespace Prices/Backfill` returns only
+      `EarliestOverclaimSeconds`. Both push-freshness alarms read OK on missing
+      data.
 - [ ] A backfill watchdog exists that **can fire** for a future SDEX run (either
       the `resolve_status` `completed` lock is resolved, or a signal that does not
       depend on it is used) and pages within a window measured in hours, not 7
