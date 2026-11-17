@@ -3,7 +3,7 @@ id: "0242"
 title: "A SAC is minted as a second identity for an asset we already hold — same token under two asset_ids, with volume split across both"
 type: BUG
 status: active
-assignee: akot
+assignee: okarcz
 related_adr: []
 related_tasks: ["0210", "0139", "0120", "0286", "0252"]
 tags: [layer-backend, layer-database, priority-high, effort-medium, milestone-M2, ingest, identity, defect]
@@ -11,6 +11,19 @@ milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/canonical.rs"
 history:
+  - date: "2026-11-17"
+    status: active
+    who: okarcz
+    note: >
+      Handed over by the previous assignee (akot), who approved PR #421 the
+      same day and asked the new assignee to finish §5 (cleanup and backfill),
+      §6 and §7. The plan agreed on 2026-11-12 stands: map every tier and month
+      read-only, classify per row, backfill only uncovered months, back up, then
+      DELETE, then the probe reads 0. Changed by task 0343: the three 0242
+      alarms now sit behind `opsAlarms.sacIdentityAlarmsEnabled` (`false` in
+      production, #421), so Observability is no longer held back (D8) and
+      release #418 merged without waiting for §5. §6 sets the flag `true`
+      together with `sacContractIdentitiesActionsEnabled`.
   - date: "2026-10-05"
     status: active
     who: akot
