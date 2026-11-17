@@ -28,6 +28,13 @@ history:
       written. Scope change: the catch-up release (#418) becomes Phase 0 of
       this task, with the three 0242 alarms switched off by a config flag
       instead of waiting for 0242's cleanup. The drift check is dropped.
+  - date: 2026-11-17
+    status: active
+    who: okarcz
+    note: >
+      Phase 0 step 1 opened as PR #421. Read-only diff and AWS checks recorded
+      under "Measured on 2026-11-17". Prices-Cicd was never deployed, and its
+      OIDC provider would collide with the account's existing one.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -99,6 +106,26 @@ Rules that keep it true:
   the portal sync, data repairs) are applied from the release commit and noted
   on the release tag.
 
+## Measured on 2026-11-17
+
+Read-only, `soroban-readonly`, `eu-central-1`.
+
+- **`make diff-production` on the #421 branch:**
+  - Observability and ApiGateway show no differences.
+  - Compute and EventBridge show only Lambda `S3Key` hashes, which differ
+    between build machines and prove nothing either way.
+  - Secrets shows one difference: the description text of
+    `PortalOauthSecretNameParam` (changed in `e8ed5c0e`, 2026-09-02; the stack
+    was last deployed 2026-08-28). The value is unchanged. It is closed by
+    `make deploy-production-secrets` before #418 merges.
+- **`Prices-Cicd` was never deployed.** The account holds only the platform's
+  `Explorer-Cicd`.
+- **`cicd-stack.ts` would fail to deploy.** It creates
+  `new iam.OpenIdConnectProvider` for `token.actions.githubusercontent.com`, but
+  the account already has that provider, from `Explorer-Cicd`. An account can
+  hold one provider per URL. The stack must import the existing one
+  (`OpenIdConnectProvider.fromOpenIdConnectProviderArn`) before step 11.
+
 ## Decisions (2026-11-17)
 
 Answered by the operator. Numbers follow the former open decisions.
@@ -135,14 +162,16 @@ as separate PRs.
 
 ### Phase 0: `master` equal to production (manual)
 
-1. PR to `develop`: a config flag in `infra/envs/production.json` that leaves
+1. PR to `develop` (#421): a config flag in `infra/envs/production.json` that leaves
    out the three 0242 alarms (`ledger-processor-sac-unproven`,
    `sac-contract-identities`, `ledger-processor-sac-candidates-unavailable`).
    The alarm code stays. Turning the flag on after 0242's cleanup is an
    ordinary release. 0242's owner reviews the PR.
 2. Read-only `AWS_PROFILE=soroban-readonly make diff-production` on the new
    `develop` head. Expected: nothing except Lambda code hashes, which differ
-   between build machines. Anything else is deployed before step 3.
+   between build machines. Anything else is deployed before step 3. Done
+   2026-11-17: only the Secrets description differs (see Measured on
+   2026-11-17), so `make deploy-production-secrets` goes before step 3.
 3. Merge #418 with a merge commit.
 4. Merge `master` back into `develop`.
 5. Create `deploy/production` from `master`.
@@ -164,8 +193,9 @@ as separate PRs.
 10. Job `build`: the Lambdas, built the same way as CI's Lambda build.
 11. Job `deploy`: in the `production` environment, through the OIDC role from
     `infra/src/lib/stacks/cicd-stack.ts`, runs `cdk deploy --all` from the
-    run's commit. Whether `CicdStack` is deployed is not yet checked. If it is
-    not, deploying it comes first.
+    run's commit. `Prices-Cicd` is not deployed (checked 2026-11-17). First
+    change it to import the account's existing GitHub OIDC provider, then
+    deploy it with `make deploy-cicd`.
 12. Job `promote`, only after `deploy` succeeds: pushes the run's commit to
     `master` (rejected unless it is a fast-forward), then tags it
     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release on the same day). A
