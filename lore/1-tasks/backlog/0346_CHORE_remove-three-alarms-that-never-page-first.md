@@ -4,13 +4,15 @@ title: "Remove three alarms that another alarm always beats: ledger-processor-no
 type: CHORE
 status: backlog
 related_adr: []
-related_tasks: ["0223", "0222", "0231", "0137", "0056", "0200", "0294", "0139"]
+related_tasks: ["0223", "0222", "0231", "0137", "0056", "0200", "0294", "0139", "0093", "0347"]
 tags: [layer-infra, priority-low, effort-small, observability, cloudwatch, alarms, noise]
 links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../infra/src/lib/lambda-baseline.ts"
   - "../../../docs/runbooks/xdr-protocol-watch.md"
   - "../../../docs/runbooks/0139-asset-id-migration.md"
+  - "https://github.com/rumblefishdev/stellar-x402/pull/186"
+  - "https://github.com/rumblefishdev/soroban-block-explorer/pull/733"
 history:
   - date: 2026-11-13
     status: backlog
@@ -61,10 +63,14 @@ alarm `production-galexie-ingestion-lag` firing first. That was not re-checked h
 - Keep `ledger-processor-lag`: its 2-minute threshold is finer than the 15-minute
   freshness bound.
 
-**Accepted risk.** Ingest-halt detection then rests on `rollup-freshness-probe`,
-which has its own `-errors` and `-no-invocations` alarms. An operator backfill
-that writes recent 1m buckets during a halt could hide the halt. That case is rare
-and operator-driven.
+**Accepted risks.** Ingest-halt detection then rests on `rollup-freshness-1m`,
+fed by `rollup-freshness-probe`, which has its own `-errors` and
+`-no-invocations` alarms. Two cases slip past both:
+- An operator backfill that writes recent 1m buckets during a halt could hide the
+  halt. That case is rare and operator-driven.
+- `rollup-freshness-1m` is `notBreaching` ([[0093]]'s table), so a probe that runs
+  and succeeds but publishes no `RollupLagSeconds` reads as healthy, and a halt
+  behind it goes unseen. Today `no-invocations` would still fire on the halt.
 
 ## 2. `prices-production-oracle-no-invocations`
 
@@ -86,6 +92,9 @@ and operator-driven.
   Add a per-worker opt-out with a reason, like `noDurationAlarm` (`:76-86`).
 - Reword `:735-737` ("…covered by prices-{env}-oracle-no-invocations instead")
   and the oracle `-errors` liveness sentence so they name dark-feed.
+- Reword the state table at `packages/oracle-worker/src/metrics.rs:33` ("never
+  invoked → the `-no-invocations` alarm's job") so it names dark-feed. [[0347]]
+  edits `:34-35` of the same table.
 - Add one sentence to dark-feed: if the worker rows show no invocations, the
   watcher rule is disabled.
 
@@ -104,6 +113,26 @@ and operator-driven.
   entry (`:2380`).
 - Widen the option's doc comment (`:76-86`). Today it describes only
   budget-length workers.
+
+**Accepted risk.** The early warning for a probe that slows down is lost: a run
+between 48 s and 59 s pages nobody, and the first page is the timeout's `-errors`.
+Runs take about 1 s today, so that is a slowdown of almost 50 times.
+
+## Not taken from stellar-x402#186
+
+That plan (its G- note at
+[b99fad33](https://github.com/rumblefishdev/stellar-x402/blob/b99fad33b4c91ad411f958a24c5840e94e5b7858/lore/1-tasks/active/0138_RESEARCH_monitoring-cost-and-grafana-decision/notes/G-alarm-signals-and-triage-runbooks.md))
+also drops these alarms. This task does not:
+- **Five more `*-duration-near-timeout` alarms** (asset-discovery,
+  backfill-freshness-probe, coarse-sweep, oracle, rollup-freshness-probe). The plan
+  drops them for a `PR-WORKERS-FAILING` alarm and a daily headroom line, and
+  neither exists yet. This review did not read their Duration either, so it can't
+  say the timeout's `-errors` would come first. Only mtls-notafter-probe's runs
+  were measured (§3).
+- **`mtls-notafter-probe-no-invocations` and `mtls-notafter` turned `breaching`.**
+  They are one change: the no-invocations alarm can go only once `mtls-notafter`
+  treats missing data as breaching. This review did not look at `mtls-notafter`'s
+  missing data, so the pair is left to that plan.
 
 ## Considered and rejected
 
@@ -127,4 +156,5 @@ and operator-driven.
       `milestone-3-evidence.md:377, :388`) is left as the record of what was
       submitted ([[0294]], 2026-10-06). A dated note is added only if those docs
       must describe the current state.
-- [ ] Agreed with the other teams on the shared account before the deploy.
+- [ ] Agreed with the other teams on the shared account before the deploy, in
+      stellar-x402#186 and soroban-block-explorer#733.

@@ -81,8 +81,8 @@ deployed, but that is not proof of what is live ([[cdk-is-not-the-state-of-produ
 
 - [x] ~~Live candle-freshness alarm deployed; fires on a simulated stale frontier;
       routes to Slack.~~ **Met by [[0137]]:** `prices-production-rollup-freshness-1m`
-      (created per table at `observability-stack.ts:949-951`), live on prod since
-      2026-08-12.
+      (created per table at `observability-stack.ts:1041-1053` on 66724665), live on
+      prod since 2026-08-12.
 - [x] The operator confirms the deployed state with `aws cloudwatch describe-alarms`
       (profile `soroban-readonly`, `eu-central-1`) on
       `prices-production-{rollup-freshness-1m,ledger-processor-lag,sdex-push-freshness,amm-push-freshness}`.

@@ -1,6 +1,6 @@
 ---
 id: "0347"
-title: "Stop publishing 14 custom metrics that nothing reads or that duplicate AWS/Lambda, and trim prices-production-overview to the 50-metric free tier"
+title: "Stop publishing 14 custom metrics (15 series) that nothing reads or that duplicate AWS/Lambda, and trim prices-production-overview to the 50-metric free tier"
 type: CHORE
 status: backlog
 related_adr: []
@@ -14,32 +14,40 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../docs/runbooks/repair-coarse-usd-values.md"
   - "../../../tools/scripts/verify-dashboard-synth.mjs"
+  - "https://github.com/rumblefishdev/stellar-x402/pull/186"
+  - "https://github.com/rumblefishdev/soroban-block-explorer/pull/733"
 history:
   - date: 2026-11-13
     status: backlog
     who: stkrolikiewicz
     note: >
       From the 2026-11-13 read-only CloudWatch review. Re-checked on
-      origin/develop (66724665) and live CloudWatch the same day. About $3.7
-      (metrics, from the review's hourly-sample count) + $3 (dashboard) a month.
-      All but DaysToNotAfter are sent every hour, so each costs the full $0.30.
+      origin/develop (66724665) and live CloudWatch the same day. About $3.90
+      (13 hourly series × $0.30) + $3 (dashboard, see section 3) a month. All but
+      the two DaysToNotAfter series are sent every hour, so each costs the full
+      $0.30.
 ---
 
 # Stop publishing unread custom metrics; trim the overview dashboard
 
 ## Summary
 
-Fifteen custom metric series are published, and nothing reads them: no alarm, no
-dashboard widget, no runbook check. Four of them duplicate the free AWS/Lambda
-metrics. Separately, the overview dashboard plots 59 metrics, over the 50 that
+14 custom metrics, 15 series, are published, and no alarm or dashboard widget
+reads them. One runbook lists the coarse-sweep ones under "Metrics to watch"
+(section 1). Five of them duplicate the free AWS/Lambda metrics:
+`CoarseSweepRuns`, `CoarseSweepFailedRuns`, `CoarseSweepDurationMs`, `OracleRuns`
+and `OracleFailedRuns`. Separately, the overview dashboard plots 59 metrics, over the 50 that
 the free tier allows.
 
 "Nothing reads" was checked three ways on 2026-11-13. Live `describe-alarms`
-(155 alarms) reads none of them. The metric arrays of all 3 dashboards name none
-of them. `git grep` on develop, outside `lore/1-tasks/archive`, finds only the
-publishing code, its doc comments and a comment at `eventbridge-stack.ts:436-437`.
+(155 alarms) reads none of them. The metric arrays of the account's 3 dashboards
+(`prices-production-overview`, `production-soroban-explorer`,
+`testnet-soroban-explorer`) name none of them. `git grep` on develop, outside
+`lore/1-tasks/archive`, finds the publishing code, its doc comments, a comment at
+`eventbridge-stack.ts:436-437` and, for section 1, the runbook's "Metrics to
+watch".
 
-## 1. Coarse-sweep metrics that equal AWS/Lambda (4 series)
+## 1. Coarse-sweep run metrics (4 series, 3 of them equal to AWS/Lambda)
 
 `CoarseSweepRuns`, `CoarseSweepFailedRuns`, `CoarseSweepDurationMs`,
 `CoarseSweepTablesSkipped`. Live, 2026-10-14..11-13, one 30-day period:
@@ -58,7 +66,9 @@ publishing code, its doc comments and a comment at `eventbridge-stack.ts:436-437
   "Metrics to watch") so it points the three run states at AWS/Lambda
   Invocations, Errors and Duration.
 - Keep `CoarseSweepRowsEnriched`, `CoarseSweepDeadlineHit`, `CoarseSweepTablesSwept`
-  and `CoarseSweepTableFailures` ([[0344]] alarms on the last one).
+  and `CoarseSweepTableFailures` ([[0344]] alarms on the last one). The runbook
+  reads all four (`repair-coarse-usd-values.md:373-384`, `:407`), and none
+  repeats an AWS/Lambda metric.
 - One edge case: with `COARSE_SWEEP_TABLES` empty, the handler returns Ok and
   publishes nothing. Invocations then reads 1 while Runs is absent. That state
   stays visible, because `RowsEnriched` is absent too and a warning is logged on
@@ -101,12 +111,41 @@ AWS/Lambda per-worker series. The dashboard is built at
 `observability-stack.ts:479`. Its construct id and name must not change
 (`:474`). Re-run `tools/scripts/verify-dashboard-synth.mjs`.
 
+Two constraints on the cuts:
+- `verify-dashboard-synth.mjs:301-314` fails unless the body still names at least
+  one imported `prices-<env>-<worker>-errors` alarm, so the alarm strip stays.
+- The dashboard is the evidence for Tranche 3's AC 8
+  (`docs/scf/milestone-2-evidence.md:565-567`, the `ac8-dashboard-*.png`
+  screenshots). Until Milestone 2 is accepted, the cuts keep what those
+  screenshots show.
+
+The free tier's 3 dashboards × 50 metrics count for the whole account, not per
+project. `list-dashboards` on 2026-11-17 shows exactly 3: this one and the
+explorer's two. So the cut saves the $3 only while the account stays at 3
+dashboards; a fourth would be billed whatever this one holds.
+
+## Not taken from stellar-x402#186
+
+That plan (its G- note at
+[b99fad33](https://github.com/rumblefishdev/stellar-x402/blob/b99fad33b4c91ad411f958a24c5840e94e5b7858/lore/1-tasks/active/0138_RESEARCH_monitoring-cost-and-grafana-decision/notes/G-alarm-signals-and-triage-runbooks.md))
+counts 22 unread series. This task keeps these:
+- `CoarseSweepRowsEnriched`, `CoarseSweepDeadlineHit` and `CoarseSweepTablesSwept`,
+  which the coarse-sweep runbook reads (section 1).
+- `UnclassifiedSwapContracts`, which `docs/runbooks/0100-coverage-sweep-triage.md:54`
+  reads.
+- `EnrichmentFrontierMonthsPending`, which `docs/runbooks/0286-reingest-history.md:592`
+  and `:611` read.
+
 ## Acceptance Criteria
 
-- [ ] None of the 15 series above is published after a deploy (`list-metrics`
+- [ ] None of the 14 metrics (15 series) above is published after a deploy (`list-metrics`
       stops showing them after 14 days).
 - [ ] Unit tests and doc comments are updated. The runbook's "Metrics to watch"
       names the AWS/Lambda metrics.
 - [ ] `prices-production-overview` has ≤ 50 distinct metrics. Synth or the
-      verify script checks the count.
-- [ ] Agreed with the other teams on the shared account before the deploy.
+      verify script checks the count, and the script still finds an imported
+      `-errors` alarm (`verify-dashboard-synth.mjs:301-314`).
+- [ ] Until Milestone 2 is accepted, the dashboard still shows what the Tranche 3
+      AC 8 screenshots show (`docs/scf/milestone-2-evidence.md:565-567`).
+- [ ] Agreed with the other teams on the shared account before the deploy, in
+      stellar-x402#186 and soroban-block-explorer#733.

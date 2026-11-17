@@ -11,6 +11,8 @@ links:
   - "../../../packages/enrichment-worker/src/repair.rs"
   - "../../../packages/coarse-sweep-worker/src/main.rs"
   - "../../../docs/runbooks/repair-coarse-usd-values.md"
+  - "https://github.com/rumblefishdev/stellar-x402/pull/186"
+  - "https://github.com/rumblefishdev/soroban-block-explorer/pull/733"
 history:
   - date: 2026-11-13
     status: backlog
@@ -68,7 +70,8 @@ it, because the invocation did not fail.
       `CoarseSweepTableFailures`.
 - [ ] A synth test asserts the alarm's metric, threshold and missing-data mode.
 - [ ] Runbook §"Metrics to watch" names the alarm.
-- [ ] Deployed only after the other teams on the shared AWS account agree.
+- [ ] Deployed only after the other teams on the shared AWS account agree, in
+      stellar-x402#186 and soroban-block-explorer#733.
 
 ## Notes
 
