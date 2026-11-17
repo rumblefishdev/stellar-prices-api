@@ -2,7 +2,8 @@
 id: "0236"
 title: "Nothing detects an internally inconsistent `price_ohlcv_*` row — and 0229's clamp removed the one surface that used to surface them"
 type: BUG
-status: blocked
+status: completed
+assignee: akot
 related_adr: ["0011"]
 related_tasks: ["0229", "0120", "0182", "0227"]
 tags: ["priority-medium", "effort-small", "data-correctness", "observability", "ohlcv", "milestone-M2"]
@@ -11,7 +12,7 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../tools/scripts/conformance-0120.mjs"
 history:
-  - date: 2026-08-28
+  - date: "2026-08-28"
     status: backlog
     who: okarcz
     note: >
@@ -28,6 +29,7 @@ history:
   - date: "2026-09-29"
     status: blocked
     who: akot
+    by: ["0286"]
     note: >
       Detector, alarm, ITs and the ADR-0011 s3 amendment are built on
       fix/0236_ohlc-band-detector (not yet merged). Blocked on the deploy date:
@@ -36,6 +38,22 @@ history:
       inherit the legacy `low = 0` (measured 22 in `_1w`, 109 in `_1M`), so the
       alarm would fire on deploy with nothing new broken. No floor in code
       (Adam's decision); the window moves past those buckets by 2026-10-04.
+  - date: "2026-10-06"
+    status: active
+    who: akot
+    note: >
+      Unblocked: the deploy date passed. The detector's own queries read 0 on
+      all seven tiers on prod, so the alarm will not fire on legacy rows. The
+      branch is rebased on develop, alongside 0139's and 0203's probe checks,
+      as block 5c. PR to follow; deploy is Adam's.
+  - date: "2026-10-06"
+    status: completed
+    who: akot
+    note: >
+      PR #396 merged (81a48f08) after review; Observability (3 ohlc-band
+      alarms) and EventBridge (probe Lambda only) deployed 2026-10-06. First
+      run 13:05 UTC: 7 tiers read, 0 violations, checks_failed 0, alarms OK.
+      Probe 104 unit tests, 40 ClickHouse ITs.
 ---
 
 # No detector for an internally inconsistent stored candle
@@ -126,6 +144,27 @@ bound** — superseded RMT versions are included.
 - The legacy zero-price rows are pre-0286 residue that [[0286]] phase 3
   re-ingests; they are recorded here, not filed as a separate task.
 
+## Pre-deploy check — measured on prod 2026-10-06
+
+Read-only, `dev_read`, 10:11 UTC. These are the detector's own queries
+(`ohlc_band_queries()`: `FINAL`, 2 days widened by one bucket):
+
+| tier | band | nonpositive | scanned | oldest bucket in window |
+|---|---:|---:|---:|---|
+| `_1m` | 0 | 0 | 662,241 | 2026-10-04 10:12 |
+| `_15m` | 0 | 0 | 296,212 | 2026-10-04 10:00 |
+| `_1h` | 0 | 0 | 178,303 | 2026-10-04 10:00 |
+| `_4h` | 0 | 0 | 98,634 | 2026-10-04 08:00 |
+| `_1d` | 0 | 0 | 39,812 | 2026-10-04 |
+| `_1w` | 0 | 0 | 44,609 | 2026-09-28 |
+| `_1M` | 0 | 0 | 26,016 | 2026-10-01 |
+
+- The legacy `_1w` 2026-09-21 and `_1M` 2026-09-01 buckets have left the
+  window, so the first run after deploy should read 0.
+- Cost: the seven reads together take 0.29 s of server time and read 3.7 M
+  rows. That is why the check runs as block 5c, before the time-budgeted
+  mismatch reads (0203), which stay last.
+
 ## Decisions (Adam, 2026-09-28)
 
 1. **Predicate**: band violations **and** priced rows with any price ≤ 0 — the
@@ -145,11 +184,64 @@ construction and checked with zero tolerance where it is checked at all.
 
 ## Acceptance Criteria
 
-- [ ] The number of internally inconsistent rows per table is **measured on
+- [x] The number of internally inconsistent rows per table is **measured on
       prod** and recorded, before any alarm is designed.
-- [ ] If the count is non-zero, the cause is identified and filed as its own
-      task rather than absorbed here.
-- [ ] A recurring check exists wherever the other data-quality probes live, with
-      its threshold justified by the measured baseline.
-- [ ] 0229's clamp is explicitly confirmed as the right behaviour for the read
+- [x] If the count is non-zero, the cause is identified and filed as its own
+      task rather than absorbed here. Band violations are 0. The legacy
+      zero-price rows are recorded above and left to [[0286]] phase 3.
+- [x] A recurring check exists wherever the other data-quality probes live, with
+      its threshold justified by the measured baseline. Block 5c of
+      `rollup-freshness-probe`, every 15 min, alarm at >= 1 (baseline 0).
+- [x] 0229's clamp is explicitly confirmed as the right behaviour for the read
       path, or changed — with the decision recorded in [[ADR-0011]] §3.
+      Confirmed, merged with #396.
+
+## Implementation Notes
+
+- `packages/rollup-freshness-probe/src/ohlc_band.rs`: seven per-tier `FINAL`
+  queries, the `band` and `nonpositive` classes, `ohlc_band_totals` (the one
+  completeness rule) and the `CandleBandViolations` metric with its two
+  refusals (`EmptyScan`, `Incomplete`).
+- `main.rs` block 5c: the seven reads run in parallel on a `JoinSet`, each
+  under block 6's `mismatch_read_bound`, server- and client-side.
+- Observability: `prices-{env}-ohlc-band-{1,100,10000}` on `zeroLadder`.
+- ADR-0011 §3: the clamp stays; the as-stored arm does not clamp.
+
+## Deployed to production (2026-10-06)
+
+| step | result |
+|---|---|
+| merge | #396 → `develop` 81a48f08, 12:43 UTC |
+| Observability | 3 alarms created, dashboard 86 alarms, 14:48 CEST |
+| EventBridge | only `prices-production-rollup-freshness-probe` changed, 12:57 UTC |
+| first run | 13:05:21 UTC: 7 tiers, 0 violations, `checks_failed` 0, 3.1–3.4 s, 51 MB |
+| alarms | `ohlc-band-*` INSUFFICIENT_DATA → OK |
+
+## Design Decisions
+
+### From Plan
+
+1. **Predicate, scope, threshold**: Adam's decisions of 2026-09-28 above.
+
+### Emerged
+
+2. **Block 5c, not last**: block 6 (0203) is time-budgeted and stays last.
+   The seven reads cost 0.29 s of server time on prod.
+3. **Bounded, parallel reads** (review of #396): a stalled tier is a
+   recorded failure, not a Lambda timeout that loses block 6 and the log.
+4. **One completeness rule** (review): `ohlc_band_totals`, which also
+   rejects duplicate or unknown tier names.
+5. **Review finding 1 declined**: `pf_trade_count > 0` means priced on every
+   tier, because the ingest floor is the rollup floor (0286 WR-03). Prod had
+   0 rows that break this from 2026-09-23 to 2026-10-06. A break would be the
+   WR-03 defect, so paging on it is right. Documented in the module doc.
+6. **The old blocked entry carries `by: ["0286"]`**: the validator requires
+   `by`, and the block was waiting for pre-0286 buckets to leave the window.
+
+## Issues Encountered
+
+- **Rebase onto 299 commits of develop**: 0139 (block 5b) and 0203 (block 6,
+  time budget, `%reading` log style) had grown the same probe. Four files
+  conflicted; the band block was fitted in between.
+- **`client()` became async on develop**: it now stops the shared reconcile
+  MVs before a test seeds tiers. The 0236 ITs were adapted in c2eeddaf.

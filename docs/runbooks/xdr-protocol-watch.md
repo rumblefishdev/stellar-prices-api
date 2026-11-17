@@ -35,12 +35,12 @@ after 9 min, `rollup-freshness-1m` after 22 min).
 
 Four readings, compared every run:
 
-| Reading             | Source                                                                                                                           |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **our pin**         | `stellar-xdr` in `[workspace.dependencies]` of `Cargo.toml` (and `Cargo.lock` must agree, with only one major resolved)          |
-| **mainnet current** | `current_protocol_version` from `https://horizon.stellar.org/`                                                                   |
-| **core supports**   | `core_supported_protocol_version` from the same page — rises **weeks before** the vote, once validators run the new stellar-core |
-| **published crate** | `max_stable_version` from `https://crates.io/api/v1/crates/stellar-xdr` — only read when our pin lags `core supports`            |
+| Reading             | Source                                                                                                                                        |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **our pin**         | `stellar-xdr` in `[workspace.dependencies]` of `Cargo.toml` (and `Cargo.lock` must agree, with only one major resolved)                       |
+| **mainnet current** | `current_protocol_version` from `https://horizon.stellar.org/`                                                                                |
+| **core supports**   | `core_supported_protocol_version` from the same page — rises **weeks before** the vote, once validators run the new stellar-core              |
+| **published crate** | `max_stable_version` and the `versions` list from `https://crates.io/api/v1/crates/stellar-xdr` — only read when our pin lags `core supports` |
 
 Why the crate is read separately: stellar-core builds its XDR straight from the
 `stellar/stellar-xdr` git repo, so SDF runs a new protocol **before** the Rust
@@ -79,6 +79,12 @@ Rules that are easy to get wrong:
   so; there is no bump to ask for, so the issue is left alone. A watch that
   silently checks nothing is the failure it exists to prevent, which is why the
   run still fails.
+- **A later major is not a crate for this protocol** (task 0330). A bump
+  target for protocol N is a stable major above our pin and not above N.
+  Upstream skipped 29 (crates.io went 28.0.1 → 30.0.0), and 30.0.0 carries
+  protocol 30's XDR, so on mainnet 29 the watch is WAITING. Each protocol is
+  checked on its own: mainnet on 29 with core on 30 and 30.0.0 published is
+  LAGGING.
 - **A pre-release does not count.** `29.0.0-rc.1` is named in the report, but
   the tier stays WAITING until a stable `29.x` exists.
 - **Unchanged tier = silent.** The body is rewritten every run (with the fresh

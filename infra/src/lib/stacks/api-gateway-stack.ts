@@ -145,14 +145,8 @@ const PORTAL_API_RESOURCE_PATH = '/api/{proxy+}';
  * `/auth/logout`; `DELETE` for task 0192's revoke if it prefers that shape to a
  * `POST`.
  *
- * ⚠️ Task 0186's four routes sit at **depth 3** (`auth/login`, not `login`),
- * which the greedy `{proxy+}` above covers and the intermediate
- * `{proxy}` + `{proxy}/{sub}` pair that is CURRENTLY DEPLOYED does not — see
- * task 0205, which ships this file's committed shape. Until that deploy runs,
- * `/api/auth/login` answers the gateway's own
- * `403 Missing Authentication Token` rather than reaching the handler. That is a
- * deployment gap, not a defect in either task: the flag keeps the handler dark
- * regardless, and `/config` at depth 1 is unaffected.
+ * Task 0186's four routes sit at **depth 3** (`auth/login`, not `login`), which
+ * is why the proxy is greedy rather than a fixed number of `{proxy}` levels.
  *
  * ⚠️ A verb that is NOT listed here never reaches the handler: it gets the
  * gateway's own `404 {"code": "not_found", …}` (task 0309's gateway response)
@@ -560,9 +554,9 @@ export class ApiGatewayStack extends cdk.Stack {
     // below — declared outside the `cacheEnabled` branch, because with the stage
     // cache off is exactly when an unbounded anonymous route costs the most.
     // `/api/{proxy+}` directly under the root: the bundle's paths share the
-    // prefix but never reach the gateway — the page lives on another host
-    // (task 0194) and only its backend calls come here, on the API's own
-    // hostname. The OpenAPI alias `/api/api-docs-json` rides on this same
+    // prefix (`/api/prices-api/`, task 0339) but never reach the gateway — the
+    // page lives on another host (task 0194) and only its backend calls come
+    // here, on the API's own hostname. The OpenAPI alias `/api/api-docs-json` rides on this same
     // proxy.
     const portalProxy = this.api.root
       .addResource('api')
@@ -574,14 +568,15 @@ export class ApiGatewayStack extends cdk.Stack {
     // The preflight for the bundle's cross-origin calls (task 0194).
     //
     // The bundle is served from `config.portalWebOrigin` — another
-    // application's distribution, whose `/api/*` behaviour is a static SPA
-    // that rewrites every extensionless path to its `index.html`. A
-    // same-origin `fetch('/api/config')` from there gets the bundle back as
-    // `200 text/html`, so the bundle calls this API on `config.apiDomain`
-    // instead, and a browser asks before a non-simple request crosses an
-    // origin: the revoke's marker header (`PORTAL_REQUEST_HEADER`) is one, and
-    // so is any `DELETE`. Answered here by a MOCK integration rather than by
-    // the Lambda — no invocation, and the `max-age` has to be set by whoever
+    // application's distribution, whose `/api/*` behaviour is a `301` into a
+    // static SPA (`/api/prices-api/*`) that rewrites every extensionless path
+    // to its `index.html`. A same-origin `fetch('/api/config')` from there
+    // gets the bundle back as `200 text/html`, so the bundle calls this API on
+    // `config.apiDomain` instead, and a browser asks before a non-simple
+    // request crosses an origin: the revoke's marker header
+    // (`PORTAL_REQUEST_HEADER`) is one, and so is any `DELETE`. Answered here
+    // by a MOCK integration rather than by the Lambda — no invocation, and
+    // the `max-age` has to be set by whoever
     // answers the preflight, which is the gateway — with the handler adding
     // `Access-Control-Allow-Origin` on the actual responses (`portal::apply`
     // in the Rust crate names the same one origin).
@@ -1091,6 +1086,35 @@ export class ApiGatewayStack extends cdk.Stack {
       recordName,
       target: alias,
     });
+
+    // The API's host on the sorobanscan.com zone (task 0340): one more
+    // custom domain on the same stage and root base path, beside `apiDomain`,
+    // which keeps serving. No record here: that zone's DNS is Cloudflare's, in
+    // soroban-infrastructure's `cloudflare/`, which takes the regional target
+    // below. The certificate is referenced, not created: DNS validation in that
+    // zone is not this stack's to write. The `*.sorobanscan.com` one (explorer
+    // task 0661) is in use by the explorer's API domains, so ACM keeps renewing
+    // it, unlike the unattached wildcard the `apiDomain` note above avoids.
+    if (config.sorobanscanApiDomain) {
+      const sorobanscanApiDomain = this.api.addDomainName(
+        'SorobanscanApiDomain',
+        {
+          domainName: config.sorobanscanApiDomain.domainName,
+          certificate: acm.Certificate.fromCertificateArn(
+            this,
+            'SorobanscanApiCertificate',
+            config.sorobanscanApiDomain.certificateArn,
+          ),
+          endpointType: apigateway.EndpointType.REGIONAL,
+          securityPolicy: apigateway.SecurityPolicy.TLS_1_2,
+        },
+      );
+      new cdk.CfnOutput(this, 'SorobanscanApiRegionalTarget', {
+        value: sorobanscanApiDomain.domainNameAliasDomainName,
+        description:
+          'CNAME target of the sorobanscan.com API host (soroban-infrastructure)',
+      });
+    }
 
     new cdk.CfnOutput(this, 'ApiCustomDomain', {
       value: `https://${config.apiDomain.domainName}`,

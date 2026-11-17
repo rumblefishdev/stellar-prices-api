@@ -153,7 +153,7 @@ A client pointed at `localhost:8123` reads the **local dev ClickHouse** and
 returns a clean result that says nothing whatever about production — check the
 host in the command before you read the answer.
 
-Prod's HTTP endpoint (`ch.sorobanscan.rumblefish.dev`) is mTLS-only behind Caddy
+Prod's HTTP endpoint (`ch.sorobanscan.com`) is mTLS-only behind Caddy
 (task 0276). Run the reads from a workstation with your **personal read
 certificate**, which maps to the read-only ClickHouse user `dev_read`:
 
@@ -162,7 +162,7 @@ curl --fail-with-body -sS \
   --cert   "$READ_CERT" \
   --key    "$READ_KEY" \
   --cacert "$PRICES_CA" \
-  https://ch.sorobanscan.rumblefish.dev/ \
+  https://ch.sorobanscan.com/ \
   --data-binary @query.sql
 ```
 

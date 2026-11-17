@@ -17,6 +17,9 @@
 #                 the task that registers the family). A permanent family-wide
 #                 ignore would hide the next pool of a real venue, so a [[wasm]]
 #                 entry without `until` fails validation.
+#                 The one exception is `not_a_venue = true` (task 0336), in
+#                 place of `until`: a family whose code cannot be a market we
+#                 price, read from the wasm, that keeps deploying new instances.
 #
 # Every entry needs a non-empty `reason` and `task`. Unknown keys are rejected.
 #
@@ -173,14 +176,32 @@ task = "0100"
 [[contract]]
 id = "CA5YJ5H2HH6KUZBGQ7M7R2TX63LQKQVG57Y3HE23NVC5C6Q7BQFMSOI5"
 wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
-reason = "on-chain order book of tokenised instruments (NewBuyInitiatedTrade); instruments are u64 ids with no token addresses, not priceable here"
+reason = "permissioned order book, grBENJI/USDC (whitelist, admin-set phases and reference price); its NewBuyInitiatedTrade carries order ids, no token address, and has no extractor"
 task = "0100"
 
 [[contract]]
 id = "CBOSXSEZXU7P66O6F3AQV65URR5XUVKMY6CAQ7FT7C5TQLGYNV7IG5I6"
 wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
-reason = "on-chain order book of tokenised instruments (NewSellInitiatedTrade); instruments are u64 ids with no token addresses, not priceable here"
+reason = "permissioned order book, AMA1/XUSDT (whitelist, admin-set phases and reference price); its NewSellInitiatedTrade carries order ids, no token address, and has no extractor"
 task = "0100"
+
+[[contract]]
+id = "CD35HSTRTNL4O3BFXQL75XGAI6AOCWFFAEPR5OCBS7A7HVUDUZOVLCAB"
+wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
+reason = "permissioned order book, AMA1/XUSDT, a further instance of the wasm above (whitelist, admin-set phases and reference price); its NewBuyInitiatedTrade carries order ids, no token address, and has no extractor"
+task = "0334"
+
+[[contract]]
+id = "CAF5RWQG5GSTEPD5XAKCUH2H77NWA4J6DNFT6TUP2NU6Q6VW3R6HCZYO"
+wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
+reason = "permissioned order book, grBENJI/USDC, a further instance of the wasm above (whitelist, admin-set phases and reference price); its trade events carry order ids, no token address, and have no extractor; decoded trades ~75,000 at ~1.00; 0/50 txs hold a registered pool's swap"
+task = "0338"
+
+[[contract]]
+id = "CC5QR5OOQMCPVSL3SJMH7QESCFINWUMX3427CT4NIDBS3FRVDHAM4NAJ"
+wasm = "a85d6d53dfe894ef6483aad0613359584e5a78629c159cf3dbf53d74395a0404"
+reason = "tokenised managed fund aLQD (issue, redeem, nav, rebalance), not a market; its trade event wraps a swap through the Soroswap router, and indexing it double-counts; 3/8 txs hold a registered pool's swap, its one trade among them"
+task = "0338"
 
 [[contract]]
 id = "CBP76I2FRMUKYKIYYBKN3DH7TSWMFAJF2WTDC7Q2OHQFBIVWP7CAAI5Q"
@@ -193,6 +214,20 @@ id = "CAE54B6CIQ3XB3VT7T4ZQ4FN6BNQZ3FZX3EPIKXVXAZZTZP63F5U4HKN"
 wasm = "91d5ab7e075d533a9404373453a548bc21c3d2893d78f9782785985f396b4454"
 reason = "bonding-curve token launchpad (pad_created, launched, buy, bump_curve); its trade events price a launched token on its own curve, not a pool; first seen 2026-10-04 as a test launch (ANYCHAIN Test, CCRIN5F5…), 3 trades by its creator"
 task = "0323"
+
+[[contract]]
+id = "CANIE64BDFKLHROLOIY2KTQVBWUZNUKZP75DLXC272QM7TIN5N3M4LVA"
+wasm = "dcdc0b1860799629c7c88804955dd7373cb6febaf069e2ba863e98ebbaa95c27"
+reason = "BLNT v3 backfill contract (verified source BLNT-Protocol/blnt-backfill-contract); swap_blnd is a fixed 1:1 BLND -> BLNT conversion (burns BLND, pays pre-funded BLNT), not a market; no admin, no upgrade"
+task = "0337"
+
+# --- unindexed pools (one contract, not their family) -------------------------
+
+[[contract]]
+id = "CAZE5GVMH5332L6FEGVPPDLEPVYUFGQB7ZOCH2OKKBJCBYZQ5FGKZN7L"
+wasm = "ae835560f930e73b3ac8ce0ab2b26543b815eb6bb61b0d87b894f4dc8dc6e8df"
+reason = "Spreadless USD 3pool, a real stableswap AMM (USDT0, PYUSD, USDC; amp 100) with no extractor; ~$29 of reserves and three 1-unit swaps at 2026-11-02; 0/7 txs hold a registered pool's swap; this pool only, so the next pool of the wasm still pages"
+task = "0338"
 
 # --- unindexed venue families (temporary, keyed by wasm) ----------------------
 
@@ -213,3 +248,11 @@ hash = "8abc28913035c07411ed5d134e6bfeab4723d97ddd4d1a22a0605d35c94d1a36"
 reason = "Comet weighted pool, Blend backstop BLND/USDC (CAS3FL6T…), a venue not yet indexed; 53k swaps since 2024-05-02"
 task = "0100"
 until = "0300"
+
+# --- non-venue families (permanent, keyed by wasm) ----------------------------
+
+[[wasm]]
+hash = "f3dd3edfd637a9654054181a9c47391ddafa723697b982698b3c9662a9df974e"
+reason = "securities-financing trade ledger (repo, stock loan, FX forward); trade_opened/trade_closed carry notional and rate_bps, no token price; new instances keep appearing (CDU47AIU… in 0334, four more by 2026-10-19), so this is keyed by wasm"
+task = "0336"
+not_a_venue = true

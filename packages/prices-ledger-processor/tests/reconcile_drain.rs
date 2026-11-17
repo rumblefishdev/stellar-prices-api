@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use prices_ingest_core::{
-    AssetIdentity, AssetRegistry, OfferLookupCounts, OhlcvCandle, OracleSample, PoolRegistryRow,
-    Registries, decode_object, extract_trades_with_counts,
+    AssetIdentity, AssetRegistry, DecimalsResolver, OfferLookupCounts, OhlcvCandle, OracleSample,
+    PoolRegistryRow, Registries, decode_object, extract_trades_with_counts,
 };
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
@@ -194,7 +194,8 @@ async fn harness(dir: &std::path::Path) -> (Harness, MemoryFetcher, RecordingSin
         sink.clone(),
         AssetRegistry::from_existing(Vec::new()),
         Registries::new(),
-    );
+    )
+    .with_decimals_resolver(DecimalsResolver::live("http://127.0.0.1:1/".to_string()));
     (reconciler, fetcher, sink)
 }
 

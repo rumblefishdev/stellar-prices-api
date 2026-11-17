@@ -69,6 +69,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // would re-zero and recompute the same rows forever. Deliberately not
         // env-driven — there is no ENRICHMENT_USD_RESET.
         usd_reset: None,
+        // Opt-in coarse-repair mode only (task 0331).
+        pre_usdc_xlm_rate: None,
     };
 
     tracing::info!(

@@ -95,7 +95,7 @@ pub const LOGOUT_PATH: &str = "/api/auth/logout";
 /// origin is the one that handles OAuth. The portal has several pages now and
 /// this did not change: the page it lands on decides where to go next; this
 /// handler still will not.
-const PORTAL_HOME: &str = "/prices-api/";
+const PORTAL_HOME: &str = "/api/prices-api/";
 
 /// Appended to [`PORTAL_HOME`] when the visitor declined at Discord's consent
 /// screen, so [0185]'s page can say "sign-in cancelled" instead of silently
@@ -215,10 +215,13 @@ impl AuthState {
     /// The callback runs on this backend's host, where the session cookie is
     /// set; the page the visitor is sent back to lives on
     /// `AppConfig::portal_web_origin`. A relative `Location` would keep them on
-    /// the API host, where `/prices-api/` is nothing — the gateway's own
-    /// `404`. `None` keeps the bare path, which is the same-origin deployment
-    /// and what every existing test sees. A builder, like [`Self::with_issue`],
-    /// so every constructor and test stays valid.
+    /// the API host, where `/api/prices-api/` is not the page: it falls under
+    /// this backend's own [`PORTAL_API_PREFIX`](super::PORTAL_API_PREFIX) and
+    /// gets the router's empty `404` (task 0339; the explorer host's `/api/`
+    /// and this one share a name, not a route). `None` keeps the bare path,
+    /// which is the same-origin deployment and what every existing test sees.
+    /// A builder, like [`Self::with_issue`], so every constructor and test
+    /// stays valid.
     pub fn with_web_origin(mut self, origin: Option<&str>) -> Self {
         if let Some(origin) = origin {
             self.home = format!("{origin}{PORTAL_HOME}").into();
@@ -1232,7 +1235,10 @@ mod tests {
             vec!["a=1; Path=/".into(), "b=2; Path=/".into()],
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers().get(LOCATION).unwrap(), "/prices-api/");
+        assert_eq!(
+            response.headers().get(LOCATION).unwrap(),
+            "/api/prices-api/"
+        );
         assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 2);
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     }
@@ -1323,7 +1329,7 @@ mod tests {
         assert_ne!(CANCELLED_QUERY, FAILED_QUERY);
         assert_eq!(ERROR_ACCESS_DENIED, "access_denied");
         for query in [CANCELLED_QUERY, FAILED_QUERY] {
-            assert!(format!("{PORTAL_HOME}{query}").starts_with("/prices-api/?"));
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/prices-api/?"));
         }
     }
 
@@ -1333,7 +1339,7 @@ mod tests {
     /// delete this to do it.
     #[test]
     fn the_only_redirect_targets_are_the_portal_itself() {
-        assert_eq!(PORTAL_HOME, "/prices-api/");
+        assert_eq!(PORTAL_HOME, "/api/prices-api/");
         assert!(PORTAL_HOME.starts_with('/'));
         assert!(!PORTAL_HOME.starts_with("//"));
         for query in [
@@ -1353,7 +1359,7 @@ mod tests {
             &issue::too_young_query(173),
             &issue::capped_query("2026-09-01"),
         ] {
-            assert!(format!("{PORTAL_HOME}{query}").starts_with("/prices-api/?"));
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/prices-api/?"));
         }
     }
 
@@ -1363,19 +1369,19 @@ mod tests {
     #[test]
     fn the_landing_is_prefixed_with_the_configured_origin_and_nothing_else() {
         let bare = AuthState::new(None, discord::Endpoints::default());
-        assert_eq!(&*bare.home, "/prices-api/");
+        assert_eq!(&*bare.home, "/api/prices-api/");
 
         let kept = AuthState::new(None, discord::Endpoints::default()).with_web_origin(None);
-        assert_eq!(&*kept.home, "/prices-api/");
+        assert_eq!(&*kept.home, "/api/prices-api/");
 
         let hosted = AuthState::new(None, discord::Endpoints::default())
             .with_web_origin(Some("https://sorobanscan.example"));
-        assert_eq!(&*hosted.home, "https://sorobanscan.example/prices-api/");
+        assert_eq!(&*hosted.home, "https://sorobanscan.example/api/prices-api/");
 
         let response = redirect(&format!("{}{CANCELLED_QUERY}", hosted.home), vec![]);
         assert_eq!(
             response.headers()[LOCATION],
-            "https://sorobanscan.example/prices-api/?signin=cancelled"
+            "https://sorobanscan.example/api/prices-api/?signin=cancelled"
         );
     }
 

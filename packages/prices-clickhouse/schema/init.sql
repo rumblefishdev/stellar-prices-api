@@ -414,6 +414,33 @@ ORDER BY (contract_address)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
+-- `decimals()` of each pure Soroban token an AMM swap has touched (task 0329).
+-- The ingest scales each swap leg's raw i128 amount by its token's decimals.
+-- Before this table it assumed 7 for every token, the classic convention, and
+-- priced every other token off by 10^(7 - decimals). A classic identity is 7
+-- by protocol and needs no row. A SAC the ingest does not yet know as one (its
+-- classic asset not seen yet, task 0242) is held as a contract like any token:
+-- it is resolved over RPC and gets a row, with 7.
+--
+-- Written by the ingest itself (live processor, events-backfill, sdex-backfill)
+-- the first time a swap names a token it has no row for: one Soroban RPC
+-- `decimals()` call, then this row. Never refreshed: decimals are fixed at
+-- deploy, the same reasoning as `asset_symbol`. Only answers are stored; a
+-- token whose call failed has no row and is asked again later.
+--
+-- Read in full at cold start. The live processor's init FAILS if the table is
+-- absent, so apply this before deploying an ingest that reads it.
+----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.asset_decimals (
+    contract_address  String,
+    decimals          UInt8,
+    fetched_at        DateTime  DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(fetched_at)
+ORDER BY (contract_address)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
 -- Oracle reference prices (§3.4). ReplacingMergeTree, monthly partitions.
 -- Written by the Oracle Fetcher Lambda in production; the backfill writes
 -- REFLECTOR/REDSTONE samples decoded from soroban events. raw_data keeps the

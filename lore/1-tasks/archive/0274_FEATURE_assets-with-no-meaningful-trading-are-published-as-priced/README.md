@@ -2,7 +2,7 @@
 id: "0274"
 title: "1-stroop offer-priced fills still publish a USD price — e.g. XAUa at $4,375 on $0.003 of volume"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0287"]
 related_tasks: ["0116", "0147", "0252", "0236", "0286", "0278", "0310", "0216"]
 tags: [layer-backend, layer-api, priority-medium, effort-medium, milestone-M3, data-quality, liquidity, api]
@@ -12,7 +12,7 @@ links:
   - "../../../../packages/prices-clickhouse/schema/current.sql"
   - "notes/R-offer-priced-dust-population-2026-09-29.md"
 history:
-  - date: 2026-09-10
+  - date: "2026-09-10"
     status: backlog
     who: okarcz
     note: >
@@ -22,7 +22,7 @@ history:
       asset-level property. Filed rather than absorbed into 0116, because it is
       a different claim about a different subject — 0116 is about a bucket, this
       is about an asset.
-  - date: 2026-09-25
+  - date: "2026-09-25"
     status: backlog
     who: okarcz
     note: >
@@ -34,7 +34,7 @@ history:
       103120 `USD` ($0.10 published vs a 0.5 XLM close) is out of scope here; it
       goes to its own new task. Retitled, because the old 93% headline describes
       a population that is now `unpriced`. Original text kept below.
-  - date: 2026-09-29
+  - date: "2026-09-29"
     status: active
     who: akot
     note: >
@@ -45,6 +45,14 @@ history:
       Decided: keep the price and publish what it rests on in a separate
       `price_basis` field (option C); no `unpriced`, no fourth `price_status` word.
       Converted to a directory for the measurement note.
+  - date: "2026-10-05"
+    status: completed
+    who: akot
+    note: >
+      PR #373 merged to develop as 586713f1: `price_basis` (`trades` /
+      `offer_dust` / '') on current_prices, the price, list and batch
+      endpoints, OpenAPI and portal samples. 782 Rust tests, 270 portal tests.
+      Closed before deploy; the rollout order in Implementation Notes is binding.
 ---
 
 # 1-stroop offer-priced fills still publish a USD price
@@ -93,10 +101,11 @@ about $0.20). That is a different defect and has its own task.
       0 of 224 thin-but-real assets (at most 5 priced minutes, at least $1 in
       24 h) flagged. Known edge: BTC `GBVFOW…`, $86 in 24 h in trades of about
       150 stroops each, reads `offer_dust` — see Implementation Notes.*
-- [ ] A consumer can tell, without running their own aggregation, that such a
+- [x] A consumer can tell, without running their own aggregation, that such a
       price does not rest on a real market (e.g. it is `unpriced`, or carries a
-      signal that says so). *Via `price_basis = "offer_dust"`.*
-- [ ] `volume_quote_usd` and volume aggregates are explicitly unchanged.
+      signal that says so). *Via `price_basis = "offer_dust"`. Merged in #373
+      (586713f1); reaches consumers only with the rollout, not deployed at close.*
+- [x] `volume_quote_usd` and volume aggregates are explicitly unchanged.
       *By construction: candle tables, rollups and enrichment are not touched.*
 
 ## Design (decided 2026-09-29)

@@ -18,9 +18,13 @@
 //!    whose `asset_id` or `quote_asset_id` has no `assets` row. This is the
 //!    post-window detector for a writer out of step with the registry, e.g. an
 //!    old binary still writing counter ids after the swap (BRIEF §3.7).
+//! 3. `SacContractIdentities` = contract rows of `assets FINAL` whose address
+//!    is a SAC: some row's `sac_address`, or a contract BE flags `is_sac`
+//!    (task 0242). A SAC is a facet of its classic asset, never an identity of
+//!    its own. Baseline 36 until the 0242 heal, then 0.
 //!
-//! The two reads are independent: a failure in one must not suppress the
-//! other's datum. A read that saw nothing is refused, never published as a
+//! The reads are independent: a failure in one must not suppress another's
+//! datum. A read that saw nothing is refused, never published as a
 //! healthy zero (same rule as [`crate::zero_invariants`]): the alarms are
 //! `NOT_BREACHING` on missing data, so an empty registry or an empty window
 //! must surface as a failed check.
@@ -35,6 +39,12 @@ pub const ASSET_ID_COLLISIONS_METRIC: &str = "AssetIdCollisions";
 
 /// CloudWatch metric: recent candles naming an id that has no `assets` row.
 pub const ASSET_ID_ORPHAN_CANDLES_METRIC: &str = "AssetIdOrphanCandles";
+
+/// CloudWatch metric: contract identities in `assets` that are SACs.
+pub const SAC_CONTRACT_IDENTITIES_METRIC: &str = "SacContractIdentities";
+
+/// BE's database, holding `soroban_contracts` (prices_writer has SELECT on it).
+pub const BE_DATABASE: &str = prices_clickhouse::BE_DATABASE;
 
 /// The tier every writer of candles writes; the coarse tiers derive from it.
 pub const ORPHAN_CANDLE_TABLE: &str = "price_ohlcv_1m";
@@ -84,6 +94,36 @@ pub fn orphan_candles_query() -> String {
     )
 }
 
+/// One reading of the contract rows of `assets FINAL` against the SAC sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
+pub struct SacContractCounts {
+    /// Contract rows whose address is a SAC.
+    pub sac_rows: u64,
+    /// Contract rows examined. Zero means the scan measured nothing.
+    pub scanned: u64,
+    /// Contracts BE flags `is_sac`. Zero means the second test measured nothing.
+    pub be_sacs: u64,
+}
+
+/// The SAC-identity read. A contract row is a SAC when its address is the
+/// `sac_address` of a classic row, or when BE flags it `is_sac` (a SAC whose
+/// classic we never held). `uniqExact`, because `soroban_contracts` is a
+/// ReplacingMergeTree read without `FINAL`; `ifNull`, because a scalar
+/// subquery is `Nullable` and RowBinary would misread it as a `u64`.
+pub fn sac_contract_identities_query(be_db: &str) -> String {
+    format!(
+        "SELECT \
+             countIf(contract_address IN (SELECT sac_address FROM assets WHERE sac_address != '') \
+                  OR contract_address IN (SELECT contract_id FROM {be_db}.soroban_contracts WHERE is_sac)) \
+                 AS sac_rows, \
+             count() AS scanned, \
+             ifNull((SELECT uniqExact(contract_id) FROM {be_db}.soroban_contracts WHERE is_sac), 0) \
+                 AS be_sacs \
+         FROM assets FINAL \
+         WHERE contract_address != ''"
+    )
+}
+
 /// Why a reading was not published: the read measured nothing, so its zero
 /// would be a false healthy datum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +132,10 @@ pub enum UniquenessRefusal {
     EmptyRegistry,
     /// The candle window held no row.
     EmptyWindow,
+    /// `assets FINAL` held no contract row.
+    NoContractRows,
+    /// BE's `soroban_contracts` held no `is_sac` contract.
+    EmptyBeSacSet,
 }
 
 impl std::fmt::Display for UniquenessRefusal {
@@ -109,6 +153,17 @@ impl std::fmt::Display for UniquenessRefusal {
                  ingestion has stopped or the table is empty; refusing to publish a healthy \
                  zero over a scan that measured nothing",
                 ORPHAN_LOOKBACK_SECONDS, ORPHAN_CANDLE_TABLE
+            ),
+            Self::NoContractRows => write!(
+                f,
+                "sac-contract-identities unreadable: assets FINAL holds no contract row, so a \
+                 count of 0 would measure nothing; the registry is empty or unreadable to this user"
+            ),
+            Self::EmptyBeSacSet => write!(
+                f,
+                "sac-contract-identities unreadable: {BE_DATABASE}.soroban_contracts holds no \
+                 is_sac contract, so SACs whose classic we never held go uncounted; BE's table \
+                 is empty or unreadable to this user"
             ),
         }
     }
@@ -137,6 +192,22 @@ pub fn orphan_candles_metric(
     Ok(SanityMetric {
         name: ASSET_ID_ORPHAN_CANDLES_METRIC,
         value: counts.orphans as f64,
+    })
+}
+
+/// Shape a SAC-identity reading into its datum, or refuse it.
+pub fn sac_contract_identities_metric(
+    counts: &SacContractCounts,
+) -> Result<SanityMetric, UniquenessRefusal> {
+    if counts.scanned == 0 {
+        return Err(UniquenessRefusal::NoContractRows);
+    }
+    if counts.be_sacs == 0 {
+        return Err(UniquenessRefusal::EmptyBeSacSet);
+    }
+    Ok(SanityMetric {
+        name: SAC_CONTRACT_IDENTITIES_METRIC,
+        value: counts.sac_rows as f64,
     })
 }
 
@@ -225,5 +296,59 @@ mod tests {
         assert!(window.contains("unreadable"), "{window}");
         assert!(window.contains("price_ohlcv_1m"), "{window}");
         assert!(window.contains("7200"), "{window}");
+        let contracts = UniquenessRefusal::NoContractRows.to_string();
+        assert!(contracts.contains("unreadable"), "{contracts}");
+        assert!(contracts.contains("no contract row"), "{contracts}");
+        let be = UniquenessRefusal::EmptyBeSacSet.to_string();
+        assert!(be.contains("unreadable"), "{be}");
+        assert!(be.contains("default.soroban_contracts"), "{be}");
+    }
+
+    #[test]
+    fn the_sac_query_counts_contract_rows_against_both_sac_sets() {
+        let sql = sac_contract_identities_query(BE_DATABASE);
+        for part in [
+            "FROM assets FINAL",
+            "contract_address != ''",
+            "contract_address IN (SELECT sac_address FROM assets WHERE sac_address != '')",
+            "contract_address IN (SELECT contract_id FROM default.soroban_contracts WHERE is_sac)",
+            "ifNull((SELECT uniqExact(contract_id) FROM default.soroban_contracts WHERE is_sac), 0)",
+            "AS be_sacs",
+            "AS sac_rows",
+            "count() AS scanned",
+        ] {
+            assert!(sql.contains(part), "{part}: {sql}");
+        }
+        assert!(!sql.contains("SETTINGS"), "{sql}");
+    }
+
+    #[test]
+    fn sac_contract_identities_are_published_or_refused() {
+        let cases = [
+            ((0, 5, 10), Ok(0.0), "no SAC among the contracts"),
+            ((36, 59, 4_042), Ok(36.0), "production on 2026-10-05"),
+            (
+                (0, 0, 10),
+                Err(UniquenessRefusal::NoContractRows),
+                "no contract row",
+            ),
+            (
+                (0, 5, 0),
+                Err(UniquenessRefusal::EmptyBeSacSet),
+                "empty BE SAC set",
+            ),
+        ];
+        for ((sac_rows, scanned, be_sacs), want, why) in cases {
+            let got = sac_contract_identities_metric(&SacContractCounts {
+                sac_rows,
+                scanned,
+                be_sacs,
+            });
+            assert_eq!(
+                got.map(|m| (m.name, m.value)),
+                want.map(|v| (SAC_CONTRACT_IDENTITIES_METRIC, v)),
+                "{why}"
+            );
+        }
     }
 }

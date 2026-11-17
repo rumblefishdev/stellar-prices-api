@@ -12,3 +12,8 @@ stkrolikiewicz:
   name: 'Stanisław Królikiewicz'
   role: 'Developer'
   focus: 'Stellar prices API'
+
+mkowalski:
+  name: 'Marek Kowalski'
+  role: 'Developer'
+  focus: 'Stellar prices API'

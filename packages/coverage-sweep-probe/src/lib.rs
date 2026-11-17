@@ -39,9 +39,9 @@ pub const UNCLASSIFIED_SWAP_EVENTS: &str = "UnclassifiedSwapEvents";
 pub const UNRESOLVED_SWAP_EMITTERS: &str = "UnresolvedSwapEmitters";
 
 /// BE's database (`soroban_events`, `soroban_contracts`).
-pub const BE_DATABASE: &str = "default";
+pub const BE_DATABASE: &str = prices_clickhouse::BE_DATABASE;
 /// Our database (`pool_registry`).
-pub const PRICES_DATABASE: &str = "prices";
+pub const PRICES_DATABASE: &str = prices_clickhouse::PROD_DATABASE;
 
 /// Client-side `max_execution_time` for every statement, in seconds. The sweep
 /// runs as `prices_writer`, whose profile carries no execution bound.

@@ -18,12 +18,42 @@ use crate::soroban::Registries;
 ///   issuer, with wasm `8abc28913035c07411ed5d134e6bfeab4723d97ddd4d1a22a0605d35c94d1a36`.
 ///   It has no factory and emits no init / new-pool event (task 0300).
 ///
-/// Its sister `CB3A6LUP…` (same wasm) is deliberately absent: it has emitted
-/// no event, ever.
-pub const STATIC_POOLS: &[(&str, Venue)] = &[(
-    "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM",
-    Venue::Comet,
-)];
+/// - `CASYAKK3…UMIHE` — Blend v2.1's Comet BLND/USDC pool, listed in
+///   `blend-capital/docs-v2` `mainnet-deployments.md`. Deployed 2026-09-30
+///   with wasm `d735c3395f59510172cf5cf838823a1389b97cfec6bf24e580e9bd77d2b3e687`,
+///   CometDEX release v1.1.0, which rejects self-swaps (task 0334).
+///
+/// - `CDQMIKIH…C7Y3` (BLNT/USDC) and `CA5HX3D4…3FLC` (BLNT/XLM) — Comet v1.1
+///   pools deployed 2026-10-25 by `GDEA2WMO…` for the BLNT token launch, same
+///   wasm `d735c339…`. First swaps at ledger 65,137,110 (task 0337).
+///
+/// - `CCNDNFA7…7QFZ` — a small Comet v1.1 BLND/USDC pool deployed 2026-09-23
+///   by `GCRKRXU2…`, same wasm. First swap at ledger 65,099,227 (task 0337).
+///
+/// Its sister `CB3A6LUP…` (same wasm as `CAS3FL6T…`) is deliberately absent:
+/// it has emitted no event, ever.
+pub const STATIC_POOLS: &[(&str, Venue)] = &[
+    (
+        "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM",
+        Venue::Comet,
+    ),
+    (
+        "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE",
+        Venue::Comet,
+    ),
+    (
+        "CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3",
+        Venue::Comet,
+    ),
+    (
+        "CA5HX3D47PQZWC2E7VWXCKH4534P2NOJEOIXAWU47MI4QV2FQUYY3FLC",
+        Venue::Comet,
+    ),
+    (
+        "CCNDNFA7LEVUJRYWTSWVAA2ESZAKFO6MYOPI6E5AZT3V2UBP2MNV7QFZ",
+        Venue::Comet,
+    ),
+];
 
 impl Registries {
     /// Route every [`STATIC_POOLS`] entry to its venue. The committed list
@@ -59,10 +89,20 @@ mod tests {
     use crate::registry_io::PoolRegistryRow;
 
     const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+    const COMET_V1_1: &str = "CASYAKK3SHDN6S2E6IUOBVRXT3KKPVQCVQO4GNBDTVE6XZQQMW4UMIHE";
+    const BLNT_USDC: &str = "CDQMIKIHKA5UY3FQJ2UDTLNX3GOPD3GPNZWSPTOBVOHEUMQJQXOPC7Y3";
+    const BLNT_XLM: &str = "CA5HX3D47PQZWC2E7VWXCKH4534P2NOJEOIXAWU47MI4QV2FQUYY3FLC";
+    const BLND_USDC_SMALL: &str = "CCNDNFA7LEVUJRYWTSWVAA2ESZAKFO6MYOPI6E5AZT3V2UBP2MNV7QFZ";
+    const ALL: [&str; 5] = [COMET, COMET_V1_1, BLNT_USDC, BLNT_XLM, BLND_USDC_SMALL];
 
     #[test]
-    fn the_list_holds_exactly_the_comet_pool() {
-        assert_eq!(STATIC_POOLS, &[(COMET, Venue::Comet)]);
+    fn the_list_holds_exactly_the_five_comet_pools() {
+        let listed: Vec<(&str, Venue)> = STATIC_POOLS
+            .iter()
+            .map(|(id, v)| (*id, v.clone()))
+            .collect();
+        let expected: Vec<(&str, Venue)> = ALL.iter().map(|id| (*id, Venue::Comet)).collect();
+        assert_eq!(listed, expected);
     }
 
     #[test]
@@ -79,28 +119,32 @@ mod tests {
     fn merging_routes_the_pools_and_touches_nothing_else() {
         let mut reg = Registries::new();
         reg.merge_static_pools();
-        assert_eq!(reg.venue.len(), 1);
-        assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
+        assert_eq!(reg.venue.len(), ALL.len());
+        for id in ALL {
+            assert_eq!(reg.venue.get(id), Some(&Venue::Comet), "{id}");
+        }
         assert_eq!(reg.pool_count(), 0, "no pair or phoenix entry");
 
         reg.merge_static_pools();
-        assert_eq!(reg.venue.len(), 1, "idempotent");
+        assert_eq!(reg.venue.len(), ALL.len(), "idempotent");
     }
 
     #[test]
-    fn a_merged_pool_flattens_to_one_venue_only_row() {
+    fn each_merged_pool_flattens_to_one_venue_only_row() {
         let mut reg = Registries::new();
         reg.merge_static_pools();
-        assert_eq!(
-            reg.to_pool_rows(),
-            vec![PoolRegistryRow {
-                contract_id: COMET.to_string(),
-                venue: "comet".to_string(),
-                token0: String::new(),
-                token1: String::new(),
-                pool_type: 0,
-                wasm_hash: String::new(),
-            }]
-        );
+        let mut rows = reg.to_pool_rows();
+        rows.sort_by(|a, b| a.contract_id.cmp(&b.contract_id));
+        let row = |id: &str| PoolRegistryRow {
+            contract_id: id.to_string(),
+            venue: "comet".to_string(),
+            token0: String::new(),
+            token1: String::new(),
+            pool_type: 0,
+            wasm_hash: String::new(),
+        };
+        let mut expected: Vec<PoolRegistryRow> = ALL.iter().map(|id| row(id)).collect();
+        expected.sort_by(|a, b| a.contract_id.cmp(&b.contract_id));
+        assert_eq!(rows, expected);
     }
 }

@@ -45,15 +45,15 @@
     <meta name="robots" content="noindex" />
     <title>Stellar Prices API — API keys</title>
     <!-- No `<base href>`: Vite's `base` option (vite.config.mts) already
-         rewrites asset URLs to `/prices-api/`, and a `<base>` tag on top of it
+         rewrites asset URLs to `/api/prices-api/`, and a `<base>` tag on top of it
          would resolve them twice. The router's `basename` handles routes.
 
          Root-relative `/favicon.ico`, NOT `./favicon.ico`. Vite prefixes
          absolute public-dir URLs with `base` and leaves relative ones untouched,
          so the relative form shipped verbatim and resolved against whatever path
-         the browser was on. That happens to work at `/prices-api/` and breaks on
-         every sub-route — `/prices-api/docs` would ask for
-         `/prices-api/docs/favicon.ico`,
+         the browser was on. That happens to work at `/api/prices-api/` and breaks on
+         every sub-route — `/api/prices-api/docs` would ask for
+         `/api/prices-api/docs/favicon.ico`,
          which the host rewrites to the page itself.
 
          The mark is the SorobanScan icon (task 0269): the SVG for browsers
@@ -67,7 +67,7 @@
   <body>
     <!-- Analytics exactly as on the explorer root (task 0316, decided
          2026-09-28): GTM loads GA4, HubSpot shows the consent banner. Same
-         container and banner as the rest of sorobanscan.rumblefish.dev, so one
+         container and banner as the rest of sorobanscan.com, so one
          consent choice covers the whole host.
 
          Until then this page loaded no third-party script (tasks 0162, 0193),

@@ -696,7 +696,7 @@ mod tests {
         ];
         for (i, a) in fixed.iter().enumerate() {
             assert!(a.starts_with("?issue="));
-            assert!(format!("{PORTAL_HOME}{a}").starts_with("/prices-api/?"));
+            assert!(format!("{PORTAL_HOME}{a}").starts_with("/api/prices-api/?"));
             for b in &fixed[i + 1..] {
                 assert_ne!(a, b);
             }

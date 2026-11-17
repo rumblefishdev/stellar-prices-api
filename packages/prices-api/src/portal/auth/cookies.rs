@@ -28,8 +28,8 @@
 //!   the state check. `Lax` sends cookies on top-level GET navigation and
 //!   withholds them from cross-site subrequests, which is precisely the
 //!   distinction wanted. It survives the split across two hosts (task 0194)
-//!   because those hosts are **same-site**: `sorobanscan.rumblefish.dev` and
-//!   `prices-api.sorobanscan.rumblefish.dev` share a registrable domain, and
+//!   because those hosts are **same-site**: `sorobanscan.com` and
+//!   `prices-api.sorobanscan.com` share a registrable domain (task 0340), and
 //!   `SameSite` is judged on that, not on origin. Had the backend moved to an
 //!   unrelated domain this would have had to become `SameSite=None`, i.e. no
 //!   CSRF protection from the cookie layer at all.

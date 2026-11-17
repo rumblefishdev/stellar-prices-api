@@ -29,8 +29,8 @@ use crate::state::AppState;
         ("asset_identifier" = String, Path,
          description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
           the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
-          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
-          addresses, which as a rule answer `404`")
+          asset's Stellar Asset Contract address, XLM's included, is accepted as an alias, and the \
+          answer names the asset by `CODE:ISSUER` (or `native`)")
     ),
     responses(
         (status = 200, description = "Oracle readings", body = OraclesResponse),
@@ -49,6 +49,10 @@ pub async fn get_oracles(
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
+    };
+    let id = match assets_q::resolve_sac_alias(state.ch(), id).await {
+        Ok(id) => id,
+        Err(e) => return errors::db_error(&e, "asset lookup"),
     };
 
     let asset_id = match assets_q::resolve_asset_id(state.ch(), &id).await {

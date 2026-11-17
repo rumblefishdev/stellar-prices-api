@@ -185,7 +185,7 @@ the run — see §11 on why finishing matters):
 ```bash
 tmux new -s backfill        # detach later with Ctrl-b then d; reattach: tmux attach -t backfill
 
-export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export CH_DOMAIN=ch.sorobanscan.com
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
@@ -431,7 +431,7 @@ let it run to `=== sdex-backfill complete ===`.
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Ledger bucket                | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/` — region **us-east-2**, anonymous (`--no-sign-request`)           |
 | Writer secret                | `prices/production/clickhouse-mtls-prices-ingestion-production` (region `eu-central-1`, acct `750702271865`)                |
-| CH domain                    | `ch.sorobanscan.rumblefish.dev`                                                                                             |
+| CH domain                    | `ch.sorobanscan.com`                                                                                                        |
 | Prod CH shell                | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161` → `docker exec -i app-clickhouse-1 clickhouse-client --query='…'` |
 | Activation ledger            | `50457424` (split between `combined` and `sdex-only`)                                                                       |
 | Combined floor (`--end` max) | `63352611` (live starts at `63352612`)                                                                                      |

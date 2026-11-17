@@ -45,16 +45,16 @@ seam section.
 
 ## Component summary
 
-| Component                 | Kind                 | Writes                                                                                                                                                | How it runs                               | Built?       |
-| ------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------ |
-| `sdex-backfill`           | operator CLI         | `price_ohlcv_1m` (`sdex` + AMM sources), `assets`, `oracle_prices`, `backfill_progress`, `pool_registry`, `unresolved_pools`, `backfill_sdex_ledgers` | manual, `--mode`/`--start`/`--end`        | ✅           |
-| `prices-ledger-processor` | Lambda / fixture CLI | `price_ohlcv_1m` (all sources), `oracle_prices`, `assets`                                                                                             | SQS doorbell (prod) or `--cursor` (local) | ✅           |
-| `enrichment-worker`       | Lambda / CLI         | `price_ohlcv_1m` (`_usd` cols)                                                                                                                        | scheduled (prod) or CLI (local)           | ✅ prototype |
-| `asset-discovery`         | scheduled Lambda     | `assets`, `asset_symbol`                                                                                                                              | EventBridge `rate(1h)`                    | ✅           |
-| `oracle-worker`           | scheduled Lambda     | `oracle_prices`                                                                                                                                       | EventBridge schedule                      | ✅           |
-| `supply-worker`           | scheduled Lambda     | `asset_supply`                                                                                                                                        | EventBridge schedule                      | ✅           |
-| `cleanup-worker`          | scheduled Lambda     | TTL/partition maintenance                                                                                                                             | EventBridge schedule                      | ✅           |
-| `prices-api`              | HTTP Lambda          | reads only                                                                                                                                            | API Gateway (prod) or `serve` bin (local) | ✅           |
+| Component                 | Kind                 | Writes                                                                                                                                                                  | How it runs                               | Built?       |
+| ------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------ |
+| `sdex-backfill`           | operator CLI         | `price_ohlcv_1m` (`sdex` + AMM sources), `assets`, `asset_decimals`, `oracle_prices`, `backfill_progress`, `pool_registry`, `unresolved_pools`, `backfill_sdex_ledgers` | manual, `--mode`/`--start`/`--end`        | ✅           |
+| `prices-ledger-processor` | Lambda / fixture CLI | `price_ohlcv_1m` (all sources), `oracle_prices`, `assets`, `asset_decimals`                                                                                             | SQS doorbell (prod) or `--cursor` (local) | ✅           |
+| `enrichment-worker`       | Lambda / CLI         | `price_ohlcv_1m` (`_usd` cols)                                                                                                                                          | scheduled (prod) or CLI (local)           | ✅ prototype |
+| `asset-discovery`         | scheduled Lambda     | `assets`, `asset_symbol`                                                                                                                                                | EventBridge `rate(1h)`                    | ✅           |
+| `oracle-worker`           | scheduled Lambda     | `oracle_prices`                                                                                                                                                         | EventBridge schedule                      | ✅           |
+| `supply-worker`           | scheduled Lambda     | `asset_supply`                                                                                                                                                          | EventBridge schedule                      | ✅           |
+| `cleanup-worker`          | scheduled Lambda     | TTL/partition maintenance                                                                                                                                               | EventBridge schedule                      | ✅           |
+| `prices-api`              | HTTP Lambda          | reads only                                                                                                                                                              | API Gateway (prod) or `serve` bin (local) | ✅           |
 
 ---
 
@@ -192,7 +192,7 @@ no separate push step — so `/backfill/status` updates in real time. Needs the
 `aws-mtls` build and the operator's client bundle:
 
 ```bash
-CH_DOMAIN=ch.sorobanscan.rumblefish.dev \
+CH_DOMAIN=ch.sorobanscan.com \
 MTLS_CERT_PATH=… MTLS_KEY_PATH=… MTLS_CA_PATH=… \
 target/release/sdex-backfill --transport hetzner \
     --mode combined --start 50457424 --end <TIP> --verbose

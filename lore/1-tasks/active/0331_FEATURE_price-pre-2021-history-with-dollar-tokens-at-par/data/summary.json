@@ -1,0 +1,52 @@
+{
+ "assets_enumerated": 1194,
+ "scanned": 1192,
+ "errors": 0,
+ "traded_vs_xlm": 11,
+ "days_with_ref": 1005,
+ "years": {
+  "2016": {
+   "days_with_ref": 1,
+   "vol_usd": 0.02
+  },
+  "2017": {
+   "days_with_ref": 14,
+   "vol_usd": 31.390000000000004
+  },
+  "2018": {
+   "days_with_ref": 228,
+   "vol_usd": 7594050.72
+  },
+  "2019": {
+   "days_with_ref": 365,
+   "vol_usd": 10688274.440000005
+  },
+  "2020": {
+   "days_with_ref": 366,
+   "vol_usd": 96215632.27999999
+  },
+  "2021": {
+   "days_with_ref": 31,
+   "vol_usd": 39861099.01
+  }
+ },
+ "xlm_own_series": {
+  "2018": {
+   "days": 21,
+   "vol_xlm": 4581.33
+  },
+  "2019": {
+   "days": 63,
+   "vol_xlm": 8947.89
+  },
+  "2020": {
+   "days": 257,
+   "vol_xlm": 5238448.71
+  },
+  "2021": {
+   "days": 31,
+   "vol_xlm": 1362866.82
+  }
+ },
+ "binance_days": 1000
+}

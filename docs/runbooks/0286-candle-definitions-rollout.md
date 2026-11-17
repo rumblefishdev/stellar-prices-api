@@ -40,7 +40,7 @@ tmux new -s rollout0286
 cd ~/stellar-prices-api && git checkout develop && git pull
 chadmin() { curl -sS --cert ~/prices-mtls/prices-admin-production.crt \
   --key ~/prices-mtls/prices-admin-production.key --cacert ~/prices-mtls/ca.crt \
-  "https://ch.sorobanscan.rumblefish.dev/" --data-binary "$1"; }
+  "https://ch.sorobanscan.com/" --data-binary "$1"; }
 chadmin "SELECT currentUser(), version() FORMAT TSVWithNames"
 ```
 
@@ -437,7 +437,7 @@ statement rather than editing the SQL, which is rendered from
 ```bash
 curl -sS --cert ~/prices-mtls/prices-admin-production.crt \
   --key ~/prices-mtls/prices-admin-production.key --cacert ~/prices-mtls/ca.crt \
-  "https://ch.sorobanscan.rumblefish.dev/?max_partitions_per_insert_block=1000" \
+  "https://ch.sorobanscan.com/?max_partitions_per_insert_block=1000" \
   --data-binary "$(sed -n '/^INSERT INTO prices.price_ohlcv_1M/,$p' \
                     packages/prices-clickhouse/schema/preroll.sql)"
 ```

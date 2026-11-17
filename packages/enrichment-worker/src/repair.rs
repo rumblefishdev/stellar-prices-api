@@ -32,7 +32,9 @@ use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, repair_target_pred};
+use crate::ch_enrich::{
+    ChEnrichConfig, ChEnrichError, ChEnrichmentPass, pre_usdc_scope_pred, repair_target_pred,
+};
 
 /// One coarse-repair run over `[start_month, end_month]` (inclusive `YYYYMM`).
 #[derive(Debug, Clone)]
@@ -206,6 +208,12 @@ impl CoarseRepairDriver {
     /// the month's first instant; `addMonths(..., 1)` is the exclusive upper
     /// bound. Both cast to `UInt32` to match [`MonthWindow`].
     async fn months_with_zeros(&self) -> Result<Vec<MonthWindow>, ChEnrichError> {
+        let e = &self.cfg.enrich;
+        let pred = if e.pre_usdc_xlm_rate.is_some() {
+            pre_usdc_scope_pred(&e.database)
+        } else {
+            repair_target_pred(&e.database, &e.table, e.usd_reset.as_ref())
+        };
         let sql = format!(
             "SELECT toYYYYMM(timestamp) AS month, \
                     toUInt32(toUnixTimestamp(toDateTime(min(toStartOfMonth(timestamp))))) AS start_ts, \
@@ -217,11 +225,6 @@ impl CoarseRepairDriver {
              GROUP BY month ORDER BY month",
             db = self.cfg.enrich.database,
             tbl = self.cfg.enrich.table,
-            pred = repair_target_pred(
-                &self.cfg.enrich.database,
-                &self.cfg.enrich.table,
-                self.cfg.enrich.usd_reset.as_ref(),
-            ),
             start = self.cfg.start_month,
             end = self.cfg.end_month,
         );
@@ -273,9 +276,12 @@ impl CoarseRepairDriver {
         // green having touched nothing. Found by the 0228 prove run and its two
         // review rounds. `reset_step` calls the SAME method — one list, not two
         // that must be kept in step by hand.
-        ChEnrichmentPass::with_client(self.client.clone(), self.cfg.enrich.clone())
-            .assert_reset_is_admissible()
-            .await?;
+        let pass = ChEnrichmentPass::with_client(self.client.clone(), self.cfg.enrich.clone());
+        // Task 0331: its refusals, and native XLM resolved once for every month.
+        let xlm = match self.cfg.enrich.pre_usdc_xlm_rate {
+            Some(_) => Some(pass.assert_pre_usdc_admissible().await?),
+            None => pass.assert_reset_is_admissible().await.map(|()| None)?,
+        };
         let months = self.months_with_zeros().await?;
         info!(
             count = months.len(),
@@ -302,18 +308,37 @@ impl CoarseRepairDriver {
                 break;
             }
 
-            if self.cfg.dry_run {
-                info!(
-                    month = mw.month,
-                    zeros = mw.zeros,
-                    "coarse repair: DRY RUN — would repair"
-                );
+            // Partition-bounded pass over this one month. `one_shot` decides
+            // whether it drains the month fully (manual repair) or a bounded
+            // `max_batches` chunk with overflow deferring to the next run (the
+            // recurring hourly sweep) — see [`CoarseRepairConfig::one_shot`].
+            let mut ecfg = self.cfg.enrich.clone();
+            ecfg.time_window = Some((mw.start_ts, mw.end_ts));
+            ecfg.one_shot = self.cfg.one_shot;
+            let pass = ChEnrichmentPass::with_client(self.client.clone(), ecfg);
+            // Task 0331: rows to write, rows left unpriced, priced rows set to 0.
+            let counts = match xlm {
+                Some(x) => Some(pass.pre_usdc_counts(x).await?),
+                None => None,
+            };
+            let (zeros, after, reset) = counts.map_or((mw.zeros, mw.zeros, 0), |c| {
+                (c.pending, c.unpriced, c.unprice)
+            });
+
+            // A 0331 month with nothing to write gets no FREEZE either.
+            if self.cfg.dry_run || zeros == 0 {
+                let what = if zeros == 0 {
+                    "nothing to write"
+                } else {
+                    "DRY RUN — would repair"
+                };
+                info!(month = mw.month, zeros, "coarse repair: {what}");
                 summary.months.push(MonthRepair {
                     month: mw.month,
-                    zeros_before: mw.zeros,
-                    zeros_after: mw.zeros,
+                    zeros_before: zeros,
+                    zeros_after: after,
                     rows_enriched: 0,
-                    rows_reset: 0,
+                    rows_reset: reset,
                     snapshot_name: None,
                 });
                 continue;
@@ -334,16 +359,10 @@ impl CoarseRepairDriver {
                 None
             };
 
-            // Partition-bounded pass over this one month. `one_shot` decides
-            // whether it drains the month fully (manual repair) or a bounded
-            // `max_batches` chunk with overflow deferring to the next run (the
-            // recurring hourly sweep) — see [`CoarseRepairConfig::one_shot`].
-            let mut ecfg = self.cfg.enrich.clone();
-            ecfg.time_window = Some((mw.start_ts, mw.end_ts));
-            ecfg.one_shot = self.cfg.one_shot;
-            let stats = ChEnrichmentPass::with_client(self.client.clone(), ecfg)
-                .run()
-                .await?;
+            let stats = match xlm {
+                Some(x) => pass.run_pre_usdc(x).await?,
+                None => pass.run().await?,
+            };
 
             info!(
                 month = mw.month,
@@ -363,7 +382,8 @@ impl CoarseRepairDriver {
             });
             // Defensive cross-check: the enumeration count and the pass's own
             // pre-count should agree (both are the month's zero population).
-            if mw.zeros != stats.candidates_before {
+            // In the 0331 mode the pass counts rows to write, not scope rows.
+            if xlm.is_none() && mw.zeros != stats.candidates_before {
                 warn!(
                     month = mw.month,
                     enumerated = mw.zeros,

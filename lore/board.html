@@ -931,11 +931,10 @@
   `;
       }
 
+      // The generator owns the rule (getAssignee, task 0327); the page only
+      // reads its result (task 0328).
       function getTaskAssignee(t) {
-        if (t.status !== 'active' && t.status !== 'archive') return null;
-        const history = Array.isArray(t.history) ? t.history : [];
-        const lastEntry = history[history.length - 1];
-        return lastEntry?.who || null;
+        return t.assignee || null;
       }
 
       function filtered() {

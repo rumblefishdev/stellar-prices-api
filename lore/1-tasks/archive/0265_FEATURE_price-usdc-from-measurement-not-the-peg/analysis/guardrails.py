@@ -3,7 +3,7 @@
 thresholds derived from real data and the tests that prove they separate.
 
 Thresholds (why each number — measured 2026-09-04 with the snippet at the
-bottom of this file over Chainlink USDC/USDT/DAI, Bitstamp, Kraken, OKX daily
+bottom of this file over Chainlink USDC/USDT/DAI, Bitstamp, third-party, OKX daily
 bars; see notes/S-guardrails.md for the table):
 
   ZERO_TRADES_SHARE_30D = 0.9
@@ -21,17 +21,17 @@ bars; see notes/S-guardrails.md for the table):
 
   EXACT_PEG_SHARE_30D = 0.9
       share of closes exactly == 1.0 in a 30-day window. Real max over any
-      window: 0.67 (Kraken, which prints 4 decimals), 0.47 (OKX), 0.40
+      window: 0.67 (third-party, which prints 4 decimals), 0.47 (OKX), 0.40
       (Bitstamp, Chainlink). Ours: 1.00 for 1 864 consecutive days. 0.9 sits
       above the noisiest real window with margin and below ours by 0.1.
 
   CONSTANT_CLOSE_RUN_DAYS = 30
       longest run of identical consecutive closes. Real max: 18 days
-      (Kraken, 4 dp), 10 (OKX), 4 (Chainlink, Bitstamp). Ours: 1 864.
+      (third-party, 4 dp), 10 (OKX), 4 (Chainlink, Bitstamp). Ours: 1 864.
 
   MIN_RVOL_30D_BPS = 0.1
       30-day realized vol of daily log returns. Real minimum over every
-      window: 0.23 bps (Bitstamp), 0.33 (Chainlink), 0.58 (Kraken), 0.85
+      window: 0.23 bps (Bitstamp), 0.33 (Chainlink), 0.58 (third-party), 0.85
       (OKX); no real window is ever exactly zero. Ours: 0 on every window
       before 2026-03-11. 0.1 is less than half the quietest real window.
 
@@ -140,7 +140,7 @@ def test_our_native_control_passes_price_checks() -> None:
 
 
 def test_real_usd_sources_pass() -> None:
-    for name in ["chainlink_usdc_1d.csv", "bitstamp_usd_1d.csv", "kraken_usd_1d_last720.csv", "okx_usdt_1d.csv",
+    for name in ["chainlink_usdc_1d.csv", "bitstamp_usd_1d.csv", "third_party_usd_1d_last720.csv", "okx_usdt_1d.csv",
                  "chainlink_usdt_1d.csv", "chainlink_dai_1d.csv", "composed_usdc_usd_1d.csv"]:
         df = _load(name)
         if "trades" in df:

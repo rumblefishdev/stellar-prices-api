@@ -2,9 +2,9 @@
 id: "0326"
 title: "Serve the portal at /prices-api/ on the explorer's host"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0194", "0195"]
+related_tasks: ["0194", "0195", "0339"]
 tags: ["portal", "hosting", "effort-small"]
 links: []
 history:
@@ -30,6 +30,14 @@ history:
       /prices-api/ live ~10:55 UTC: sync-portal-explorer uploaded the bundle
       under prices-api/ (#385), then the explorer's Delivery deploy routed it.
       Portal and every 301 verified on production.
+  - date: 2026-11-05
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Superseded by 0339: the portal moved on to /api/prices-api/ before this
+      task's Compute step shipped. The sign-in round-trip passed there, and
+      the explorer's 0631 dropped the old api/ and pricing-api/ prefixes on
+      2026-11-04.
 ---
 
 # Serve the portal at /prices-api/ on the explorer's host
@@ -41,7 +49,12 @@ portal moves to `/prices-api/`; the explorer turns every `/api…` URL into a
 `301` to the same path under `/prices-api`, query string kept
 (soroban-block-explorer task 0608), so nothing shared before the move breaks.
 
-## Status: Active
+## Status: Completed (superseded by [[0339]])
+
+**2026-11-05:** the portal lives at `/api/prices-api/` since 0339; `/prices-api…`
+answers `301` there. What this task left open was done under 0339 and the
+explorer's 0631.
+
 
 **Current state:** `/prices-api/` live since 2026-10-02 ~10:55 UTC; `/api…`
 and `/pricing-api…` answer `301` there. Next: Compute (`PORTAL_HOME`) with the
@@ -83,11 +96,13 @@ cookie's `Path=/api/`) do not: that host has no portal bundle on it.
 
 - [x] Portal boots at `/prices-api/`, `/prices-api/dashboard`,
       `/prices-api/docs` (hard refresh included)
-- [ ] Discord sign-in round-trip lands on `/prices-api/?…` (after Compute;
-      until then via the `301`)
+- [x] Discord sign-in round-trip lands on `/prices-api/?…` (after Compute;
+      until then via the `301`): superseded, the landing moved to
+      `/api/prices-api/` and passed there under [[0339]] (2026-11-05)
 - [x] `/api/?utm_source=stellar-skill` → `301` `/prices-api/?utm_source=stellar-skill`
-- [ ] Old `api/` and `pricing-api/` prefixes dropped from the bucket once
-      the above holds
+- [x] Old `api/` and `pricing-api/` prefixes dropped from the bucket once
+      the above holds (soroban-block-explorer task 0631, 2026-11-04: 57 and
+      18 objects)
 
 ## Design Decisions
 

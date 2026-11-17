@@ -2,7 +2,8 @@
 id: "0200"
 title: "Is the cleanup worker still needed at all? Decide whether prices-production-cleanup is enabled or disabled"
 type: RESEARCH
-status: backlog
+status: completed
+assignee: akot
 related_adr: []
 related_tasks: ["0088", "0090", "0111", "0167", "0174", "0046", "0063"]
 tags:
@@ -53,9 +54,65 @@ history:
       stack can NOT silently re-enable cleanup. That acceptance criterion of this
       task is therefore already DONE, and what remains here is only the
       enable-or-disable decision itself, now due after M3.
+  - date: "2026-10-07"
+    status: completed
+    who: akot
+    note: >
+      DECIDED: prices-production-cleanup stays DISABLED for good; the worker
+      stays in the code, dark. Measured on prod today: rule DISABLED, last
+      invocation 2026-07-20 03:00 UTC, none since; 8 EventBridge deploys
+      since 09-14 left it off. 1m + 15m grow ~0.9 GiB/month (~11 GiB/yr)
+      against 752 GiB free; oracle_prices is 19.7 MiB. 1m is the source the
+      0286 re-ingest is rebuilding, so a 7-day retention would delete it.
+      No follow-up tasks.
 ---
 
 # Is `prices-production-cleanup` still worth running?
+
+## ✅ Decision — 2026-10-07: DISABLED for good
+
+**`prices-production-cleanup` stays DISABLED.** No table is expired by a job.
+The worker and its rule stay in the code (`enabled: false`), dark; re-enabling
+is a deliberate, reviewed edit to `eventbridge-stack.ts`, nothing else.
+
+Measured on production, 2026-10-07:
+
+| | measurement |
+|---|---|
+| rule | `DISABLED`, `cron(0 3 * * ? *)`; target still the cleanup Lambda |
+| last invocation | 2026-07-20 03:00 UTC (CloudWatch `Invocations`, last log stream); **0 since** |
+| CDK vs live | 8 EventBridge stack deploys 2026-09-14 → 10-05 (CloudTrail `UpdateFunctionCode` by CloudFormation), the rule still `DISABLED` after all of them |
+| ClickHouse | no cleanup query in `system.query_log` (kept from 2026-09-08): no `toUInt32(partition) < toYYYYMM(now() - …)` listing, no `DROP PARTITION` on `oracle_prices`. Every 1m/15m `DROP PARTITION` in that window is the 0286 re-ingest (`prices_admin`) or the 0139 rekey (`dev_shared`, `__new` tables) |
+| `price_ohlcv_1m` | 28.3 GiB, 903 M rows; live months 0.56–0.82 GiB (2026-07 → 09) |
+| `price_ohlcv_15m` | 12.1 GiB; live months 0.30–0.35 GiB |
+| `oracle_prices` | **19.7 MiB**, 624 k rows, from 202509 |
+| free disk | **752 GiB of 1.72 TiB** (shared; `default` = 614 GiB, `prices` = 193 GiB, of which 132 GiB are re-ingest / 0139 backup tables) |
+
+Why:
+
+1. **OHLCV (1m, 15m): growth is not a problem.** ~0.9 GiB/month at the live
+   rate → ~11 GiB in 12 months, ~22 GiB in 24, against 752 GiB free. The
+   0286 re-ingest refilling 1m for 2024-10 → 2026-06 adds a one-off amount
+   of the same order. The backup tables of the running migrations weigh
+   more than two years of growth.
+2. **1m is now the source, not a cache.** The 0286 phase-3 re-ingest is
+   rebuilding every 1m month and re-rolling the coarse tiers from it. A
+   7-day window would drop that work every night, the same way the
+   2026-07-18 run dropped 1m for 2024-10 → 2026-06 (measured today: those
+   21 months are absent from `price_ohlcv_1m`, the coarse tables are their
+   only copy until the re-ingest reaches them).
+3. **`oracle_prices`, answered separately:** 19.7 MiB, ~1.5 MiB/month. The
+   13-month expiry saves nothing. With no expiry, [[0167]]'s reason for
+   `usd_rate` (escaping `oracle_prices`' expiry) no longer bites, but
+   `usd_rate` stays out of `RETENTION` (the test in `cleanup-worker` still
+   guards it), so re-enabling cleanup later cannot take it.
+4. **Replacement signal exists:** `prices-production-ch-disk-free`
+   (`observability-stack.ts:1145`, task 0204) watches the shared volume.
+
+Not done here, on purpose: the worker is not deleted (removal would need an
+EventBridge deploy and buys nothing), and the "check `describe-rule` before
+and after every deploy" lines in the runbooks are left in place. They are now
+redundant, not wrong.
 
 The rule has been **DISABLED since 2026-07-20** and prod has been healthy
 without it for over three weeks. It is time to decide deliberately rather than
@@ -148,24 +205,28 @@ should delete the need for it.
 
 ## Acceptance Criteria
 
-- [ ] **DECISION RECORDED: `prices-production-cleanup` should be ENABLED or
+- [x] **DECISION RECORDED: `prices-production-cleanup` should be ENABLED or
       DISABLED.** One of the two, stated plainly, with the measurement behind it.
       A third option (keep it, but change the retention windows or the eligibility
       predicate) is acceptable — but it must be written as a decision, not left as
       "needs more thought".
-- [ ] Per-table size and growth measured on prod, projected 12/24 months, against
-      measured free space.
-- [ ] `oracle_prices` answered separately from the OHLCV tables, with `usd_rate`'s
-      dependency on that expiry ([[0167]]) explicitly addressed.
-- [ ] **The CDK matches the decision** — `eventbridge-stack.ts` no longer asserts
+      → DISABLED, 2026-10-07 (Decision section above).
+- [x] Per-table size and growth measured on prod, projected 12/24 months, against
+      measured free space. → ~11 / ~22 GiB against 752 GiB free.
+- [x] `oracle_prices` answered separately from the OHLCV tables, with `usd_rate`'s
+      dependency on that expiry ([[0167]]) explicitly addressed. → point 3.
+- [x] **The CDK matches the decision** — `eventbridge-stack.ts` no longer asserts
       a state that differs from the live rule, so the "check `describe-rule` after
       every deploy" workaround can be retired from the runbooks and from [[0182]].
-- [ ] If cleanup is retired: a replacement signal (disk-headroom alarm) exists
-      before the worker is removed, not after.
-- [ ] If cleanup is kept: the historical-write hazard is addressed, so a backfill
+      → `enabled: false` since 0204; held through 8 deploys. The runbook lines
+      are not removed, only made redundant.
+- [x] If cleanup is retired: a replacement signal (disk-headroom alarm) exists
+      before the worker is removed, not after. → `prices-production-ch-disk-free`;
+      the worker is not removed.
+- [x] (n/a, not kept) If cleanup is kept: the historical-write hazard is addressed, so a backfill
       or repair run can no longer have its output deleted as it lands.
 
-## ⛔ Until this is decided
+## ⛔ Until this is decided (superseded 2026-10-07: decided, DISABLED)
 
 **Cleanup stays DISABLED.** That is the deliberate current position, not an
 oversight — recorded here so the next session does not "fix" it. Do not enable

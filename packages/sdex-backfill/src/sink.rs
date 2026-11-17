@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use clickhouse::Row;
 use prices_ingest_core::canonical::AssetIdentity;
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, Registries, UnresolvedPool,
-    retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, DecimalsRow, OhlcvCandle, OhlcvWriter, Registries,
+    UnresolvedPool, retry_with_backoff,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -72,6 +72,11 @@ impl Sink {
         Ok(self.writer.load_assets().await?)
     }
 
+    /// Resolved Soroban token decimals into `registry` (task 0329).
+    pub async fn load_decimals(&self, registry: &mut AssetRegistry) -> Result<(), BackfillError> {
+        Ok(self.writer.load_decimals(registry).await?)
+    }
+
     // All `prices.*` writes below are idempotent (ReplacingMergeTree keyed by
     // `version`), so a retried INSERT can only replace, never duplicate. That
     // lets the sink retry every failure as transient (`|_| true`) — a bounded
@@ -113,6 +118,11 @@ impl Sink {
 
     pub async fn write_oracle(&self, samples: &[OracleSample]) -> Result<(), BackfillError> {
         self.retry_write(|| async { self.writer.write_oracle(samples).await })
+            .await
+    }
+
+    pub async fn write_decimals(&self, rows: &[DecimalsRow]) -> Result<(), BackfillError> {
+        self.retry_write(|| async { self.writer.write_decimals(rows).await })
             .await
     }
 

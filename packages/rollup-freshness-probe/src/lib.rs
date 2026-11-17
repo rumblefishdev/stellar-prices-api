@@ -75,6 +75,12 @@ pub mod zero_invariants;
 /// recent candles naming an id `assets` does not hold. See
 /// [`asset_id_uniqueness`] for why each refuses an empty read.
 pub mod asset_id_uniqueness;
+/// Stored candles that break the OHLC band or carry a price `<= 0`, on all seven
+/// tiers (task 0236). Asserted at the source, with zero tolerance, because task
+/// 0229's read-path clamp repairs a crossed candle on its way out of `/ohlcv` —
+/// so the API can no longer show one. See [`ohlc_band`] for the per-tier window
+/// and the refusal rule.
+pub mod ohlc_band;
 
 /// `current_prices` writer liveness (task 0243). Rides in the same invocation
 /// and publishes under the same [`METRIC_NAME`] with `Table = current_prices` —
