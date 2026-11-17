@@ -35,6 +35,14 @@ history:
       Phase 0 step 1 opened as PR #421. Read-only diff and AWS checks recorded
       under "Measured on 2026-11-17". Prices-Cicd was never deployed, and its
       OIDC provider would collide with the account's existing one.
+  - date: 2026-11-17
+    status: active
+    who: okarcz
+    note: >
+      Phase 0 done. #421 merged (7d9e9e70), Secrets deployed (13:05 UTC),
+      #418 merged to master (7a85607b, 13:37 UTC), master merged back into
+      develop (ebeaa31f, identical tree), deploy/production created at
+      7a85607b, unprotected until Phase 1.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -49,8 +57,9 @@ introduces a three-branch release flow, `develop` → `deploy/production` →
 
 ## Status: Active
 
-**Current state:** decisions made and plan written (2026-11-17), nothing
-implemented. Phase 0 starts with the alarm-flag PR.
+**Current state:** Phase 0 done on 2026-11-17: `master` is what production
+runs, `develop` holds the same tree, and `deploy/production` exists without
+protection. Next is Phase 1 (GitHub settings).
 
 ## Context
 
@@ -160,7 +169,16 @@ as separate PRs.
 
 ## Implementation Plan
 
-### Phase 0: `master` equal to production (manual)
+### Phase 0: `master` equal to production (manual) — done 2026-11-17
+
+| Step | Result |
+| --- | --- |
+| 1 | #421 merged into `develop` as `7d9e9e70`. The production synth before and after differs only in the three alarms (dashboard strip 90 → 87) |
+| 2 | Only the Secrets description differed. `make deploy-production-secrets` from `7d9e9e70` at 13:05 UTC changed it; the value is unchanged (SSM version 1 → 2) |
+| 3 | #418 merged into `master` as `7a85607b` (13:37 UTC), with a merge commit |
+| 4 | `master` merged into `develop` as `ebeaa31f`; `git diff origin/master origin/develop` is empty |
+| 5 | `deploy/production` created at `7a85607b`. No workflow runs on it yet |
+
 
 1. PR to `develop` (#421): a config flag in `infra/envs/production.json` that leaves
    out the three 0242 alarms (`ledger-processor-sac-unproven`,
@@ -215,8 +233,8 @@ as separate PRs.
 
 - [ ] `deploy/production` exists, is protected, and takes only approved PRs
 - [ ] A production deploy from any other commit is refused
-- [ ] `master` equals production after Phase 0: #418 merged, `make
-      diff-production` shows only Lambda code hashes
+- [x] `master` equals production after Phase 0: #418 merged, `make
+      diff-production` shows only Lambda code hashes (2026-11-17)
 - [ ] Every deploy records the commit it was deployed from (GitHub
       deployment), readable without access to the deployer's machine
 - [ ] After a successful deploy `master` points at the deployed commit and
