@@ -262,6 +262,22 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - Cold start: `loaded the is_sac contract set` with `sac_contracts` 4137, then `resumed cursor from ClickHouse` at 65318468. No WARN.
   - `SacUnprovenSkipped` and `SacCandidatesUnavailable`: no datapoints in the first hour.
   - Probe: `sac_contract_rows` **40**, not the runbook's baseline 36 (`sac_contract_scanned` 74, `be_sac_contracts` 4137). The old build ran until this deploy, so contract rows minted since the October baseline (BLNT above among them) count too. §5 counts its residual from today's number, not from 36.
+- **2026-11-17, the map (runbook §5a and §5b, read-only).** Run as `dev_read` (`readonly = 1`) on `ch.sorobanscan.com`, SELECT only. The §5a predicate and the §5b byte-level test were inlined, so no `bak_0242_sac_ids` table was created. Files: `~/heal-0242/{sac_ids,ac4_before,residual}.tsv` on the local machine.
+  - **40 SAC identities, all 40 with a classic** (`classic_id = 0`: 0). No PC9 case without a classic.
+  - AC4 "before": 215,193 identities, 215,193 ids, 0 collisions.
+  - **Residual: three months only, on every tier.** No other partition holds a row under a SAC id.
+
+    | month | `1m` rows (byte-identical / only copy) | only-copy trades `1m` | `1d` rows (identical / only copy) | only-copy trades `1d` |
+    | --- | --- | --- | --- | --- |
+    | 202404 | 1 (0 / 1) | 1 | 1 (0 / 1) | 1 |
+    | 202610 | 79 (12 / 67) | 75 | 35 (1 / 34) | 85 |
+    | 202611 | 18 (0 / 18) | 19 | 11 (0 / 11) | 19 |
+
+    `15m`, `1h`, `4h`, `1w` and `1M` hold the same three months (full table in `residual.tsv`).
+  - By asset (`1d`): Z aquarius 2024-04-18 (1 trade, U2 as expected); BURNMKR aquarius 2026-10-06 (2); USDE sushiswap 10-16 → 11-04 (50); SUSDE sushiswap 10-16 → 11-04 (38); BLNT comet 10-26 (10); USDE aquarius 10-29 → 11-03 (5); SPY aquarius 11-01 (1). **The last row is 2026-11-04: nothing under a SAC id since the 11-05 deploy.**
+  - BLNT's 10 trades are byte-identical on `1m` (the 0338 reprice) but not on the coarse tiers, which is why `1d` counts 10 more only-copy trades than `1m` in 202610.
+  - `dev_read` has a 30 s `max_execution_time`, so the whole-table `1m` query timed out. `1m` was re-run per month over the months `1d` shows (a `1m` row always rolls into `1d`); each took ≤ 2 s.
+  - **Consequence for the PC9 gate:** every only-copy row is from an AMM source, so the backfill is an `events-backfill` reprice (as in 0338), not phase 3, which also refuses the current month 202611. Ranges: 2026-10-01 → 2026-11-05, and 2024-04-18 for Z, or record Z's single trade as a loss.
 
 ## Acceptance Criteria
 
