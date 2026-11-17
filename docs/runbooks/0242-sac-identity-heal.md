@@ -426,6 +426,11 @@ that holds this PR creates them, so tell the team: no
 `make deploy-production-observability` from `develop` until §6. A deploy that
 cannot wait shows the red tile; its description says it is expected.
 
+**Since task 0343 the three alarms sit behind
+`opsAlarms.sacIdentityAlarmsEnabled`, `false` in `infra/envs/production.json`.**
+An Observability deploy before §6 no longer creates them, so it no longer has
+to wait; §6 sets the key `true`.
+
 Until §6 no alarm watches `SacUnprovenSkipped` or `SacCandidatesUnavailable`.
 Read both by hand after the cold start and at least daily until §6:
 
@@ -815,7 +820,8 @@ aws cloudwatch get-metric-statistics --namespace Prices/Rollup --metric-name Sac
 Every `Maximum` is `0`. Created with its actions on while the metric read 36,
 the alarm would fire at once.
 
-**Run.** Set `opsAlarms.sacContractIdentitiesActionsEnabled` to `true` in
+**Run.** Set both `opsAlarms.sacIdentityAlarmsEnabled` (task 0343: creates the
+three alarms) and `opsAlarms.sacContractIdentitiesActionsEnabled` to `true` in
 `infra/envs/production.json` through a PR; once merged:
 
 ```bash
@@ -835,9 +841,9 @@ All three print `True`, then `OK` (`INSUFFICIENT_DATA` until the first
 evaluation). The `INSUFFICIENT_DATA` → `OK` transitions send OK notifications:
 expected.
 
-**Rollback.** The same key back to `false` and the same deploy turns the
-actions off. Redeploying Observability from a commit without this PR removes
-all three alarms.
+**Rollback.** `sacContractIdentitiesActionsEnabled` back to `false` and the
+same deploy turns the actions off. `sacIdentityAlarmsEnabled` back to `false`
+removes all three alarms.
 
 ---
 
