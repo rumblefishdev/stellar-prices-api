@@ -505,6 +505,16 @@ export interface EnvironmentConfig {
      */
     readonly sacContractIdentitiesActionsEnabled: boolean;
     /**
+     * Whether the three task 0242 alarms exist at all (task 0343):
+     * `ledger-processor-sac-unproven`, `ledger-processor-sac-candidates-unavailable`
+     * and `sac-contract-identities`. `false` leaves them out of the
+     * Observability stack, so it can be deployed from the release commit
+     * before the 0242 cleanup; production would otherwise create
+     * `sac-contract-identities` in ALARM. Set `true` in the 0242 runbook's §6,
+     * together with `sacContractIdentitiesActionsEnabled`.
+     */
+    readonly sacIdentityAlarmsEnabled: boolean;
+    /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
@@ -1131,6 +1141,11 @@ export function validateConfig(config: EnvironmentConfig): void {
     if (typeof ops.sacContractIdentitiesActionsEnabled !== 'boolean') {
       errors.push(
         `opsAlarms.sacContractIdentitiesActionsEnabled must be a boolean, got: ${ops.sacContractIdentitiesActionsEnabled}`,
+      );
+    }
+    if (typeof ops.sacIdentityAlarmsEnabled !== 'boolean') {
+      errors.push(
+        `opsAlarms.sacIdentityAlarmsEnabled must be a boolean, got: ${ops.sacIdentityAlarmsEnabled}`,
       );
     }
     if (
