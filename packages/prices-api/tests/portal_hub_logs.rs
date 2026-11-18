@@ -148,10 +148,19 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
     assert_eq!(revealed.status, StatusCode::OK);
     let has_key = call("POST", ISSUE_PATH, "issue", "jti-issue-0004").await;
     assert_eq!(has_key.json(), json!({ "outcome": "has_key" }));
+    // A duplicate under the account's name that refuses to be disabled, made
+    // after the key's creation so the issued key stays the current one: the
+    // revoke is partial, and its line must say so.
+    mock.with(|s| {
+        let stubborn = s.seed(&format!("discord-{USER_ID}-key"), now_secs() + 1_000);
+        s.fail_disable_of = vec![stubborn];
+    });
     let revoked = call("POST", REVOKE_PATH, "revoke", "jti-revoke-0005").await;
     assert_eq!(revoked.status, StatusCode::OK);
-    let capped = call("POST", ISSUE_PATH, "issue", "jti-issue-0006").await;
-    assert_eq!(capped.json()["outcome"], "capped");
+    assert_eq!(revoked.json()["partial"], true);
+    // The duplicate still answers, so the account still has a key.
+    let still_has = call("POST", ISSUE_PATH, "issue", "jti-issue-0006").await;
+    assert_eq!(still_has.json()["outcome"], "has_key");
     let wrong_act = call("POST", REVOKE_PATH, "read", "jti-wrong-act-0007").await;
     assert_eq!(wrong_act.status, StatusCode::FORBIDDEN);
     mock.with(|s| s.fail_list = true);
@@ -203,6 +212,14 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
             "no `{line}` line with {jti} and {with_id}: {text}"
         );
     }
+
+    // The revoke line says it was partial, not only that it revoked.
+    assert!(
+        text.lines().any(|l| l.contains("jti-revoke-0005")
+            && l.contains("hub revoked an API key")
+            && l.contains("partial=true")),
+        "the partial revoke's line does not say so: {text}"
+    );
 
     let value = revealed.json()["value"].as_str().unwrap().to_string();
     assert!(!value.is_empty());

@@ -701,7 +701,7 @@ pub(crate) struct RevokeResponse {
     /// Omitted from the JSON in the ordinary case, so the common answer keeps
     /// the shape it had.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    partial: bool,
+    pub(crate) partial: bool,
 }
 
 /// `POST /key/rework` — revoke the caller's key now, issue nothing

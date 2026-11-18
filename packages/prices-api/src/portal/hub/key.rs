@@ -137,11 +137,14 @@ pub(crate) async fn revoke(State(state): State<HubState>, headers: HeaderMap) ->
         Ok(RevokeOutcome::Revoked { answer, key_id }) => {
             // Whatever is cached describes a key that is now off.
             state.usage.cache_handle().invalidate(&caller.discord_id);
+            // `partial`: a duplicate may still answer; `revoke_for` logs that
+            // without the call's `jti`, so this line carries it.
             tracing::info!(
                 jti,
                 act,
                 key_id = %key_id,
                 outcome = "revoked",
+                partial = answer.partial,
                 "hub revoked an API key"
             );
             Json(answer).into_response()
