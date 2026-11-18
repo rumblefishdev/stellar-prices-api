@@ -394,21 +394,7 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
         }
         // Elapsing is a `503` rather than a Lambda-killed invocation with no
         // response at all.
-        Err(KeyError::OutOfTime) => no_store(errors::service_unavailable(
-            KEY_UNAVAILABLE,
-            "the API key service is taking too long to answer; try again",
-        )),
-        Err(KeyError::Unavailable) => no_store(
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(errors::ErrorEnvelope {
-                    code: KEY_UNAVAILABLE,
-                    message: "could not reach the API key service; try again".into(),
-                    details: None,
-                }),
-            )
-                .into_response(),
-        ),
+        Err(error) => key_unavailable(error),
         // The owner killed this key. There is nothing to reveal — the value is
         // a leaked credential by the owner's own statement — and nothing to
         // issue until the period rolls; the page renders the date rather than
@@ -416,23 +402,7 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
         Ok(KeyState::Revoked {
             revoked_at,
             next_eligible_at: Some(next_eligible_at),
-        }) => no_store(
-            (
-                StatusCode::NOT_FOUND,
-                Json(errors::ErrorEnvelope {
-                    code: KEY_REVOKED,
-                    message: format!(
-                        "your API key was revoked; a new one can be issued from \
-                         {next_eligible_at}"
-                    ),
-                    details: Some(serde_json::json!({
-                        "next_eligible_at": next_eligible_at,
-                        "revoked_at": revoked_at.map(rfc3339),
-                    })),
-                }),
-            )
-                .into_response(),
-        ),
+        }) => key_revoked_response(revoked_at, &next_eligible_at),
         // Revoked in an earlier period: a new key is due, and the issue
         // round-trip will create it, attach it to this key's plan and only then
         // delete this one (task 0311). Until that press the honest answer is
@@ -474,9 +444,66 @@ pub(crate) enum KeyError {
     OutOfTime,
 }
 
+/// The portal's answer for a key service ([`key_state`], [`revoke_for`]) that
+/// gave none because of the infrastructure: `503` when the deadline elapsed —
+/// rather than a Lambda-killed invocation with no response at all — and `502`
+/// when the control plane failed. Both `key_unavailable`, `no-store`, and
+/// worded for the visitor: no error text, no stack.
+///
+/// The reveal, the revoke and the hub contract's routes (task 0348) all answer
+/// these two the same way, from here. [`KeyError::NotASnowflake`] is not one
+/// of them: its words depend on where the id came from, so every caller
+/// matches it first. Were one to arrive here it would be ours and not the
+/// caller's, with nothing asked of the control plane, and `502` says that.
+pub(crate) fn key_unavailable(error: KeyError) -> Response {
+    match error {
+        KeyError::OutOfTime => no_store(errors::service_unavailable(
+            KEY_UNAVAILABLE,
+            "the API key service is taking too long to answer; try again",
+        )),
+        KeyError::Unavailable | KeyError::NotASnowflake => no_store(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(errors::ErrorEnvelope {
+                    code: KEY_UNAVAILABLE,
+                    message: "could not reach the API key service; try again".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        ),
+    }
+}
+
+/// `404 key_revoked`, `no-store`: the owner revoked the key and a new one is
+/// refused until `next_eligible_at` (RFC 3339). The envelope's `details`
+/// carries that instant and `revoked_at` (`null` when undated) — the reveal's
+/// answer since task 0191, and the hub contract's reveal's (task 0348).
+pub(crate) fn key_revoked_response(revoked_at: Option<u64>, next_eligible_at: &str) -> Response {
+    no_store(
+        (
+            StatusCode::NOT_FOUND,
+            Json(errors::ErrorEnvelope {
+                code: KEY_REVOKED,
+                message: format!(
+                    "your API key was revoked; a new one can be issued from {next_eligible_at}"
+                ),
+                details: Some(serde_json::json!({
+                    "next_eligible_at": next_eligible_at,
+                    "revoked_at": revoked_at.map(rfc3339),
+                })),
+            }),
+        )
+            .into_response(),
+    )
+}
+
 /// The state of an account's key, as [`key_state`] read it.
 ///
-/// `Debug` is safe: [`KeyValue`]'s prints `<redacted>`.
+/// Its `Debug` hides the value ([`KeyValue`]'s prints `<redacted>`) but not
+/// the account: [`KeyRecord`]'s prints the key's name, `discord-<id>-key`. So
+/// a state, like a record, is never logged with `?` — a log line names a key
+/// by `key_id`.
 #[derive(Debug)]
 pub(crate) enum KeyState {
     /// Nothing under the name to reveal — never issued, deleted by hand, or
@@ -586,8 +613,9 @@ fn is_same_origin_write(headers: &HeaderMap, web_origin: Option<&str>) -> bool {
     marker && fetch_site_ok
 }
 
-/// `404 no_key`, shared by the reveal's two keyless answers.
-fn no_key_response() -> Response {
+/// `404 no_key`, shared by the reveal's two keyless answers — and the hub
+/// contract's reveal's (task 0348).
+pub(crate) fn no_key_response() -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(errors::ErrorEnvelope {
@@ -706,21 +734,7 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
                 "sign in with Discord before asking to replace your API key",
             ))
         }
-        Err(KeyError::OutOfTime) => no_store(errors::service_unavailable(
-            KEY_UNAVAILABLE,
-            "the API key service is taking too long to answer; try again",
-        )),
-        Err(KeyError::Unavailable) => no_store(
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(errors::ErrorEnvelope {
-                    code: KEY_UNAVAILABLE,
-                    message: "could not reach the API key service; try again".into(),
-                    details: None,
-                }),
-            )
-                .into_response(),
-        ),
+        Err(error) => key_unavailable(error),
         Ok(RevokeOutcome::Revoked(answer)) => {
             // The cached usage describes a key that is now off. Its counter is
             // preserved (0180 item 8), so the numbers would still be right —
@@ -1580,8 +1594,9 @@ pub(crate) fn no_store(mut response: Response) -> Response {
 }
 
 /// `503` for a deployment that reached these routes with nothing wired, or
-/// whose sources failed to load for this request.
-fn unconfigured() -> Response {
+/// whose sources failed to load for this request. The hub contract's routes
+/// answer the same (task 0348).
+pub(crate) fn unconfigured() -> Response {
     no_store(errors::service_unavailable(
         KEYS_UNCONFIGURED,
         "API key issuance is not configured on this deployment",
@@ -1653,6 +1668,62 @@ mod tests {
             &header_map(&[("sec-fetch-site", "same-site"), ("origin", OURS)]),
             Some(OURS)
         ));
+    }
+
+    async fn status_and_body(response: Response) -> (StatusCode, String, serde_json::Value) {
+        let status = response.status();
+        let cache = response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, cache, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// The two infrastructure arms every key route answers alike (task
+    /// 0348): `503` for the deadline, `502` for the control plane, both
+    /// `key_unavailable` and `no-store`, with only a code and words.
+    #[tokio::test]
+    async fn a_key_service_failure_is_answered_from_one_helper() {
+        for (error, status) in [
+            (KeyError::OutOfTime, StatusCode::SERVICE_UNAVAILABLE),
+            (KeyError::Unavailable, StatusCode::BAD_GATEWAY),
+            (KeyError::NotASnowflake, StatusCode::BAD_GATEWAY),
+        ] {
+            let (got, cache, body) = status_and_body(key_unavailable(error)).await;
+            assert_eq!(got, status, "{error:?}");
+            assert_eq!(cache, "no-store", "{error:?}");
+            assert_eq!(body["code"], KEY_UNAVAILABLE, "{error:?}");
+            let fields: Vec<&String> = body.as_object().unwrap().keys().collect();
+            assert_eq!(fields, ["code", "message"], "{error:?}");
+        }
+    }
+
+    /// `key_revoked` carries both instants in `details`, an undated
+    /// revocation as `null`.
+    #[tokio::test]
+    async fn a_revoked_key_is_answered_with_both_instants() {
+        let (status, cache, body) = status_and_body(key_revoked_response(
+            Some(1_790_000_000),
+            "2026-12-01T00:00:00Z",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(cache, "no-store");
+        assert_eq!(body["code"], KEY_REVOKED);
+        assert_eq!(
+            body["details"],
+            serde_json::json!({
+                "next_eligible_at": "2026-12-01T00:00:00Z",
+                "revoked_at": rfc3339(1_790_000_000),
+            })
+        );
+        let (_, _, undated) =
+            status_and_body(key_revoked_response(None, "2026-12-01T00:00:00Z")).await;
+        assert_eq!(undated["details"]["revoked_at"], serde_json::Value::Null);
     }
 
     /// Both verbs, one path — and the path is under the portal prefix, so

@@ -668,7 +668,7 @@ impl Gateway {
     /// a separate `TagResource` could fail and leave an untagged key, which is
     /// the one thing tagging exists to prevent.
     ///
-    /// `issued_by` is the `IssuedBy` tag's value — [`ISSUED_BY_PORTAL`] for
+    /// `issued_by` is the `IssuedBy` tag's value — `ISSUED_BY_PORTAL` for
     /// the portal's own round-trip.
     pub async fn create(
         &self,
