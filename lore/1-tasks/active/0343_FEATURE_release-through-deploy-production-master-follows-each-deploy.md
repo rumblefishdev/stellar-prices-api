@@ -43,6 +43,14 @@ history:
       #418 merged to master (7a85607b, 13:37 UTC), master merged back into
       develop (ebeaa31f, identical tree), deploy/production created at
       7a85607b, unprotected until Phase 1.
+  - date: 2026-11-18
+    status: active
+    who: okarcz
+    note: >
+      Planned: Phase 1 goes in while 0242's backfill runs. 0242's alarms release is the
+      first release through develop → deploy/production → master, with Phase 1
+      only: a manual deploy from deploy/production's tip and master moved
+      through the admin bypass.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -202,6 +210,14 @@ as separate PRs.
    no bypass, no force push or deletion.
 8. Ruleset on `master`: updates blocked, fast-forward only, no deletion.
    Bypass: GitHub Actions and repository admins.
+
+**First test of the flow: the [[0242]] alarms release (runbook 0242 §6).** It
+runs with Phase 1 only (decided 2026-11-18): the flag PR to `develop`, a
+release PR to `deploy/production`, `make deploy-production-observability` by
+hand from its tip, then `master` fast-forwarded and tagged through the admin
+bypass. It tests the branch rules, not the `production` environment approval
+or the `promote` job; those get their first test on the first release after
+Phase 2.
 
 ### Phase 2: the deploy workflow
 
