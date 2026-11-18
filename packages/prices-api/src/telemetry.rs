@@ -27,6 +27,12 @@
 //! person the key belongs to. The same applies to a local `serve` run, which
 //! holds production credentials and prints to a terminal with scrollback.
 //!
+//! The same holds for the account behind a key (task 0349). Every key lookup is
+//! `GetApiKeys?name=discord-<id>-key`, and `aws_sigv4` prints each request it
+//! signs, query string included, at `trace`: a trace log of the portal would
+//! say whose key each call was about. So the guard holds personal data as well
+//! as credentials; [`CREDENTIAL_BEARING_TARGETS`] states the rule.
+//!
 //! # What the guard does, and why it is an allowlist
 //!
 //! [`filter_from`] keeps only the directives it **recognises as safe** — a bare
@@ -67,18 +73,34 @@
 
 use tracing_subscriber::EnvFilter;
 
-/// Crates whose `debug`/`trace` output can carry an API key value.
+/// Crates whose `debug`/`trace` output can carry a credential or an account's
+/// personal data.
 ///
-/// The membership rule is narrow on purpose: a crate belongs here when it can
-/// print a **decoded control-plane response** — the SDK's own orchestrator, its
-/// runtime API, and the generated API Gateway client. `hyper` and `rustls` are
-/// deliberately absent; they move bytes and log byte counts, and widening this
-/// list on a hunch would silence diagnostics that have nothing to do with
-/// credentials.
+/// The membership rule: a crate belongs here when its `debug`/`trace` output
+/// can carry an API key value or another credential, **or personal data**. A
+/// Discord id is personal data, since it is the account (ADR 0010 §1), and
+/// every key lookup names one: `GetApiKeys?name=discord-<id>-key`. Each member
+/// is here for a line it was seen to print, not on a hunch:
+///
+/// - `aws_smithy_runtime`, `aws_smithy_runtime_api`, `aws_sdk_apigateway` print
+///   a **decoded control-plane response**, key value included: the SDK's own
+///   orchestrator, its runtime API, and the generated API Gateway client.
+/// - `aws_sigv4` prints every request it signs at `trace`: the URI with its
+///   query string, then the canonical request (task 0349). It does not print
+///   the role's session token: 1.4.5 writes `x-amz-security-token` as
+///   `** redacted (length=N) **` (`tests/telemetry_sigv4.rs`), where 1.4.2
+///   printed the canonical request whole.
+///
+/// Checked and left out (task 0349): `hyper_util` logs a connection's scheme
+/// and host, never its path or query; `hyper` 1 logs nothing unless built with
+/// `hyper_unstable_tracing`; `h2` leaves a frame's headers and data out of its
+/// `Debug`; `rustls` logs the handshake. They move bytes and log hosts and byte
+/// counts, and holding them would silence diagnostics that name no one.
 pub const CREDENTIAL_BEARING_TARGETS: &[&str] = &[
     "aws_smithy_runtime",
     "aws_smithy_runtime_api",
     "aws_sdk_apigateway",
+    "aws_sigv4",
 ];
 
 /// The ceiling those crates are held to, whatever `RUST_LOG` says.
@@ -275,6 +297,7 @@ mod tests {
             "aws_smithy=trace",
             "aws=trace",
             "aws_sdk_apigateway",
+            "aws_sigv4=trace",
             "hyper=debug",
             "[try_op]=trace",
             "aws_smithy[try_op]=trace",
