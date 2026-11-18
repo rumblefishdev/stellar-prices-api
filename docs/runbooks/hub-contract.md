@@ -70,18 +70,40 @@ this one secret and nothing else under `sorobanscan-hub/`.
 Prices keeps the value it read until its execution environment is recycled; the
 hub picks up a new `current` within 5 minutes. So a new key must be accepted by
 every Prices environment **before** the hub can sign with it. Four steps, each
-safe to stop after:
+safe to stop after. Each step builds the new JSON from the secret as stored,
+never from shell variables, so a step can be run in a new shell. Run each step
+once: step 3 run twice swaps the keys back.
+
+Set these once per shell. They hold no key. A step run without them stops:
+
+```bash
+SECRET_ID=sorobanscan-hub/production/prices-token
+# true only for {"current": K} or {"current": K, "previous": K}, K being
+# standard padded base64 of 32 bytes (what `openssl rand -base64 32` prints)
+KEYS_OK='def ok: type == "string" and test("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$");
+  (keys - ["current", "previous"] == []) and (.current | ok)
+  and (if has("previous") then .previous | ok else true end)'
+```
+
+Every step below does the same three things in a subshell: reads the stored
+secret, builds the new JSON from it, and checks it with `KEYS_OK` before the
+put. If the check fails, the step prints nothing, writes nothing and stops
+(`jq -e` fails, `pipefail` carries that on). Nothing is put, so the secret
+stays as it was.
 
 1. **Add the new key as `previous`.** The hub keeps signing with the old one.
 
    ```bash
-   OLD=$(aws secretsmanager get-secret-value --region eu-central-1 \
-       --secret-id sorobanscan-hub/production/prices-token \
-       --query SecretString --output text | jq -r .current)
-   NEW=$(openssl rand -base64 32)
-   aws secretsmanager put-secret-value --region eu-central-1 \
-       --secret-id sorobanscan-hub/production/prices-token \
-       --secret-string "$(jq -n --arg c "$OLD" --arg p "$NEW" '{current:$c, previous:$p}')"
+   (
+     set -euo pipefail
+     NEW=$(openssl rand -base64 32)
+     JSON=$(aws secretsmanager get-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --query SecretString --output text \
+       | jq -ce --arg n "$NEW" '{current} + {previous: $n}' \
+       | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
+     aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string "$JSON"
+   )
    ```
 
 2. **Recycle Prices' api-handler**, so every environment reads the pair:
@@ -98,29 +120,57 @@ safe to stop after:
 
 3. **Swap them: the new key becomes `current`.** Within 5 minutes the hub signs
    with it. Every Prices environment accepts it: the ones recycled in step 2
-   hold it as `previous`, newer ones as `current`.
+   hold it as `previous`, newer ones as `current`. With no `previous` in the
+   stored secret the check fails and nothing is put.
 
    ```bash
-   aws secretsmanager put-secret-value --region eu-central-1 \
-       --secret-id sorobanscan-hub/production/prices-token \
-       --secret-string "$(jq -n --arg c "$NEW" --arg p "$OLD" '{current:$c, previous:$p}')"
+   (
+     set -euo pipefail
+     JSON=$(aws secretsmanager get-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --query SecretString --output text \
+       | jq -ce '{current: .previous, previous: .current}' \
+       | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
+     aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string "$JSON"
+   )
    ```
 
-4. **After at least 5 minutes, drop the old key**, and recycle again (step 2)
-   so no Prices environment still accepts it:
+4. **After at least 10 minutes, drop the old key**, and recycle again (step 2)
+   so no Prices environment still accepts it. The hub's cache is 5 minutes and
+   a read that started just before step 3 can land after it, so 5 leaves no
+   margin. While the hub still signs with the old key, dropping it in Prices
+   refuses every hub call.
 
    ```bash
-   aws secretsmanager put-secret-value --region eu-central-1 \
-       --secret-id sorobanscan-hub/production/prices-token \
-       --secret-string "$(jq -n --arg c "$NEW" '{current:$c}')"
-   unset OLD NEW
+   (
+     set -euo pipefail
+     JSON=$(aws secretsmanager get-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --query SecretString --output text \
+       | jq -ce '{current}' \
+       | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
+     aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string "$JSON"
+   )
    ```
 
-`put-secret-value` replaces the whole JSON. Never `echo` either value. If a
-step fails, the hub's Prices tab shows Prices' refusal as a `502` (the hub
-turns Prices' `401`/`403` into one, since it is a fault between the two
-backends), and Prices logs `hub call refused: its token did not verify`: put
-back the previous version (`AWSPREVIOUS`) and recycle.
+`put-secret-value` replaces the whole JSON. Never `echo` a key. If a step
+fails, the hub's Prices tab shows Prices' refusal as a `502` (the hub turns
+Prices' `401`/`403` into one, since it is a fault between the two backends),
+and Prices logs `hub call refused: its token did not verify`. Put back the
+previous version and recycle (step 2). Find the two versions, then move
+`AWSCURRENT` back:
+
+```bash
+aws secretsmanager list-secret-version-ids --region eu-central-1 \
+    --secret-id "$SECRET_ID" \
+    --query 'Versions[].[VersionId, join(`,`, VersionStages), CreatedDate]' \
+    --output text
+# the line with AWSPREVIOUS is the good one (PREV_ID), the one with
+# AWSCURRENT is the bad one (BAD_ID)
+aws secretsmanager update-secret-version-stage --region eu-central-1 \
+    --secret-id "$SECRET_ID" --version-stage AWSCURRENT \
+    --move-to-version-id "$PREV_ID" --remove-from-version-id "$BAD_ID"
+```
 
 **Skipping steps 1–2** (writing `{current: NEW, previous: OLD}` and recycling
 afterwards) leaves a window, from the hub's next read to the recycle, in which
