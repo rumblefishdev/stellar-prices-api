@@ -128,6 +128,37 @@ export function portalOauthSecretName(envName: string): string {
 }
 
 /**
+ * Secrets Manager secret name holding the key the API hub's tokens are signed
+ * with — the value `PORTAL_HUB_SECRET_NAME` resolves to at Lambda runtime
+ * (see `packages/prices-api/src/portal/hub/secret.rs`, task 0348; the shared
+ * sign-in spec's decision 12 in `rumblefishdev/sorobanscan-api-portal`).
+ *
+ * ```json
+ * { "current": "<base64 of 32 bytes>", "previous": "<base64 of 32 bytes>" }
+ * ```
+ *
+ * `previous` is optional. The hub's backend signs with `current`; Prices
+ * accepts a token under either, which is how the value is changed without a
+ * gap (`docs/runbooks/hub-contract.md`).
+ *
+ * **Not under `prices/`**: the secret is the hub's as much as ours. The hub's
+ * backend reads it too, under the same name, so the name is fixed by the
+ * hub's spec and README rather than by this repo's conventions; only the
+ * environment varies.
+ *
+ * **Created out-of-band by akot, never by CDK**, as {@link portalOauthSecretName}
+ * is, with one more reason: the value has a reader this stack does not own,
+ * and a CloudFormation-managed secret would be restored by our next deploy
+ * under the hub's feet.
+ *
+ *   hubTokenSecretName('production')
+ *     === 'sorobanscan-hub/production/prices-token'
+ */
+export function hubTokenSecretName(envName: string): string {
+  return `sorobanscan-hub/${envName}/prices-token`;
+}
+
+/**
  * Build the wildcard-suffixed Secrets Manager ARN for a secret name.
  *
  * AWS Secrets Manager appends a random 6-char suffix to every secret
