@@ -109,7 +109,7 @@ use crate::common::{cache_control, errors};
 use super::auth::secret::OauthSecret;
 use super::keys::cap::{self, Cap};
 use super::keys::gateway::{Gateway, GatewayError, PlanInfo, Tier};
-use super::keys::naming::{current_key, exact_matches, key_name, revocation_instant};
+use super::keys::naming::{KeyRecord, current_key, exact_matches, key_name, revocation_instant};
 use super::period::Period;
 use super::sources::{Loaded, PortalSources};
 
@@ -613,6 +613,21 @@ impl From<CachedAnswer> for UsageOutcome {
     }
 }
 
+/// What the cache held for an account when its lookup began (task 0348) —
+/// [`UsageState::begin`]'s answer, which [`UsageState::answer_from_listing`]
+/// finishes.
+///
+/// Taken BEFORE the lookup's listing, which is the point of it: `epoch` is
+/// the guard [`CacheInner`] documents, and it only guards a listing made after
+/// it was read. A caller that lists first and asks the cache second would
+/// store a "no key" a concurrent issue had already made false.
+pub(crate) struct UsageStart {
+    /// A fresh entry (inside the TTL, for the current period), if any.
+    fresh: Option<CachedAnswer>,
+    epoch: Option<u64>,
+    today: NaiveDate,
+}
+
 impl UsageState {
     /// The account's usage, as the route answers it: consult the cache, look
     /// the key up and ask AWS under the deadline, fall back to the last good
@@ -627,6 +642,22 @@ impl UsageState {
             return UsageOutcome::NotASnowflake;
         };
 
+        let start = self.begin(discord_id);
+
+        // Fresh cache hit: no control-plane call of any kind. This is the
+        // "repeated dashboard loads do not produce one GetUsage call each"
+        // acceptance criterion, in one branch.
+        if let Some(answer) = start.fresh {
+            return answer.into();
+        }
+
+        self.finish(discord_id, start, self.deadline, fetch(gateway, &name))
+            .await
+    }
+
+    /// Begin an account's lookup: what the cache holds now, and the epoch
+    /// that guards what the lookup will store (see [`UsageStart`]).
+    pub(crate) fn begin(&self, discord_id: &str) -> UsageStart {
         // Computed once per request and used to validate cache entries: an
         // entry answering for a different period_start is last period's
         // answer wearing this period's label, and the minute after a boundary
@@ -634,20 +665,75 @@ impl UsageState {
         // entry is checked against its OWN rule (month or day) — see
         // `answers_for_period`.
         let today = Utc::now().date_naive();
-
-        // Fresh cache hit: no control-plane call of any kind. This is the
-        // "repeated dashboard loads do not produce one GetUsage call each"
-        // acceptance criterion, in one branch.
-        if let Some(entry) = cached(self, discord_id, self.ttl, today) {
-            return entry.answer.into();
+        UsageStart {
+            fresh: cached(self, discord_id, self.ttl, today).map(|entry| entry.answer),
+            // Read BEFORE the lookup starts: if a concurrent key issue bumps
+            // it while the fetch is in flight, the fetch's "no key" snapshot
+            // is stale and must not be stored. See `CacheInner`.
+            epoch: epoch_of(self, discord_id),
+            today,
         }
+    }
 
-        // Read BEFORE the lookup starts: if a concurrent key issue bumps it
-        // while the fetch is in flight, the fetch's "no key" snapshot is stale
-        // and must not be stored. See `CacheInner`.
-        let epoch = epoch_of(self, discord_id);
+    /// [`Self::answer_for`] for a caller that has already listed the
+    /// account's records (task 0348's `GET account`), begun with
+    /// [`Self::begin`] before that listing. The listing is not made again:
+    /// one `GetApiKeys` serves the key's state and its usage.
+    ///
+    /// A fresh cached answer is served only when it agrees with the listing —
+    /// a "no key" beside a listing with no usable key, a usage answer beside
+    /// one with a key — so the two halves of one answer never contradict each
+    /// other, whatever another execution environment did inside this one's
+    /// TTL. Otherwise the key's plan and usage are read under `deadline`,
+    /// with [`Self::answer_for`]'s fallbacks.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the hub contract's GET account is its caller")
+    )]
+    pub(crate) async fn answer_from_listing(
+        &self,
+        gateway: &Gateway,
+        discord_id: &str,
+        start: UsageStart,
+        candidates: &[KeyRecord],
+        deadline: Duration,
+    ) -> UsageOutcome {
+        let UsageStart {
+            fresh,
+            epoch,
+            today,
+        } = start;
+        if let Some(answer) = fresh
+            && agrees_with_listing(&answer, candidates)
+        {
+            return answer.into();
+        }
+        let start = UsageStart {
+            fresh: None,
+            epoch,
+            today,
+        };
+        self.finish(
+            discord_id,
+            start,
+            deadline,
+            fetch_listed(gateway, candidates),
+        )
+        .await
+    }
 
-        let fetched = match tokio::time::timeout(self.deadline, fetch(gateway, &name)).await {
+    /// The lookup's second half: `fetching` under `deadline`, the last good
+    /// answer when AWS throttles or the deadline elapses, and what was fetched
+    /// remembered under the epoch `start` read.
+    async fn finish(
+        &self,
+        discord_id: &str,
+        start: UsageStart,
+        deadline: Duration,
+        fetching: impl Future<Output = Result<CachedAnswer, GatewayError>>,
+    ) -> UsageOutcome {
+        let UsageStart { epoch, today, .. } = start;
+        let fetched = match tokio::time::timeout(deadline, fetching).await {
             Ok(fetched) => fetched,
             Err(_elapsed) => {
                 // A throttled control plane often shows up HERE, not as
@@ -660,14 +746,14 @@ impl UsageState {
                 // beats the error page.
                 if let Some(entry) = cached(self, discord_id, STALE_KEEP, today) {
                     tracing::warn!(
-                        deadline_secs = self.deadline.as_secs_f32(),
+                        deadline_secs = deadline.as_secs_f32(),
                         "portal usage lookup ran out of time; serving the cached answer"
                     );
                     remember(self, discord_id, entry.answer.clone(), epoch);
                     return entry.answer.into();
                 }
                 tracing::error!(
-                    deadline_secs = self.deadline.as_secs_f32(),
+                    deadline_secs = deadline.as_secs_f32(),
                     "portal usage lookup ran out of time and nothing is cached"
                 );
                 return UsageOutcome::OutOfTime;
@@ -741,23 +827,52 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
     // The same list → exact filter → rank as the reveal, so the usage shown is
     // the usage of the key the reveal hands out — and nothing more: no create,
     // no attach, no delete. See the module docs.
-    // The same selector as the reveal and the revoke (`current_key`): the
-    // earliest LIVE key, else the most recently revoked record. A live key beside a
-    // revoked one must show its own counter, not the dead key's.
     let candidates = exact_matches(gateway.list_named(name).await?, name);
-    let Some(winner) = current_key(&candidates).cloned() else {
+    fetch_listed(gateway, &candidates).await
+}
+
+/// The key whose usage an account's listing shows, or `None` for "no key".
+///
+/// The same selector as the reveal and the revoke (`current_key`): the
+/// earliest LIVE key, else the most recently revoked record. A live key beside
+/// a revoked one must show its own counter, not the dead key's.
+///
+/// A revoked key's counter is preserved (0180 item 8) and still describes
+/// this period, so it is shown while the revocation's period lasts — the
+/// reveal says "revoked" beside it. Once the period has rolled the reveal
+/// says "no key" and offers the issue; the usage must agree and say the
+/// same, rather than keep reporting a record the next issue will delete.
+fn usage_key(candidates: &[KeyRecord]) -> Option<&KeyRecord> {
+    let winner = current_key(candidates)?;
+    if !winner.enabled
+        && let Cap::Allowed = cap::decide(revocation_instant(candidates), &Period::now())
+    {
+        return None;
+    }
+    Some(winner)
+}
+
+/// Whether a cached answer can stand beside a listing just made (task 0348):
+/// "no key" only beside a listing with no key to show usage for, a usage
+/// answer only beside one with such a key. See
+/// [`UsageState::answer_from_listing`].
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the hub contract's GET account is its caller")
+)]
+fn agrees_with_listing(answer: &CachedAnswer, candidates: &[KeyRecord]) -> bool {
+    matches!(answer, CachedAnswer::NoKey) == usage_key(candidates).is_none()
+}
+
+/// [`fetch`] from an account's records already listed and narrowed to its
+/// exact name: the key's plan and its usage on it.
+async fn fetch_listed(
+    gateway: &Gateway,
+    candidates: &[KeyRecord],
+) -> Result<CachedAnswer, GatewayError> {
+    let Some(winner) = usage_key(candidates) else {
         return Ok(CachedAnswer::NoKey);
     };
-    // A revoked key's counter is preserved (0180 item 8) and still describes
-    // this period, so it is shown while the revocation's period lasts — the
-    // reveal says "revoked" beside it. Once the period has rolled the reveal
-    // says "no key" and offers the issue; the usage must agree and say the
-    // same, rather than keep reporting a record the next issue will delete.
-    if !winner.enabled
-        && let Cap::Allowed = cap::decide(revocation_instant(&candidates), &Period::now())
-    {
-        return Ok(CachedAnswer::NoKey);
-    }
 
     // Which plan holds the key on OUR API stage (task 0311). A revoked key is
     // still on its plan (a disable does not detach it), so this also answers
@@ -1369,6 +1484,152 @@ mod tests {
         let outcome = state.answer_for(&gateway, harness::USER_ID).await;
 
         assert!(matches!(outcome, UsageOutcome::Failed));
+    }
+
+    // -----------------------------------------------------------------------
+    // `UsageState::answer_from_listing` (task 0348): the hub's `GET account`
+    // lists once and its usage is answered from that listing.
+    // -----------------------------------------------------------------------
+
+    /// The account's records as the hub's account route lists them.
+    async fn listing(gateway: &Gateway) -> Vec<KeyRecord> {
+        let name = our_key_name();
+        exact_matches(gateway.list_named(&name).await.unwrap(), &name)
+    }
+
+    /// A key's usage from the caller's listing: its plan and its counter
+    /// are read, the listing is not made again, and the answer is cached
+    /// for `answer_for` like any other.
+    #[tokio::test]
+    async fn answer_from_listing_reads_the_usage_without_listing_again() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| {
+            let id = s.seed_on_free_plan(&our_key_name(), harness::now_secs());
+            s.usage.insert(id, vec![vec![120, 99_880]]);
+        });
+        let state = UsageState::new(None, None);
+
+        let start = state.begin(harness::USER_ID);
+        let records = listing(&gateway).await;
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+
+        let body = body_of(&outcome);
+        assert_eq!(body["used"], 120);
+        assert_eq!(body["limit"], 100_000);
+        assert_eq!(
+            mock.with(|s| (s.list_calls, s.plans_calls, s.usage_calls)),
+            (1, 1, 1),
+            "one listing, the caller's"
+        );
+        assert_eq!(
+            body_of(&state.answer_for(&gateway, harness::USER_ID).await),
+            body
+        );
+        assert_eq!(mock.with(|s| s.list_calls), 1, "answer_for read the cache");
+    }
+
+    /// No key in the listing: "no key", without a call.
+    #[tokio::test]
+    async fn answer_from_listing_without_a_key_is_no_key_without_a_call() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+
+        let start = state.begin(harness::USER_ID);
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &[], USAGE_DEADLINE)
+            .await;
+
+        assert!(matches!(outcome, UsageOutcome::NoKey));
+        assert_eq!(mock.with(|s| (s.plans_calls, s.usage_calls)), (0, 0));
+    }
+
+    /// A fresh cached answer that agrees with the listing is served without
+    /// a call; one that the listing contradicts — a "no key" beside a key
+    /// another execution environment issued — is not.
+    #[tokio::test]
+    async fn answer_from_listing_serves_the_cache_only_where_the_listing_agrees() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+
+        // "No key" cached, then a key appears.
+        assert!(matches!(
+            state.answer_for(&gateway, harness::USER_ID).await,
+            UsageOutcome::NoKey
+        ));
+        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+        let records = listing(&gateway).await;
+        let start = state.begin(harness::USER_ID);
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+        assert_eq!(body_of(&outcome)["plan"]["tier"], "free");
+        assert_eq!(
+            mock.with(|s| s.plans_calls),
+            1,
+            "the stale 'no key' was read past"
+        );
+
+        // That answer is cached and agrees with the same listing: no call.
+        let start = state.begin(harness::USER_ID);
+        let again = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+        assert_eq!(body_of(&again), body_of(&outcome));
+        assert_eq!(mock.with(|s| (s.plans_calls, s.usage_calls)), (1, 1));
+
+        // A listing with no key contradicts the cached usage: "no key".
+        let start = state.begin(harness::USER_ID);
+        let gone = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &[], USAGE_DEADLINE)
+            .await;
+        assert!(matches!(gone, UsageOutcome::NoKey));
+    }
+
+    /// The epoch is read by `begin`, before the caller's listing: an issue
+    /// that lands between the two keeps the listing's "no key" out of the
+    /// cache (see `CacheInner`).
+    #[tokio::test]
+    async fn an_issue_after_begin_keeps_the_listings_no_key_out_of_the_cache() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+
+        let start = state.begin(harness::USER_ID);
+        let records = listing(&gateway).await;
+        state.cache_handle().invalidate_no_key(harness::USER_ID);
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+
+        assert!(matches!(outcome, UsageOutcome::NoKey));
+        assert!(
+            state.begin(harness::USER_ID).fresh.is_none(),
+            "a 'no key' an issue had made false was cached"
+        );
+    }
+
+    /// AWS throttling the plan read with nothing cached: `Throttled`, as
+    /// `answer_for` answers it.
+    #[tokio::test]
+    async fn answer_from_listing_reports_a_throttle_with_nothing_cached() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+        let state = UsageState::new(None, None);
+        let records = listing(&gateway).await;
+        mock.with(|s| s.throttle_plans = true);
+
+        let start = state.begin(harness::USER_ID);
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+
+        assert!(matches!(outcome, UsageOutcome::Throttled));
     }
 
     #[tokio::test]
