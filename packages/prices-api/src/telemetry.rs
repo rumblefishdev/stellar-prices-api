@@ -80,7 +80,7 @@ use tracing_subscriber::EnvFilter;
 /// can carry an API key value or another credential, **or personal data**. A
 /// Discord id is personal data, since it is the account (ADR 0010 §1), and
 /// every key lookup names one: `GetApiKeys?name=discord-<id>-key`. Each member
-/// is here for a line it was seen to print, not on a hunch:
+/// is here for a line found in its output or its source, not on a hunch:
 ///
 /// - `aws_smithy_runtime`, `aws_smithy_runtime_api`, `aws_sdk_apigateway` print
 ///   a **decoded control-plane response**, key value included: the SDK's own
@@ -90,6 +90,9 @@ use tracing_subscriber::EnvFilter;
 ///   the role's session token: 1.4.5 writes `x-amz-security-token` as
 ///   `** redacted (length=N) **` (`tests/telemetry_sigv4.rs`), where 1.4.2
 ///   printed the canonical request whole.
+/// - `aws_smithy_http_client` prints the request URI at `debug` when it adds a
+///   proxy's credentials (`client.rs`, 1.1.13), and `BehaviorVersion::latest()`
+///   reads the proxy from the environment (`HTTPS_PROXY` and the like).
 ///
 /// Checked and left out (task 0349): `hyper_util` logs a connection's scheme
 /// and host, never its path or query; `hyper` 1 logs nothing unless built with
@@ -101,6 +104,7 @@ pub const CREDENTIAL_BEARING_TARGETS: &[&str] = &[
     "aws_smithy_runtime_api",
     "aws_sdk_apigateway",
     "aws_sigv4",
+    "aws_smithy_http_client",
 ];
 
 /// The ceiling those crates are held to, whatever `RUST_LOG` says.
@@ -298,6 +302,7 @@ mod tests {
             "aws=trace",
             "aws_sdk_apigateway",
             "aws_sigv4=trace",
+            "aws_smithy_http_client=debug",
             "hyper=debug",
             "[try_op]=trace",
             "aws_smithy[try_op]=trace",
