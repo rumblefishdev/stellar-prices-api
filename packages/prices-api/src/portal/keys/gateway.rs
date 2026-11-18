@@ -102,6 +102,10 @@ const TAG_ISSUED_BY: &str = "IssuedBy";
 /// the task that introduced the key.
 pub(crate) const ISSUED_BY_PORTAL: &str = "task-0187";
 
+/// The `IssuedBy` value of every key the API hub's contract creates (task
+/// 0348) — the hub's `key/issue`, after the hub proved membership itself.
+pub(crate) const ISSUED_BY_HUB: &str = "hub-contract";
+
 /// An API key value, which is a bearer credential.
 ///
 /// A distinct type from `String` so that "never log a key value" is enforced by

@@ -24,7 +24,8 @@
 //! - `iss` is [`ISSUER`] and `aud` is [`AUDIENCE`], compiled in;
 //! - `exp > now - 5 s` and `iat <= now + 5 s` ([`LEEWAY_SECS`]), and
 //!   `iat <= exp <= iat + 60 s` ([`MAX_LIFETIME_SECS`]);
-//! - `sub` is `discord:` and a snowflake;
+//! - `sub` is `discord:` and a snowflake, written canonically (no leading
+//!   `0`, and not `0`);
 //! - `act` is one of `read`, `reveal`, `revoke`, `issue`. Whether it is the
 //!   one the route needs is the route's question (task 0348's `auth`), not
 //!   this module's.
@@ -155,7 +156,9 @@ fn accept(claims: Claims, now: u64) -> Option<HubCaller> {
         return None;
     }
     let discord_id = claims.sub.strip_prefix(SUBJECT_PREFIX)?;
-    if !is_snowflake(discord_id) {
+    // Canonical only: no snowflake is `0` or starts with one, and a leading
+    // zero would name another key (`discord-0<id>-key`) for the same account.
+    if !is_snowflake(discord_id) || discord_id.starts_with('0') {
         return None;
     }
     Some(HubCaller {
@@ -523,6 +526,29 @@ mod tests {
         let mut c = claims();
         c.insert("sub".into(), json!(42));
         assert!(!verifies_at(&mint(&c), 1_795_000_030));
+    }
+
+    /// A snowflake is written one way: `0` alone or a leading `0` is another
+    /// spelling of an id (or of none), and would name another key
+    /// (`discord-0<id>-key`) for the same account.
+    #[test]
+    fn a_sub_that_is_not_a_canonical_snowflake_is_refused() {
+        for sub in [
+            "discord:0",
+            "discord:00",
+            "discord:080351110224678912",
+            "discord:0080351110224678912",
+        ] {
+            let mut c = claims();
+            c.insert("sub".into(), json!(sub));
+            assert!(!verifies_at(&mint(&c), 1_795_000_030), "{sub:?}");
+        }
+        // The smallest and largest canonical ones still are.
+        for sub in ["discord:1", "discord:18446744073709551615"] {
+            let mut c = claims();
+            c.insert("sub".into(), json!(sub));
+            assert!(verifies_at(&mint(&c), 1_795_000_030), "{sub:?}");
+        }
     }
 
     #[test]

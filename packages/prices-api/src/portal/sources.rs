@@ -421,8 +421,9 @@ impl HubSource {
             recorder.armed = false;
             if secret.is_none() {
                 tracing::warn!(
-                    "the hub contract has no secret (PORTAL_HUB_SECRET_NAME is unset): its calls \
-                     answer 503 hub_unconfigured; the portal is unaffected"
+                    "the hub contract has no secret ({} unset): its calls answer 503 \
+                     hub_unconfigured; the portal is unaffected",
+                    crate::config::HUB_SECRET_VARIABLES
                 );
             }
             Ok(secret.map(Arc::new))
@@ -441,19 +442,20 @@ impl HubSource {
             Ok(Err(HubUnavailable::Failed(err))) => {
                 tracing::error!(
                     error = %err,
-                    "the hub contract's secret did not load (PORTAL_HUB_SECRET_NAME): this call \
-                     answers 503 hub_unconfigured and the first hub call after a short cooldown \
-                     reads it again; the portal is unaffected"
+                    variable = crate::config::hub_secret_variable(),
+                    "the hub contract's secret did not load: this call answers 503 \
+                     hub_unconfigured and the first hub call after a short cooldown reads it \
+                     again; the portal is unaffected"
                 );
                 None
             }
             Err(_) => {
                 tracing::error!(
                     budget_ms = HUB_SECRET_BUDGET.as_millis() as u64,
-                    "the hub contract's secret did not load within its budget \
-                     (PORTAL_HUB_SECRET_NAME): this call answers 503 hub_unconfigured and the \
-                     first hub call after a short cooldown reads it again; the portal is \
-                     unaffected"
+                    variable = crate::config::hub_secret_variable(),
+                    "the hub contract's secret did not load within its budget: this call \
+                     answers 503 hub_unconfigured and the first hub call after a short cooldown \
+                     reads it again; the portal is unaffected"
                 );
                 None
             }
