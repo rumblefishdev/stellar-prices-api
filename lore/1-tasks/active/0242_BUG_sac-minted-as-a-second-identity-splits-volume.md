@@ -302,6 +302,19 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - Binary: `37e2498ef35adc7b88278182e6889c5cbc91ed86e917febc0f038fdfad470e40`, built from `develop` `00ad6090` with `cargo lambda build --release --target x86_64-unknown-linux-musl -p events-backfill` on the local machine. It replaced `3e0e521a…` (the 0338 build of 2026-11-02, before #390), which is kept as `~/events-backfill.pre-reprice-20261118` on the host.
   - One-ledger dry run at 51,500,460: `unproven sac swaps: 0`, the 0242 line.
   - `prices-production-cleanup`: DISABLED.
+- **2026-11-18, the reprice and the pre-roll (plan B).** From fishuser-hero.
+  - Dry run 64,705,404 → 65,318,468 (9 s): 1,558,996 events, the same count measured beforehand. Ticks: aquarius 504,153, comet 3,372, phoenix 1,465, soroswap 68,961 (= BE's raw swaps), sushiswap 30,631. `unproven sac swaps: 0`, `unresolved pools: 0`.
+  - Two warnings, neither caused by this run. First, 8 Phoenix events fail on pool `CBCZGGNO…` with "unexpected topic shape": BE holds 1,469 Phoenix swaps, the tool and live both 1,465, so it is an existing extractor gap and no 0242 asset trades on Phoenix. Second, the coverage probe sees 12 contracts outside `pool_registry` (308,611 events); `prices-production-coverage-sweep-unclassified` has been in ALARM since 2026-11-09, outside this task.
+  - Reprice at 12:48 UTC (10 s): 263,934 `1m` rows, the same tick counts.
+  - Manual `prices-production-enrichment` run: 859 rows enriched. 99 % of the window's remaining `close_usd = 0` rows are in pairs never priced in the window (no USD route), so they are not repriced rows left unpriced.
+  - The six `mv_reconcile_*` views were stopped (checked `Disabled`). `preroll-live-gap.sql` ran over `2026-10-01 00:00:00` → `2026-11-18 12:00:00` (`PREROLL OK`, a few minutes). The views were started again (checked `Scheduled`, no exception). The password was unset on fishuser-hero.
+  - After the pre-roll, every tier equals `1m` per source over 10-01 → 11-18. Sushiswap went 37,917 → 38,005 and aquarius 734,695 → 734,701; nothing else moved. October and November `1M` equal their days, and the 7 weeks from 09-28 equal their days.
+  - The pre-roll set about 120 `sdex` coarse rows to `close_usd = 0` (103 / 15 / 3 on `1h` / `4h` / `1d`), as in 0338, where the next coarse sweep restored them.
+- **2026-11-18, §5a and the §5b gate (plan C).**
+  - §5a: `bak_0242_sac_ids` created as `default` from fishuser-hero: `40 0`. AC4 "before": 215,216 identities, 215,216 ids, 0 collisions.
+  - SAC-keyed rows sit in 202404, 202610 and 202611 only, on every tier.
+  - Byte-level test: `1m`, `15m` and `1h` are fully byte-identical in 202610 and 202611 (79 + 18, 65 + 18, 59 + 18 rows). 23 coarse rows are not byte-identical: 1 on `4h`, 3 on `1d`, 9 on `1w`, 10 on `1M`. In each, the classic row also holds that pair's other trades in the bucket. All 23 were checked: the classic row equals the sum of its classic `1m` children, and holds at least the SAC row's trades. Since every SAC `1m` row is byte-identical, every SAC trade is in the classic coarse row. No trade in 202610 or 202611 is an only copy.
+  - The only only-copy rows are 202404's, one per tier, Z's single trade: the recorded loss. **The gate passed.**
 
 ## Plan to completion (2026-11-18)
 
