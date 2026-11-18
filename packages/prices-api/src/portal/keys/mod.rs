@@ -111,7 +111,7 @@ use super::auth::secret::OauthSecret;
 use super::period::Period;
 use super::sources::{Loaded, PortalSources};
 use cap::Cap;
-use gateway::{Attachment, Disable, Gateway, GatewayError, ISSUED_BY_PORTAL, KeyValue};
+use gateway::{Attachment, Disable, Gateway, GatewayError, KeyValue};
 use naming::{
     KeyRecord, choose_winner, current_key, exact_matches, key_name, losers, revocation_instant,
     revoked_newest_first,
@@ -902,6 +902,8 @@ pub(crate) enum IssueOutcome {
     Capped {
         /// `YYYY-MM-DD`, for the landing query.
         next_eligible_date: String,
+        /// The same instant, RFC 3339 — what a JSON answer names (task 0348).
+        next_eligible_at: String,
     },
     /// The control plane would not produce a usable key — an error, a
     /// deadline, or a key deleted underneath every attempt. Logged inside
@@ -916,7 +918,16 @@ pub(crate) enum IssueOutcome {
 /// This is 0187's reconciler unchanged — list → filter → rank → create if
 /// missing → attach → sweep duplicates → read — behind the same deadline its
 /// handler used, so the callback cannot outlive the Lambda's budget either.
-pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) -> IssueOutcome {
+///
+/// `issued_by` is the `IssuedBy` tag of a key this call creates
+/// ([`gateway::ISSUED_BY_PORTAL`] for the portal's round-trip); an adopted
+/// key keeps the tag it has.
+pub(crate) async fn issue_for(
+    gateway: &Gateway,
+    sub: &str,
+    deadline: Duration,
+    issued_by: &str,
+) -> IssueOutcome {
     // Same guard as the reveal, for the same reason — and here it also stands
     // in front of `DeleteApiKey`.
     let Some(name) = key_name(sub) else {
@@ -925,7 +936,7 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
     };
 
     let deadline_at = std::time::Instant::now() + deadline;
-    match tokio::time::timeout(deadline, reconcile(gateway, &name, deadline_at)).await {
+    match tokio::time::timeout(deadline, reconcile(gateway, &name, deadline_at, issued_by)).await {
         Ok(Ok(Reconciled::Issued(outcome))) => {
             tracing::info!(
                 key_id = %outcome.record.id,
@@ -936,12 +947,18 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
                 created: outcome.created,
             }
         }
-        Ok(Ok(Reconciled::Capped { next_eligible_date })) => {
+        Ok(Ok(Reconciled::Capped {
+            next_eligible_date,
+            next_eligible_at,
+        })) => {
             tracing::info!(
                 outcome = "capped",
                 "portal issue refused: the key was revoked this quota period"
             );
-            IssueOutcome::Capped { next_eligible_date }
+            IssueOutcome::Capped {
+                next_eligible_date,
+                next_eligible_at,
+            }
         }
         Ok(Ok(Reconciled::OutOfTime)) => {
             tracing::error!(
@@ -994,6 +1011,7 @@ enum Reconciled {
     /// A revoked key inside the current period stands in the way.
     Capped {
         next_eligible_date: String,
+        next_eligible_at: String,
     },
     /// Every attempt settled on a key that was deleted before its value could
     /// be read.
@@ -1007,6 +1025,7 @@ enum Attempt {
     Done(Outcome),
     Capped {
         next_eligible_date: String,
+        next_eligible_at: String,
     },
     /// Too little of the deadline left to create and attach — nothing was
     /// written. Not retried: the next attempt would have even less.
@@ -1042,12 +1061,19 @@ async fn reconcile(
     gateway: &Gateway,
     name: &str,
     deadline: std::time::Instant,
+    issued_by: &str,
 ) -> Result<Reconciled, GatewayError> {
     for _ in 0..MAX_ATTEMPTS {
-        match attempt(gateway, name, deadline).await? {
+        match attempt(gateway, name, deadline, issued_by).await? {
             Attempt::Done(outcome) => return Ok(Reconciled::Issued(outcome)),
-            Attempt::Capped { next_eligible_date } => {
-                return Ok(Reconciled::Capped { next_eligible_date });
+            Attempt::Capped {
+                next_eligible_date,
+                next_eligible_at,
+            } => {
+                return Ok(Reconciled::Capped {
+                    next_eligible_date,
+                    next_eligible_at,
+                });
             }
             Attempt::OutOfTime => return Ok(Reconciled::OutOfTime),
             Attempt::Retry => {}
@@ -1058,10 +1084,12 @@ async fn reconcile(
 
 /// One pass of the reconciler. `deadline` is the instant the caller's
 /// `timeout` fires; a create is not started without room for itself.
+/// `issued_by` tags a key this pass creates.
 async fn attempt(
     gateway: &Gateway,
     name: &str,
     deadline: std::time::Instant,
+    issued_by: &str,
 ) -> Result<Attempt, GatewayError> {
     // Step 1: everything the control plane has under this name PREFIX, across
     // all pages, narrowed to exact equality here. Both halves matter and both
@@ -1093,10 +1121,14 @@ async fn attempt(
         // not open a door a revocation this month closed.
         let revoked_at = revocation_instant(&revoked);
         if let Cap::Capped {
-            next_eligible_date, ..
+            next_eligible_date,
+            next_eligible_at,
         } = cap::decide(revoked_at, &Period::now())
         {
-            return Ok(Attempt::Capped { next_eligible_date });
+            return Ok(Attempt::Capped {
+                next_eligible_date,
+                next_eligible_at,
+            });
         }
     }
 
@@ -1123,7 +1155,7 @@ async fn attempt(
             );
             return Ok(Attempt::OutOfTime);
         }
-        let (record, _value) = gateway.create(name, ISSUED_BY_PORTAL).await?;
+        let (record, _value) = gateway.create(name, issued_by).await?;
 
         // Re-list rather than returning what we just made. Two simultaneous
         // first presses both find nothing and both create, so the list is the
@@ -1547,5 +1579,96 @@ mod tests {
         assert_eq!(REWORK_PATH, format!("{KEY_PATH}/rework"));
         let rest = REWORK_PATH.trim_start_matches(super::super::PORTAL_API_PREFIX);
         assert_eq!(rest.split('/').count(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // The service functions (task 0348), against the integration tests' mock
+    // control plane.
+    // -----------------------------------------------------------------------
+
+    use crate::portal::test_harness as harness;
+
+    fn our_key_name() -> String {
+        key_name(harness::USER_ID).expect("the test user id is a snowflake")
+    }
+
+    /// A key `issue_for` creates carries the caller's `IssuedBy` — the
+    /// portal's `task-0187`, or the hub contract's own — beside the
+    /// `ManagedBy` every portal key has.
+    #[tokio::test]
+    async fn issue_for_tags_a_created_key_with_the_callers_issuer() {
+        for issued_by in [gateway::ISSUED_BY_PORTAL, "hub-contract"] {
+            let mock = harness::MockGateway::start().await;
+            let gateway = harness::test_gateway(&mock.base);
+
+            let outcome =
+                issue_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE, issued_by).await;
+
+            assert_eq!(outcome, IssueOutcome::Issued { created: true });
+            let keys = mock.with(|s| s.keys.clone());
+            assert_eq!(keys.len(), 1, "{issued_by}");
+            assert_eq!(keys[0].name, our_key_name());
+            assert_eq!(
+                keys[0].tags.get("IssuedBy").map(String::as_str),
+                Some(issued_by)
+            );
+            assert_eq!(
+                keys[0].tags.get("ManagedBy").map(String::as_str),
+                Some("prices-portal")
+            );
+        }
+    }
+
+    /// `issued_by` is written by a create only: an adopted key keeps the tags
+    /// it has, and nothing is created.
+    #[tokio::test]
+    async fn issue_for_adopts_a_key_without_retagging_it() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+
+        let outcome = issue_for(
+            &gateway,
+            harness::USER_ID,
+            RECONCILE_DEADLINE,
+            "hub-contract",
+        )
+        .await;
+
+        assert_eq!(outcome, IssueOutcome::Issued { created: false });
+        assert_eq!(mock.with(|s| s.create_calls), 0);
+        assert!(mock.with(|s| s.keys[0].tags.is_empty()));
+    }
+
+    /// A refusal under the cap names the next period both ways: the date for
+    /// the callback's landing query, the instant for a JSON answer — the
+    /// same pair `cap::decide` produced, and nothing is written.
+    #[tokio::test]
+    async fn a_capped_issue_names_the_next_period_as_a_date_and_an_instant() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let now = harness::now_secs();
+        mock.with(|s| s.seed_revoked(&our_key_name(), now - 60, now));
+
+        let outcome = issue_for(
+            &gateway,
+            harness::USER_ID,
+            RECONCILE_DEADLINE,
+            gateway::ISSUED_BY_PORTAL,
+        )
+        .await;
+
+        let period = Period::now();
+        assert_eq!(
+            outcome,
+            IssueOutcome::Capped {
+                next_eligible_date: period.next_start_ymd(),
+                next_eligible_at: period.resets_at(),
+            }
+        );
+        assert!(
+            mock.with(|s| s.ops.is_empty()),
+            "a capped issue writes nothing"
+        );
     }
 }

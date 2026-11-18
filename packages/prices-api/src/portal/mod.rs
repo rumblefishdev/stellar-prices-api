@@ -50,6 +50,14 @@ pub mod period;
 pub mod sources;
 pub mod usage;
 
+/// The loopback mock of API Gateway's control plane that the integration
+/// tests drive, compiled into the unit tests as well (task 0348) — so the
+/// service functions `keys` and `usage` hand their handlers are tested
+/// against the same wire, not against a fake of it.
+#[cfg(test)]
+#[path = "../../tests/portal_keys/harness.rs"]
+pub(crate) mod test_harness;
+
 use std::time::Duration;
 
 use axum::extract::{Request, State};
