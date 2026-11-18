@@ -3,7 +3,7 @@ id: "0010"
 title: "Discord identity is the account: one active key, gated on guild membership and account age"
 status: accepted
 deciders: [akot]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180", "0186", "0187", "0188", "0189", "0191", "0192", "0193"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180", "0186", "0187", "0188", "0189", "0191", "0192", "0193", "0348"]
 related_adrs: ["0007", "0008"]
 tags: [discord, oauth, auth, abuse-prevention, account-model, api-keys, usage-plan, epic-self-service-onboarding]
 links:
@@ -78,6 +78,16 @@ history:
       2026-10-01 00:05:00 UTC counted against October's fresh quota, so AWS
       resets the MONTH quota between 00:00 and 00:05 UTC on the 1st. Our
       rule matches it to within 5 minutes. No decision in this ADR changes.
+  - date: 2026-11-18
+    status: accepted
+    who: akot
+    note: >
+      §8a added from [[0348]]: for a key the API hub issues
+      (`IssuedBy=hub-contract`), membership and screening are proved by the
+      hub, whose `act=issue` token is minted only after a fresh Discord
+      answer; the account's age is re-checked here as a backstop; no key is
+      issued on sign-in once the hub takes over (the shared sign-in spec's
+      decision 4). §8's per-action re-authentication stands.
 ---
 
 # ADR 0010: Discord identity is the account
@@ -320,6 +330,46 @@ optional field and its presence on the `guilds.members.read` REST response is
 undocumented. If it turns out to be absent in practice, a naive
 `pending === false` test would refuse **every** user and take issuance down
 completely. Measure first, then choose the behaviour for `undefined` deliberately.
+
+### 8a. Amendment: keys the hub issues (task 0348, 2026-11-18)
+
+The API hub at `https://sorobanscan.com/api` (`rumblefishdev/sorobanscan-api-portal`,
+spec `2026-11-17-shared-sign-in-design.md`) signs a member in once for every
+API and shows Prices as one tab. Its backend calls Prices' dashboard contract
+(`/api/hub/v1/`) server-to-server, with a 60-second token HMAC-signed with a
+secret both hold (spec decisions 12 and 15). For a key issued through that
+contract, tagged `IssuedBy=hub-contract`, §8 applies with these changes,
+decided by akot (spec decisions 3, 4, 12):
+
+- **Membership and Membership Screening are proved by the hub, not here.** The
+  hub signs an `act=issue` token only in the callback of a Discord round trip
+  started by "Get API Key", after reading, with that round trip's own token,
+  that the account is a member of the guild and not `pending`. §8's rule
+  stands — eligibility is proved per action, by re-authentication, at the
+  moment of issuance — but the round trip is the hub's. Prices checks the
+  token (its MAC under the shared secret, `aud = prices`, a lifetime of at
+  most 60 s, `act = issue`) and calls Discord for nothing. The proof is as
+  strong as that secret: whoever can read it can sign an `issue` token for any
+  Discord id. That is the people who already administer Prices' keys, and the
+  api-handler's role reads that one secret only.
+- **The account's age is re-checked here, as a backstop.** From the snowflake,
+  against Prices' own `min-account-age-minutes` parameter, before any
+  control-plane call; refused as `too_young` with the instant it clears. The
+  hub checks age too, against its own setting. The backstop keeps §3's lever
+  Prices' own: raising the SSM parameter still takes effect, whatever the
+  hub's value is.
+- **No key on sign-in once the hub takes over** (spec decision 4). The hub's
+  sign-in admits only members who cleared screening (decision 3), and issues
+  nothing; only "Get API Key" does. The portal's issue-on-first-sign-in
+  (2026-08-26) ends at the hub's cutover, when Prices' own sign-in is removed;
+  until then the portal keeps it unchanged.
+- **Revoke and reveal need no fresh proof**, as in the portal today: they come
+  from a hub session (`act=revoke`, `act=reveal`), and the account's next key
+  goes through the issue round trip above.
+- **Prices' rules are unchanged** for these keys: one active key per account
+  (§2), the once-per-period cap after a revoke, the plan a replacement keeps
+  (task 0311), `ManagedBy=prices-portal`. §7 holds: leaving the guild keeps
+  the key.
 
 ---
 
