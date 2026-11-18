@@ -111,7 +111,7 @@ use super::auth::secret::OauthSecret;
 use super::period::Period;
 use super::sources::{Loaded, PortalSources};
 use cap::Cap;
-use gateway::{Attachment, Disable, Gateway, GatewayError, KeyValue};
+use gateway::{Attachment, Disable, Gateway, GatewayError, ISSUED_BY_PORTAL, KeyValue};
 use naming::{
     KeyRecord, choose_winner, current_key, exact_matches, key_name, losers, revocation_instant,
     revoked_newest_first,
@@ -1123,7 +1123,7 @@ async fn attempt(
             );
             return Ok(Attempt::OutOfTime);
         }
-        let (record, _value) = gateway.create(name).await?;
+        let (record, _value) = gateway.create(name, ISSUED_BY_PORTAL).await?;
 
         // Re-list rather than returning what we just made. Two simultaneous
         // first presses both find nothing and both create, so the list is the
