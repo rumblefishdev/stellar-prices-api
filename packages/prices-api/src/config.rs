@@ -2,6 +2,8 @@
 //! shape of BE's `api/src/config.rs`, trimmed to what the Prices API needs
 //! today; grows per phase (API keys → Phase 1, cache TTL knobs → Phase 4).
 
+use crate::portal::hub::secret::{HubSecret, SecretError as HubSecretError};
+
 /// Application configuration sourced from environment variables.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -310,6 +312,42 @@ pub(crate) async fn load_portal_sources() -> Result<crate::portal::sources::Load
         gateway: Some(std::sync::Arc::new(gateway)),
         settings: Some(std::sync::Arc::new(settings)),
     })
+}
+
+/// Read the hub contract's secret (task 0348): `Ok(None)` when none is
+/// configured, which is not an error — the contract is then unconfigured and
+/// says so, and nothing else changes.
+///
+/// # Where it comes from
+///
+/// `PORTAL_HUB_SECRET_NAME` names the Secrets Manager secret
+/// (`sorobanscan-hub/production/prices-token`, created by the operator),
+/// read through the extension like the OAuth secret. `PORTAL_HUB_SECRET`
+/// holds the secret's JSON itself, for a local run, and is checked first so
+/// a developer with both set gets the local one.
+///
+/// **The inline JSON is compiled out of the Lambda**, for the reason
+/// `PORTAL_OAUTH_SECRET_FILE` is: `lambda:UpdateFunctionConfiguration` is a
+/// permission distinct from `UpdateFunctionCode`, and this value is what
+/// mints a token for any Discord account — read from the environment in the
+/// Lambda, one configuration change would hand whoever made it every
+/// account's key. The deployed build reads only the name.
+pub(crate) async fn hub_secret_from_env() -> Result<Option<HubSecret>, HubSecretError> {
+    #[cfg(not(feature = "lambda"))]
+    if let Ok(json) = std::env::var("PORTAL_HUB_SECRET")
+        && !json.trim().is_empty()
+    {
+        return HubSecret::parse(&json).map(Some);
+    }
+
+    let Ok(name) = std::env::var("PORTAL_HUB_SECRET_NAME") else {
+        return Ok(None);
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    HubSecret::from_secrets_manager(name).await.map(Some)
 }
 
 /// Why the lazy portal load failed (`crate::portal::sources`): which source,
