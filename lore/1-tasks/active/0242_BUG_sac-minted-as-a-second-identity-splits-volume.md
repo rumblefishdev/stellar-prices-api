@@ -11,6 +11,13 @@ milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/canonical.rs"
 history:
+  - date: "2026-11-18"
+    status: active
+    who: okarcz
+    note: >
+      Z's single 2024-04-18 Aquarius trade is recorded as a loss under PC9
+      instead of being repriced (Heal log, 2026-11-18). The §5 backfill keeps
+      one events-backfill window, 2026-10-01 → 2026-11-05.
   - date: "2026-11-17"
     status: active
     who: okarcz
@@ -278,6 +285,11 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - BLNT's 10 trades are byte-identical on `1m` (the 0338 reprice) but not on the coarse tiers, which is why `1d` counts 10 more only-copy trades than `1m` in 202610.
   - `dev_read` has a 30 s `max_execution_time`, so the whole-table `1m` query timed out. `1m` was re-run per month over the months `1d` shows (a `1m` row always rolls into `1d`); each took ≤ 2 s.
   - **Consequence for the PC9 gate:** every only-copy row is from an AMM source, so the backfill is an `events-backfill` reprice (as in 0338), not phase 3, which also refuses the current month 202611. Ranges: 2026-10-01 → 2026-11-05, and 2024-04-18 for Z, or record Z's single trade as a loss.
+- **2026-11-18, Z's trade recorded as a loss (PC9, decided by the operator).** Z on Aquarius, 2024-04-18, 1 trade: the only copy, under Z's SAC id. Stage B wrote 202404 before the 2026-10-06 seed, so the trade never reached the classic id. Z has a classic, but the row is still an only copy, so it takes PC9's path and is not deleted silently.
+  - Not repriced. The backfill has one window: 2026-10-01 → 2026-11-05.
+  - Why: a 2024-04-18 reprice needs its own `events-backfill` window and a second `preroll-amm-reprice.sql` run over 202404, a month phase 3 has already finished. If `1m` no longer holds the whole of 202404, that pre-roll rebuilds the month's `1w`/`1M` buckets from one day of `1m`. One trade does not justify that risk.
+  - The 202404 row is copied in §5c with the rest of the residual (the rollback copy) and deleted in §5d.
+  - After the reprice, the re-run map expects `only_copy = 0` for 202610 and 202611. The single 202404 row is this recorded loss.
 
 ## Acceptance Criteria
 
