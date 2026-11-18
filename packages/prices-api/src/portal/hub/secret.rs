@@ -12,9 +12,12 @@
 //! ```
 //!
 //! The hub signs with `current` only. Prices accepts a token under `current`
-//! or `previous`, so the secret is changed without a gap: the old value moves
-//! to `previous`, a new one goes in `current`, and `previous` is dropped once
-//! every reader has the new pair. Each value is exactly what
+//! or `previous`, so the secret is changed without a gap — in the order
+//! `docs/runbooks/hub-contract.md` §1 gives, because an execution environment
+//! keeps the secret it read for its life (`sources::HubSource`) while the hub
+//! re-reads every 5 minutes: the new value goes in as `previous` first, every
+//! environment is recycled to read it, and only then does it become `current`
+//! for the hub to sign with. Each value is exactly what
 //! `openssl rand -base64 32` prints: standard base64, padded, 32 bytes — the
 //! same check the hub makes (`bff/src/product-secret.ts`), so a value one side
 //! takes is never one the other refuses.
