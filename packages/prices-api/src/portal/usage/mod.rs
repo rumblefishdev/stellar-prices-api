@@ -342,7 +342,7 @@ pub fn routes(state: UsageState) -> Router {
 /// its value; `plan` is added. The no-plan, no-quota and unsupported-period
 /// states null the counters and the period (see the module docs).
 #[derive(Clone, Serialize)]
-struct UsageResponse {
+pub(crate) struct UsageResponse {
     /// Requests counted against the quota this period, per AWS.
     used: Option<u64>,
     /// Requests left, as of the latest day AWS has data for.
@@ -373,7 +373,7 @@ struct UsageResponse {
 /// Usage card's quota. Every figure is optional because AWS makes it so, and
 /// an absent one is stated ("Unlimited"), never rendered as zero.
 #[derive(Clone, Serialize)]
-struct PlanWire {
+pub(crate) struct PlanWire {
     tier: Tier,
     name: String,
     rate_limit_per_second: Option<f64>,
@@ -512,8 +512,8 @@ struct CacheEntry {
     fetched_at: Instant,
 }
 
-/// The whole route: authenticate, consult the cache, look the key up, ask AWS,
-/// answer.
+/// The whole route: authenticate, then [`UsageState::answer_for`] — consult
+/// the cache, look the key up, ask AWS — and answer.
 async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response {
     let Some(loaded) = state.sources.get().await else {
         return unconfigured();
@@ -532,116 +532,187 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         ));
     };
 
-    // Same last line as the key routes, same reason: a `sub` that is not a
-    // snowflake cannot become a `nameQuery`.
-    let Some(name) = key_name(&session.sub) else {
-        tracing::warn!("a session carried a user id that is not a snowflake; refusing");
-        return no_store(errors::unauthorized_with(
-            NOT_SIGNED_IN,
-            "sign in with Discord to see your usage",
-        ));
-    };
-
-    // Computed once per request and used to validate cache entries: an entry
-    // answering for a different period_start is last period's answer wearing
-    // this period's label, and the minute after a boundary is exactly when a
-    // viewer checks whether the reset happened. Each entry is checked against
-    // its OWN rule (month or day) — see `answers_for_period`.
-    let today = Utc::now().date_naive();
-
-    // Fresh cache hit: no control-plane call of any kind. This is the
-    // "repeated dashboard loads do not produce one GetUsage call each"
-    // acceptance criterion, in one branch.
-    if let Some(entry) = cached(&state, &session.sub, state.ttl, today) {
-        return answer(entry.answer);
-    }
-
-    // Read BEFORE the lookup starts: if a concurrent key issue bumps it while
-    // the fetch is in flight, the fetch's "no key" snapshot is stale and must
-    // not be stored. See `CacheInner`.
-    let epoch = epoch_of(&state, &session.sub);
-
-    let fetched = match tokio::time::timeout(state.deadline, fetch(gateway, &name)).await {
-        Ok(fetched) => fetched,
-        Err(_elapsed) => {
-            // A throttled control plane often shows up HERE, not as
-            // `Throttled`: the SDK's retries inside each per-call budget can
-            // spend the whole deadline before any error surfaces, and the
-            // timeout cancels the future first. Same condition, different
-            // timing — so it gets the same answer as the throttle arm below:
-            // the last good answer (re-stamped, so the next TTL of loads
-            // leaves the struggling control plane alone) beats the error page.
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, today) {
-                tracing::warn!(
-                    deadline_secs = state.deadline.as_secs_f32(),
-                    "portal usage lookup ran out of time; serving the cached answer"
-                );
-                remember(&state, &session.sub, entry.answer.clone(), epoch);
-                return answer(entry.answer);
-            }
-            tracing::error!(
-                deadline_secs = state.deadline.as_secs_f32(),
-                "portal usage lookup ran out of time and nothing is cached"
-            );
-            return no_store(errors::service_unavailable(
-                USAGE_UNAVAILABLE,
-                "the usage service is taking too long to answer; try again",
-            ));
+    match state.answer_for(gateway, &session.sub).await {
+        UsageOutcome::Usage(body) => no_store(Json(body).into_response()),
+        // A real portal `404` with the JSON envelope — deliberately
+        // distinguishable from the gate's empty one: the portal is open, the
+        // caller is signed in, and the honest answer is "you have no key",
+        // which the page turns into "issue one first".
+        UsageOutcome::NoKey => no_store(
+            (
+                StatusCode::NOT_FOUND,
+                Json(errors::ErrorEnvelope {
+                    code: NO_KEY,
+                    message: "you have no API key yet; issue one from the dashboard first".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        ),
+        // Same last line as the key routes, same reason: a `sub` that is not
+        // a snowflake cannot become a `nameQuery`.
+        UsageOutcome::NotASnowflake => {
+            tracing::warn!("a session carried a user id that is not a snowflake; refusing");
+            no_store(errors::unauthorized_with(
+                NOT_SIGNED_IN,
+                "sign in with Discord to see your usage",
+            ))
         }
-    };
-
-    match fetched {
-        Ok(answer_now) => {
-            remember(&state, &session.sub, answer_now.clone(), epoch);
-            answer(answer_now)
-        }
-        // Backing off (the SDK's own retries) was not enough: AWS is
-        // rate-limiting the control plane. The last good answer — fresh or
-        // not — beats an error page, because `as_of` makes its age visible.
+        UsageOutcome::OutOfTime => no_store(errors::service_unavailable(
+            USAGE_UNAVAILABLE,
+            "the usage service is taking too long to answer; try again",
+        )),
         // With nothing cached there is nothing honest to show, so say what is
         // happening and invite a retry; the entry the next success writes ends
         // the condition.
-        Err(GatewayError::Throttled { operation }) => {
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, today) {
+        UsageOutcome::Throttled => no_store(errors::service_unavailable(
+            USAGE_UNAVAILABLE,
+            "AWS is rate-limiting the usage lookup right now; try again in a moment",
+        )),
+        UsageOutcome::Failed => no_store(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(errors::ErrorEnvelope {
+                    code: USAGE_UNAVAILABLE,
+                    message: "could not reach the usage service; try again".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        ),
+    }
+}
+
+/// What [`UsageState::answer_for`] settled on. Logged inside, except
+/// [`Self::NotASnowflake`], whose words depend on where the id came from; the
+/// caller chooses the status.
+pub(crate) enum UsageOutcome {
+    /// The key's usage — fetched now, a fresh cache hit, or the last good
+    /// answer served through a throttle or a deadline (its `as_of` says how
+    /// old). Boxed for the reason [`CachedAnswer`] boxes it.
+    Usage(Box<UsageResponse>),
+    /// No key — or only one revoked in an earlier period.
+    NoKey,
+    /// The id is not a Discord snowflake. Nothing was asked of AWS, and the
+    /// cache was not read.
+    NotASnowflake,
+    /// The deadline elapsed with nothing cached. The portal answers `503`.
+    OutOfTime,
+    /// AWS is rate-limiting and nothing is cached. The portal answers `503`.
+    Throttled,
+    /// The control plane failed. The portal answers `502`.
+    Failed,
+}
+
+impl From<CachedAnswer> for UsageOutcome {
+    fn from(answer: CachedAnswer) -> Self {
+        match answer {
+            CachedAnswer::Usage { body, .. } => UsageOutcome::Usage(body),
+            CachedAnswer::NoKey => UsageOutcome::NoKey,
+        }
+    }
+}
+
+impl UsageState {
+    /// The account's usage, as the route answers it: consult the cache, look
+    /// the key up and ask AWS under the deadline, fall back to the last good
+    /// answer when AWS throttles or the deadline elapses, and remember what
+    /// was fetched.
+    ///
+    /// `discord_id` is the bare snowflake (a session's `sub`); the cache is
+    /// keyed by it, so one account's answer is one entry whichever route
+    /// asks.
+    pub(crate) async fn answer_for(&self, gateway: &Gateway, discord_id: &str) -> UsageOutcome {
+        let Some(name) = key_name(discord_id) else {
+            return UsageOutcome::NotASnowflake;
+        };
+
+        // Computed once per request and used to validate cache entries: an
+        // entry answering for a different period_start is last period's
+        // answer wearing this period's label, and the minute after a boundary
+        // is exactly when a viewer checks whether the reset happened. Each
+        // entry is checked against its OWN rule (month or day) — see
+        // `answers_for_period`.
+        let today = Utc::now().date_naive();
+
+        // Fresh cache hit: no control-plane call of any kind. This is the
+        // "repeated dashboard loads do not produce one GetUsage call each"
+        // acceptance criterion, in one branch.
+        if let Some(entry) = cached(self, discord_id, self.ttl, today) {
+            return entry.answer.into();
+        }
+
+        // Read BEFORE the lookup starts: if a concurrent key issue bumps it
+        // while the fetch is in flight, the fetch's "no key" snapshot is stale
+        // and must not be stored. See `CacheInner`.
+        let epoch = epoch_of(self, discord_id);
+
+        let fetched = match tokio::time::timeout(self.deadline, fetch(gateway, &name)).await {
+            Ok(fetched) => fetched,
+            Err(_elapsed) => {
+                // A throttled control plane often shows up HERE, not as
+                // `Throttled`: the SDK's retries inside each per-call budget
+                // can spend the whole deadline before any error surfaces, and
+                // the timeout cancels the future first. Same condition,
+                // different timing — so it gets the same answer as the
+                // throttle arm below: the last good answer (re-stamped, so the
+                // next TTL of loads leaves the struggling control plane alone)
+                // beats the error page.
+                if let Some(entry) = cached(self, discord_id, STALE_KEEP, today) {
+                    tracing::warn!(
+                        deadline_secs = self.deadline.as_secs_f32(),
+                        "portal usage lookup ran out of time; serving the cached answer"
+                    );
+                    remember(self, discord_id, entry.answer.clone(), epoch);
+                    return entry.answer.into();
+                }
+                tracing::error!(
+                    deadline_secs = self.deadline.as_secs_f32(),
+                    "portal usage lookup ran out of time and nothing is cached"
+                );
+                return UsageOutcome::OutOfTime;
+            }
+        };
+
+        match fetched {
+            Ok(answer_now) => {
+                remember(self, discord_id, answer_now.clone(), epoch);
+                answer_now.into()
+            }
+            // Backing off (the SDK's own retries) was not enough: AWS is
+            // rate-limiting the control plane. The last good answer — fresh
+            // or not — beats an error page, because `as_of` makes its age
+            // visible.
+            Err(GatewayError::Throttled { operation }) => {
+                if let Some(entry) = cached(self, discord_id, STALE_KEEP, today) {
+                    tracing::warn!(
+                        operation,
+                        "control plane is throttling; serving the cached usage answer"
+                    );
+                    // Re-stamped, so the NEXT load inside the TTL is a cache
+                    // hit that never reaches AWS — without this, every viewer
+                    // refresh during a throttle event still fired both
+                    // control-plane calls (SDK retries included) just to be
+                    // told to slow down again, which is the opposite of
+                    // backing off. The answer keeps its original `as_of`, so
+                    // the page keeps dating it honestly; the cost is that a
+                    // throttle outlasting `STALE_KEEP` can keep re-serving an
+                    // older answer — accepted, because the honest age is on
+                    // screen and the alternative is the error page this
+                    // criterion exists to prevent.
+                    remember(self, discord_id, entry.answer.clone(), epoch);
+                    return entry.answer.into();
+                }
                 tracing::warn!(
                     operation,
-                    "control plane is throttling; serving the cached usage answer"
+                    "control plane is throttling and nothing is cached"
                 );
-                // Re-stamped, so the NEXT load inside the TTL is a cache hit
-                // that never reaches AWS — without this, every viewer refresh
-                // during a throttle event still fired both control-plane calls
-                // (SDK retries included) just to be told to slow down again,
-                // which is the opposite of backing off. The answer keeps its
-                // original `as_of`, so the page keeps dating it honestly; the
-                // cost is that a throttle outlasting `STALE_KEEP` can keep
-                // re-serving an older answer — accepted, because the honest
-                // age is on screen and the alternative is the error page this
-                // criterion exists to prevent.
-                remember(&state, &session.sub, entry.answer.clone(), epoch);
-                return answer(entry.answer);
+                UsageOutcome::Throttled
             }
-            tracing::warn!(
-                operation,
-                "control plane is throttling and nothing is cached"
-            );
-            no_store(errors::service_unavailable(
-                USAGE_UNAVAILABLE,
-                "AWS is rate-limiting the usage lookup right now; try again in a moment",
-            ))
-        }
-        Err(error) => {
-            tracing::error!(error = %error, "portal usage lookup failed");
-            no_store(
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(errors::ErrorEnvelope {
-                        code: USAGE_UNAVAILABLE,
-                        message: "could not reach the usage service; try again".into(),
-                        details: None,
-                    }),
-                )
-                    .into_response(),
-            )
+            Err(error) => {
+                tracing::error!(error = %error, "portal usage lookup failed");
+                UsageOutcome::Failed
+            }
         }
     }
 }
@@ -869,28 +940,6 @@ fn remember(state: &UsageState, sub: &str, answer: CachedAnswer, epoch: Option<u
             fetched_at: Instant::now(),
         },
     );
-}
-
-/// Serialize a cached answer, `no-store` attached.
-fn answer(cached: CachedAnswer) -> Response {
-    match cached {
-        CachedAnswer::Usage { body, .. } => no_store(Json(body).into_response()),
-        // A real portal `404` with the JSON envelope — deliberately
-        // distinguishable from the gate's empty one: the portal is open, the
-        // caller is signed in, and the honest answer is "you have no key",
-        // which the page turns into "issue one first".
-        CachedAnswer::NoKey => no_store(
-            (
-                StatusCode::NOT_FOUND,
-                Json(errors::ErrorEnvelope {
-                    code: NO_KEY,
-                    message: "you have no API key yet; issue one from the dashboard first".into(),
-                    details: None,
-                }),
-            )
-                .into_response(),
-        ),
-    }
 }
 
 /// `no-store` on every response this module produces — the handler's own
@@ -1219,5 +1268,118 @@ mod tests {
         state.cache_handle().invalidate_no_key(sub);
         remember(&state, sub, without_counters(None), stale_epoch);
         assert!(cached(&state, sub, CACHE_TTL, any_day()).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // `UsageState::answer_for` (task 0348), against the integration tests'
+    // mock control plane.
+    // -----------------------------------------------------------------------
+
+    use crate::portal::test_harness as harness;
+
+    fn our_key_name() -> String {
+        key_name(harness::USER_ID).expect("the test user id is a snowflake")
+    }
+
+    /// The JSON the route would answer, for comparing two outcomes.
+    fn body_of(outcome: &UsageOutcome) -> serde_json::Value {
+        match outcome {
+            UsageOutcome::Usage(body) => serde_json::to_value(body).unwrap(),
+            _ => panic!("expected a usage answer"),
+        }
+    }
+
+    /// An id that cannot become a key name is refused before the cache or
+    /// the control plane is consulted.
+    #[tokio::test]
+    async fn answer_for_refuses_a_non_snowflake_without_a_call() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+
+        let outcome = state.answer_for(&gateway, "not-a-snowflake").await;
+
+        assert!(matches!(outcome, UsageOutcome::NotASnowflake));
+        assert_eq!(mock.with(|s| s.list_calls), 0);
+    }
+
+    /// A key's usage on its plan, and the second ask inside the TTL is the
+    /// cache's: no control-plane call of any kind.
+    #[tokio::test]
+    async fn answer_for_reads_the_usage_once_and_then_from_the_cache() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| {
+            let id = s.seed_on_free_plan(&our_key_name(), harness::now_secs());
+            s.usage.insert(id, vec![vec![120, 99_880]]);
+        });
+        let state = UsageState::new(None, None);
+
+        let first = state.answer_for(&gateway, harness::USER_ID).await;
+        let body = body_of(&first);
+        assert_eq!(body["used"], 120);
+        assert_eq!(body["remaining"], 99_880);
+        assert_eq!(body["limit"], 100_000);
+        assert_eq!(body["plan"]["tier"], "free");
+
+        let second = state.answer_for(&gateway, harness::USER_ID).await;
+        assert_eq!(body_of(&second), body);
+        assert_eq!(mock.with(|s| (s.list_calls, s.usage_calls)), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn answer_for_without_a_key_is_no_key() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+
+        let outcome = state.answer_for(&gateway, harness::USER_ID).await;
+
+        assert!(matches!(outcome, UsageOutcome::NoKey));
+    }
+
+    /// AWS throttling with an answer on hand: the last good answer, with the
+    /// `as_of` it was fetched at. With nothing on hand: `Throttled`.
+    #[tokio::test]
+    async fn answer_for_serves_the_last_good_answer_through_a_throttle() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+        // Every entry is past its TTL at once, so only the throttle fallback
+        // can serve one.
+        let state = UsageState::new(None, None).with_ttl(Duration::ZERO);
+
+        let fetched = state.answer_for(&gateway, harness::USER_ID).await;
+        mock.with(|s| s.throttle_list = true);
+        let served = state.answer_for(&gateway, harness::USER_ID).await;
+        assert_eq!(body_of(&served), body_of(&fetched));
+
+        let empty = UsageState::new(None, None);
+        let refused = empty.answer_for(&gateway, harness::USER_ID).await;
+        assert!(matches!(refused, UsageOutcome::Throttled));
+    }
+
+    #[tokio::test]
+    async fn answer_for_reports_a_failing_control_plane_as_failed() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.fail_list = true);
+        let state = UsageState::new(None, None);
+
+        let outcome = state.answer_for(&gateway, harness::USER_ID).await;
+
+        assert!(matches!(outcome, UsageOutcome::Failed));
+    }
+
+    #[tokio::test]
+    async fn answer_for_reports_a_slow_control_plane_with_nothing_cached_as_out_of_time() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.list_delay_ms = 1_000);
+        let state = UsageState::new(None, None).with_deadline(Duration::from_millis(50));
+
+        let outcome = state.answer_for(&gateway, harness::USER_ID).await;
+
+        assert!(matches!(outcome, UsageOutcome::OutOfTime));
     }
 }
