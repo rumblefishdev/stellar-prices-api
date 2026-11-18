@@ -310,19 +310,23 @@ Three findings shape the plan:
 
 ### A. Before the reprice
 
-1. **Local machine:** point `chq` at `ch.sorobanscan.com` as `dev_shared` (runbook §2). `echo "SELECT currentUser()" | chq` prints `dev_shared`. §5a, §5c and §5d write, so `dev_read` cannot run them.
-2. **Hetzner host:** the start ledger is `SELECT min(sequence) FROM default.ledgers WHERE closed_at >= '2026-10-01 00:00:00'`. The end ledger is `65318468`, the cursor the 0242 build resumed from at its 2026-11-05 cold start (Heal log); every earlier ledger was written by the old build.
+**Who runs what (decided 2026-11-18).** Every write runs on the Hetzner host as ClickHouse's `default` user (SSH, then `docker exec -i app-clickhouse-1 clickhouse-client`), the same place and user as `events-backfill`. The operator holds no `dev_shared` certificate, so the runbook's `chq` writes are replaced by this route. The agent prepares each write as a block with the real values and checks each result as `dev_read` before the next step. The operator pastes and runs every write.
+
+1. **Host:** `SELECT currentUser()` prints `default`. The checks run as `dev_read` from the local machine.
+2. **Ledgers (measured 2026-11-18, `dev_read`):** start **64,705,404** (closed 2026-10-01 00:00:02; 64,705,403 closed 09-30 23:59:57). End **65,318,468** (closed 2026-11-05 11:32:59): the cursor the 0242 build resumed from at its cold start (Heal log). Every earlier ledger was written by the old build. About 613k ledgers.
 3. **Local machine → host:** build `events-backfill` from the current `develop` (`cargo lambda build --target x86_64-unknown-linux-musl`, as in 0338). It must contain #390. Record its sha256 here.
 4. `prices-production-cleanup` is still DISABLED. It stays disabled until step 7 is done.
 
 ### B. The reprice, 2026-10-01 → 2026-11-05
 
-5. **Host, as `default`, under `tmux`:** `--start <step 2> --end 65318468 --dry-run --verbose`; compare the tick counts with BE's swap count for the range; then run again without `--dry-run`.
+5. **Host, as `default`, under `tmux`:** `--start 64705404 --end 65318468 --dry-run --verbose`; compare the tick counts with BE's swap count for the range; then run again without `--dry-run`.
 6. **`1m`:** the repriced trades sit under the classic ids (USDE, SUSDE, BURNMKR, BLNT, SPY, per source and day). Every repriced row has `close_usd`; if not, `coarse-repair --table price_ohlcv_1m` for 202610 and 202611 (0338 step 7).
 7. **Pre-roll with `preroll-live-gap.sql`.** Never `preroll-amm-reprice.sql`: it is historical since [[0286]].
    - `start_ts = '2026-10-01 00:00:00'`, a month edge; the script aligns the week itself.
-   - `end_ts`: open, see below.
+   - `end_ts` = the start of the current hour at run time (decided 2026-11-18), not 2026-11-05. Ending at 11-05 would leave the classic rows of the week of 11-02 and of November without the repriced trades: the pre-roll's partial rows lose on version to live's rows, and the reconcile MVs no longer reach back to 11-05.
+   - The window then overlaps the reconcile MVs' 7-day look-back. Stop the six `mv_reconcile_*` first ([[0286]] runbook §1a; six rows `Disabled`). START them after the checks below. `prices-production-mv-refresh-disabled` fires while they are stopped: expected.
    - After: each repriced day agrees on `1m`, `15m`, `1h`, `4h` and `1d`; each week equals its days; October and November equal their days.
+   - Count `close_usd = 0` on the coarse tiers in the window. In 0338 the pre-roll left 72 `sdex` rows at 0. Let the enrichment worker price them, or run `coarse-repair`.
 
 During steps 5–7: [[0343]] Phase 1 (the `production` environment and the two rulesets). It touches only GitHub settings.
 
@@ -373,10 +377,12 @@ This release tests the branch rules. It does not test the `production` environme
 
 Measured bases: 0338 enriched 334 rows in about 90 s; the 2026-11-17 map took ≤ 2 s per month on `1m`. No reprice or pre-roll wall time is on record, so those two are the largest unknowns.
 
-### Open points
+### Settled 2026-11-18
 
-- **The pre-roll `end_ts` (step 7).** Proposed: a minute-aligned time just before the run, not 2026-11-05, so only the current week and month are partial and live extends them. Read runbook 0142 first: it stops the reconcile views while a pre-roll overlaps their 7-day window.
-- **The start ledger (step 2)** is not measured yet. `65318468` comes from the Heal log, not a new read.
+- The pre-roll `end_ts`: the start of the current hour, with the reconcile MVs stopped (step 7).
+- Both ledgers measured (step 2).
+- The write user: `default` on the host. The split: the agent prepares, the operator runs (top of A).
+- No conflict between the reprice and the reconcile MVs: they look back 7 days (11-11 → 11-18), and the reprice writes `1m` for 10-01 → 11-05.
 
 ## Acceptance Criteria
 
