@@ -371,7 +371,7 @@ aws apigateway delete-api-key --api-key <id>
 | `PORTAL_OAUTH_SECRET_NAME` | Secrets Manager **name** of the Discord OAuth bundle (task 0186). Never the value — read through the Parameters & Secrets extension, and only when the portal is open |
 | `PORTAL_OAUTH_SECRET_FILE` | local-only alternative to the above: a path to the same JSON. Not set by CDK |
 | `PORTAL_HUB_SECRET_NAME` | Secrets Manager **name** of the API hub's token secret, `sorobanscan-hub/production/prices-token` (task 0348). Read on the first hub call per execution environment; unset or unreadable closes only the hub's four routes (`503 hub_unconfigured`). See `docs/runbooks/hub-contract.md` |
-| `PORTAL_HUB_SECRET` | local-only alternative to the above: the secret's JSON itself. Compiled out of the Lambda build, and not set by CDK |
+| `PORTAL_HUB_SECRET` | the secret's JSON itself, for tests and the lazy-load seam only. The `serve` binary does not read it and the contract has no local backend (spec decision 11), so setting it for `serve` still gives `503 hub_unconfigured`. Compiled out of the Lambda build, and not set by CDK |
 | `DISCORD_AUTHORIZE_URL`, `DISCORD_API_BASE` | endpoint overrides, test/local seam only. Not set by CDK, so production always takes Discord's real endpoints |
 | `PORTAL_FREE_PLAN_PARAM` | SSM parameter **name** holding the `pricing-api-free` usage-plan id (task 0187). A name, not the id: the plan is created by `ApiGatewayStack`, which depends on `ComputeStack`, so a cross-stack reference would be a cycle |
 | `PORTAL_FREE_PLAN_ID` | local-only alternative to the above. Compiled out of the Lambda build, and not set by CDK |

@@ -116,7 +116,12 @@ stays as it was.
 
    The description is only a label: the configuration change is what makes
    the calls that follow start new environments. A deploy of the api-handler
-   does the same.
+   does the same. Wait for the update to finish before the next step:
+
+   ```bash
+   aws lambda wait function-updated-v2 --region eu-central-1 \
+       --function-name prices-production-api-handler
+   ```
 
 3. **Swap them: the new key becomes `current`.** Within 5 minutes the hub signs
    with it. Every Prices environment accepts it: the ones recycled in step 2
@@ -136,7 +141,8 @@ stays as it was.
    ```
 
 4. **After at least 10 minutes, drop the old key**, and recycle again (step 2)
-   so no Prices environment still accepts it. The hub's cache is 5 minutes and
+   so no Prices environment still accepts it (and wait for it with the
+   `aws lambda wait function-updated-v2` command above). The hub's cache is 5 minutes and
    a read that started just before step 3 can land after it, so 5 leaves no
    margin. While the hub still signs with the old key, dropping it in Prices
    refuses every hub call.
@@ -317,7 +323,10 @@ before they land.** What that means:
   can't answer a JavaScript or managed challenge, nor Bot Fight Mode. A
   challenge page comes back as non-JSON, which the hub shows as
   `prices_unavailable` (502). Skip bot and challenge rules for the path; the
-  token authenticates every call.
+  token authenticates every call. **Bot Fight Mode must stay off for
+  `sorobanscan.com`**: on the Free plan it is zone-wide and a WAF skip rule
+  can't bypass it; only Super Bot Fight Mode (Pro and above) can be skipped
+  per path.
 - **A per-IP rate limit counts all users as one.** Every user's calls come
   from the hub's few AWS egress addresses. Exempt `/api/hub/*`, or set the
   limit above the hub's peak. The gateway's own stage throttle still applies.
@@ -348,8 +357,8 @@ username.
 | `hub account lookup failed` / `…ran out of time`, `hub reveal failed`, `hub revoke failed`, `hub issue failed` | ERROR / WARN | the control plane, as for the portal's routes                                                                                                                                                                                                                                                             |
 | `hub issue refused: the minimum account age could not be read`                                                 | ERROR        | the issue answered `failed`: the SSM parameter `/prices/production/min-account-age-minutes` did not read. **Act** if it repeats                                                                                                                                                                           |
 | `hub account answered without its usage`                                                                       | WARN         | `usage: null` beside the key's state; see §3                                                                                                                                                                                                                                                              |
-| `hub issued an API key`, `hub revoked an API key`, `hub revealed an API key`                                   | INFO         | the calls, with `jti`, `act`, `outcome` and `key_id`                                                                                                                                                                                                                                                      |
-| `hub answered an account`                                                                                      | INFO         | with `jti`, `act`, the key's `state`, `key_id` (none for `none`) and `usage` (whether it came with one); no `outcome`                                                                                                                                                                                     |
+| `hub issued an API key`, `hub revoked an API key`, `hub revealed an API key`                                   | INFO         | the calls, with `jti`, `act`, `outcome` and `key_id`; the revoke line also says `partial=true` when a duplicate key could not be disabled and still answers (**Act**: see the portal's partial-revocation ERROR, which carries no `jti`)                                                                  |
+| `hub answered an account`                                                                                      | INFO         | with `jti`, `act`, the key's `state`, `key_id` (none for `none` or `revoked`) and `usage` (whether it came with one); no `outcome`                                                                                                                                                                        |
 | `hub issue refused`, `hub reveal found…`, `hub revoke found no key`                                            | INFO         | `too_young`, `capped`, `key_revoked`, `no_key`: the account's state, not a fault                                                                                                                                                                                                                          |
 
 A call without any bearer is logged at DEBUG only.
