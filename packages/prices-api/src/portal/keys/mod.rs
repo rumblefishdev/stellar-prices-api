@@ -619,8 +619,8 @@ pub(crate) fn rfc3339(secs: u64) -> Option<String> {
 }
 
 /// What the revoke answers.
-#[derive(Serialize)]
-struct RevokeResponse {
+#[derive(Debug, Serialize)]
+pub(crate) struct RevokeResponse {
     /// Always `true` on a `200`; a failure is a status, never a `false`.
     revoked: bool,
     /// When a new key can be issued under our period rule, RFC 3339 —
@@ -697,31 +697,93 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
             "sign in with Discord before asking to replace your API key",
         ));
     };
-    // Same guard as the reveal — and here it stands in front of a write.
-    let Some(name) = key_name(&session.sub) else {
-        tracing::warn!("a session carried a user id that is not a snowflake; refusing");
-        return no_store(errors::unauthorized_with(
-            NOT_SIGNED_IN,
-            "sign in with Discord before asking to replace your API key",
-        ));
+    match revoke_for(gateway, &session.sub, state.deadline).await {
+        // Same guard as the reveal — and here it stands in front of a write.
+        Err(KeyError::NotASnowflake) => {
+            tracing::warn!("a session carried a user id that is not a snowflake; refusing");
+            no_store(errors::unauthorized_with(
+                NOT_SIGNED_IN,
+                "sign in with Discord before asking to replace your API key",
+            ))
+        }
+        Err(KeyError::OutOfTime) => no_store(errors::service_unavailable(
+            KEY_UNAVAILABLE,
+            "the API key service is taking too long to answer; try again",
+        )),
+        Err(KeyError::Unavailable) => no_store(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(errors::ErrorEnvelope {
+                    code: KEY_UNAVAILABLE,
+                    message: "could not reach the API key service; try again".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        ),
+        Ok(RevokeOutcome::Revoked(answer)) => {
+            // The cached usage describes a key that is now off. Its counter is
+            // preserved (0180 item 8), so the numbers would still be right —
+            // but the page's state changed underneath them, and a fresh read
+            // is one call.
+            if let Some(cache) = &state.usage_cache {
+                cache.invalidate(&session.sub);
+            }
+            no_store(Json(answer).into_response())
+        }
+        Ok(RevokeOutcome::NoKey) => no_store(
+            (
+                StatusCode::NOT_FOUND,
+                Json(errors::ErrorEnvelope {
+                    code: NO_KEY,
+                    message: "you have no API key to replace; issue one first".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        ),
+    }
+}
+
+/// What [`revoke_for`] did.
+#[derive(Debug)]
+pub(crate) enum RevokeOutcome {
+    /// Nothing under the name to revoke; nothing was written.
+    NoKey,
+    /// The key is off — now, or already — and this is the answer the revoke
+    /// route sends, `partial` included.
+    Revoked(RevokeResponse),
+}
+
+/// Revoke the account's key now, issue nothing (task 0191): every enabled
+/// key under the name is disabled ([`disable_all`], under `deadline`), and
+/// the answer carries the cap's date for a replacement.
+///
+/// `discord_id` is the bare snowflake (a session's `sub`). Logs the outcome,
+/// the timeout and the failure, as the revoke route did; evicting the usage
+/// cache is the caller's.
+pub(crate) async fn revoke_for(
+    gateway: &Gateway,
+    discord_id: &str,
+    deadline: Duration,
+) -> Result<RevokeOutcome, KeyError> {
+    let Some(name) = key_name(discord_id) else {
+        return Err(KeyError::NotASnowflake);
     };
 
-    let revoked = match tokio::time::timeout(state.deadline, disable_all(gateway, &name)).await {
+    let revoked = match tokio::time::timeout(deadline, disable_all(gateway, &name)).await {
         Ok(revoked) => revoked,
         Err(_elapsed) => {
             tracing::error!(
-                deadline_secs = state.deadline.as_secs_f32(),
+                deadline_secs = deadline.as_secs_f32(),
                 "portal key revocation ran out of time"
             );
-            return no_store(errors::service_unavailable(
-                KEY_UNAVAILABLE,
-                "the API key service is taking too long to answer; try again",
-            ));
+            return Err(KeyError::OutOfTime);
         }
     };
 
-    // Read before the match consumes `revoked`; both arms below answer `200`
-    // with the same dates and differ only in this flag.
+    // Read before the match consumes `revoked`; both arms below answer with
+    // the same dates and differ only in this flag.
     let partial = matches!(&revoked, Ok(Revocation::Partial { .. }));
     match revoked {
         Ok(Revocation::Done { at }) | Ok(Revocation::Partial { at }) => {
@@ -731,13 +793,6 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
                 );
             } else {
                 tracing::info!("portal revoked an API key");
-            }
-            // The cached usage describes a key that is now off. Its counter is
-            // preserved (0180 item 8), so the numbers would still be right —
-            // but the page's state changed underneath them, and a fresh read
-            // is one call.
-            if let Some(cache) = &state.usage_cache {
-                cache.invalidate(&session.sub);
             }
             // The same decision function the reveal, the usage route and the
             // issue path read, from the same instant — never `Period::now()`
@@ -754,40 +809,17 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
                 // `rfc3339` was changed to stop producing.
                 Cap::Allowed => rfc3339(now_secs()).unwrap_or_else(|| Period::now().resets_at()),
             };
-            no_store(
-                Json(RevokeResponse {
-                    revoked: true,
-                    next_eligible_at,
-                    revoked_at: at.and_then(rfc3339),
-                    partial,
-                })
-                .into_response(),
-            )
+            Ok(RevokeOutcome::Revoked(RevokeResponse {
+                revoked: true,
+                next_eligible_at,
+                revoked_at: at.and_then(rfc3339),
+                partial,
+            }))
         }
-        Ok(Revocation::NoKey) => no_store(
-            (
-                StatusCode::NOT_FOUND,
-                Json(errors::ErrorEnvelope {
-                    code: NO_KEY,
-                    message: "you have no API key to replace; issue one first".into(),
-                    details: None,
-                }),
-            )
-                .into_response(),
-        ),
+        Ok(Revocation::NoKey) => Ok(RevokeOutcome::NoKey),
         Err(error) => {
             tracing::error!(error = %error, "portal key revocation failed");
-            no_store(
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(errors::ErrorEnvelope {
-                        code: KEY_UNAVAILABLE,
-                        message: "could not reach the API key service; try again".into(),
-                        details: None,
-                    }),
-                )
-                    .into_response(),
-            )
+            Err(KeyError::Unavailable)
         }
     }
 }
@@ -1854,5 +1886,131 @@ mod tests {
         let state = key_state(&gateway, harness::USER_ID, Duration::from_millis(50)).await;
 
         assert_eq!(state.unwrap_err(), KeyError::OutOfTime);
+    }
+
+    #[tokio::test]
+    async fn revoke_for_refuses_a_non_snowflake_without_a_call() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+
+        let outcome = revoke_for(&gateway, "", RECONCILE_DEADLINE).await;
+
+        assert_eq!(outcome.unwrap_err(), KeyError::NotASnowflake);
+        assert_eq!(mock.with(|s| s.list_calls), 0);
+    }
+
+    #[tokio::test]
+    async fn revoke_for_without_a_key_writes_nothing() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+
+        let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        assert!(matches!(outcome, Ok(RevokeOutcome::NoKey)), "{outcome:?}");
+        assert!(mock.with(|s| s.ops.is_empty()));
+    }
+
+    /// A live key is disabled, dated by the control plane's own stamp, and
+    /// the answer names the next period — the revoke route's body, with no
+    /// `partial` in the ordinary case.
+    #[tokio::test]
+    async fn revoke_for_disables_the_key_and_names_the_next_period() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let now = harness::now_secs();
+        let id = mock.with(|s| {
+            s.disable_stamps_at = Some(now);
+            s.seed_on_free_plan(&our_key_name(), now - 60)
+        });
+
+        let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        let Ok(RevokeOutcome::Revoked(answer)) = outcome else {
+            panic!("expected a revocation, got {outcome:?}");
+        };
+        assert_eq!(mock.with(|s| s.ops.clone()), vec![format!("disable:{id}")]);
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            serde_json::json!({
+                "revoked": true,
+                "next_eligible_at": Period::now().resets_at(),
+                "revoked_at": rfc3339(now),
+            })
+        );
+    }
+
+    /// A key revoked in an earlier period is not written to again, and the
+    /// replacement is due now — not on the 1st of next month.
+    #[tokio::test]
+    async fn revoke_for_an_old_revocation_names_now() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let last_month = Period::now().start_secs() - 86_400;
+        mock.with(|s| s.seed_revoked(&our_key_name(), last_month - 60, last_month));
+
+        let before = rfc3339(harness::now_secs()).unwrap();
+        let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+        let after = rfc3339(harness::now_secs()).unwrap();
+
+        let Ok(RevokeOutcome::Revoked(answer)) = outcome else {
+            panic!("expected a revocation, got {outcome:?}");
+        };
+        assert!(mock.with(|s| s.ops.is_empty()));
+        assert!(
+            before <= answer.next_eligible_at && answer.next_eligible_at <= after,
+            "{answer:?}"
+        );
+        assert_eq!(answer.revoked_at, rfc3339(last_month));
+        assert!(!answer.partial);
+    }
+
+    /// One duplicate off and one refusing: revoked, in part.
+    #[tokio::test]
+    async fn revoke_for_reports_a_partial_revocation() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let now = harness::now_secs();
+        mock.with(|s| {
+            s.seed(&our_key_name(), now - 120);
+            let refusing = s.seed(&our_key_name(), now - 60);
+            s.fail_disable_of.push(refusing);
+        });
+
+        let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        let Ok(RevokeOutcome::Revoked(answer)) = outcome else {
+            panic!("expected a revocation, got {outcome:?}");
+        };
+        assert!(answer.partial);
+        assert_eq!(serde_json::to_value(&answer).unwrap()["partial"], true);
+    }
+
+    #[tokio::test]
+    async fn revoke_for_reports_a_refused_disable_as_unavailable() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| {
+            s.seed(&our_key_name(), harness::now_secs());
+            s.fail_disables = true;
+        });
+
+        let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        assert_eq!(outcome.unwrap_err(), KeyError::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn revoke_for_reports_a_slow_control_plane_as_out_of_time() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| {
+            s.seed(&our_key_name(), harness::now_secs());
+            s.list_delay_ms = 1_000;
+        });
+
+        let outcome = revoke_for(&gateway, harness::USER_ID, Duration::from_millis(50)).await;
+
+        assert_eq!(outcome.unwrap_err(), KeyError::OutOfTime);
+        assert!(mock.with(|s| s.ops.is_empty()));
     }
 }
