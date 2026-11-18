@@ -321,6 +321,8 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - §5e and §5f: `assets` 40 → 0, then `asset_symbol` 40 → 0.
   - §5g: M1, the SAC contract rows, read 0. `identity_by_contract` for the 40: 40 contracts, 0 contract rows, `max(n) = 1`. AC4: 215,216 → 215,176 identities and ids (each −40), collisions 0. The 40 classic rows are all present. 42 contract rows remain, the genuine Soroban tokens. Manual probe: `sac_contract_rows: 0`, `collisions: 0`. API: XCR by its SAC is `XCR:GBLJ…`, `credit`, `contract ""`; `/ohlcv` by the SAC and by `CODE:ISSUER` is `SAME`; the XLM SAC answers `native` / `XLM`.
   - The `bak_0242_*` tables stay until this task is archived (§5h rollback).
+  - Scheduled probe: `SacContractIdentities` 40 until 13:01 UTC, then 0 at 13:16 and 13:31. §6's pre-check (0 for at least two periods) is met.
+  - The 13:30 coarse sweep restored the `sdex` coarse `close_usd = 0` counts the pre-roll had raised, to exactly their earlier values: `1h` 2,670,725, `4h` 1,527,763, `1d` 556,120.
 
 ## Plan to completion (2026-11-18)
 
