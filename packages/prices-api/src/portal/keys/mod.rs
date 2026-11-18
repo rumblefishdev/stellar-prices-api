@@ -302,7 +302,7 @@ pub fn routes(state: KeysState) -> Router {
 /// a `?response` in a `tracing` macro, which is precisely the hole the type
 /// exists to close; `Serialize` is the only thing this struct is for.
 #[derive(Serialize)]
-struct KeyResponse {
+pub(crate) struct KeyResponse {
     /// The API Gateway key id. Not a secret; useful in a support conversation.
     key_id: String,
     /// The key name, `discord-<userId>-key`.
@@ -325,6 +325,22 @@ struct KeyResponse {
     /// is decided against for a revoked key, and on the dashboard it is
     /// labelled "Last updated" for exactly that reason.
     last_updated_at: Option<String>,
+}
+
+impl KeyResponse {
+    /// The answer for a live key — and the one place its value is read.
+    pub(crate) fn new(record: KeyRecord, value: KeyValue) -> Self {
+        Self {
+            key_id: record.id,
+            name: record.name,
+            // The one call site of `expose`, and the reason the type exists:
+            // everything else in this module can only hold the value, never
+            // read it.
+            value: value.expose().to_string(),
+            created_at: record.created_at.and_then(rfc3339),
+            last_updated_at: record.last_updated_at.and_then(rfc3339),
+        }
+    }
 }
 
 /// Both verbs, one handler, and both are the **reveal**.
@@ -363,71 +379,69 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
         ));
     };
 
-    // A `sub` that is not a snowflake cannot become a key name. Unreachable
-    // while the signing key is intact — Discord ids are digits and the cookie is
-    // signed — which is exactly why it is checked: this is the last line if that
-    // stops being true, and the alternative is an attacker-chosen `nameQuery`
-    // aimed at the control plane.
-    let Some(name) = key_name(&session.sub) else {
-        tracing::warn!("a session carried a user id that is not a snowflake; refusing");
-        return no_store(errors::unauthorized_with(
-            NOT_SIGNED_IN,
-            "sign in with Discord before asking for your API key",
-        ));
-    };
-
-    // The deadline wraps the whole lookup — `list_named` alone can walk pages,
-    // each with its own per-call budget. Elapsing is a `503` rather than a
-    // Lambda-killed invocation with no response at all.
-    let looked_up = match tokio::time::timeout(state.deadline, lookup(gateway, &name)).await {
-        Ok(looked_up) => looked_up,
-        Err(_elapsed) => {
-            tracing::error!(
-                deadline_secs = state.deadline.as_secs_f32(),
-                "portal key lookup ran out of time"
-            );
-            return no_store(errors::service_unavailable(
-                KEY_UNAVAILABLE,
-                "the API key service is taking too long to answer; try again",
-            ));
+    match key_state(gateway, &session.sub, state.deadline).await {
+        // A `sub` that is not a snowflake cannot become a key name. Unreachable
+        // while the signing key is intact — Discord ids are digits and the
+        // cookie is signed — which is exactly why it is checked: this is the
+        // last line if that stops being true, and the alternative is an
+        // attacker-chosen `nameQuery` aimed at the control plane.
+        Err(KeyError::NotASnowflake) => {
+            tracing::warn!("a session carried a user id that is not a snowflake; refusing");
+            no_store(errors::unauthorized_with(
+                NOT_SIGNED_IN,
+                "sign in with Discord before asking for your API key",
+            ))
         }
-    };
-
-    match looked_up {
-        Ok(Lookup::Revoked { revoked_at }) => {
-            // The owner killed this key. There is nothing to reveal — the
-            // value is a leaked credential by the owner's own statement — and
-            // nothing to issue until the period rolls; the page renders the
-            // date rather than the "get my API key" link.
-            let Cap::Capped {
-                next_eligible_at, ..
-            } = cap::decide(revoked_at, &Period::now())
-            else {
-                // Revoked in an earlier period: a new key is due, and the
-                // issue round-trip will create it, attach it to this key's
-                // plan and only then delete this one (task 0311). Until that
-                // press the honest answer is still "no usable key".
-                return no_store(no_key_response());
-            };
-            no_store(
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(errors::ErrorEnvelope {
-                        code: KEY_REVOKED,
-                        message: format!(
-                            "your API key was revoked; a new one can be issued from \
-                             {next_eligible_at}"
-                        ),
-                        details: Some(serde_json::json!({
-                            "next_eligible_at": next_eligible_at,
-                            "revoked_at": revoked_at.map(rfc3339),
-                        })),
-                    }),
-                )
-                    .into_response(),
+        // Elapsing is a `503` rather than a Lambda-killed invocation with no
+        // response at all.
+        Err(KeyError::OutOfTime) => no_store(errors::service_unavailable(
+            KEY_UNAVAILABLE,
+            "the API key service is taking too long to answer; try again",
+        )),
+        Err(KeyError::Unavailable) => no_store(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(errors::ErrorEnvelope {
+                    code: KEY_UNAVAILABLE,
+                    message: "could not reach the API key service; try again".into(),
+                    details: None,
+                }),
             )
-        }
-        Ok(Lookup::Key(record, value)) => {
+                .into_response(),
+        ),
+        // The owner killed this key. There is nothing to reveal — the value is
+        // a leaked credential by the owner's own statement — and nothing to
+        // issue until the period rolls; the page renders the date rather than
+        // the "get my API key" link.
+        Ok(KeyState::Revoked {
+            revoked_at,
+            next_eligible_at: Some(next_eligible_at),
+        }) => no_store(
+            (
+                StatusCode::NOT_FOUND,
+                Json(errors::ErrorEnvelope {
+                    code: KEY_REVOKED,
+                    message: format!(
+                        "your API key was revoked; a new one can be issued from \
+                         {next_eligible_at}"
+                    ),
+                    details: Some(serde_json::json!({
+                        "next_eligible_at": next_eligible_at,
+                        "revoked_at": revoked_at.map(rfc3339),
+                    })),
+                }),
+            )
+                .into_response(),
+        ),
+        // Revoked in an earlier period: a new key is due, and the issue
+        // round-trip will create it, attach it to this key's plan and only then
+        // delete this one (task 0311). Until that press the honest answer is
+        // still "no usable key".
+        Ok(KeyState::Revoked {
+            next_eligible_at: None,
+            ..
+        }) => no_store(no_key_response()),
+        Ok(KeyState::Active { record, value }) => {
             tracing::info!(key_id = %record.id, "portal revealed an API key");
             // This response proves a key exists, so a cached "no key" on the
             // usage route is now false. An in-process eviction, not a
@@ -436,39 +450,97 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
             if let Some(cache) = &state.usage_cache {
                 cache.invalidate_no_key(&session.sub);
             }
-            no_store(
-                Json(KeyResponse {
-                    key_id: record.id,
-                    name: record.name,
-                    // The one call site of `expose`, and the reason the type
-                    // exists: everything else in this module can only hold the
-                    // value, never read it.
-                    value: value.expose().to_string(),
-                    created_at: record.created_at.and_then(rfc3339),
-                    last_updated_at: record.last_updated_at.and_then(rfc3339),
-                })
-                .into_response(),
-            )
+            no_store(Json(KeyResponse::new(record, value)).into_response())
         }
         // Nothing under this name — never issued, deleted by hand, or (rarely)
         // deleted between the list and the read. All three answer the same
         // envelope, because without a registry they are the same observation,
         // and all three are fixed the same way: the issue round-trip.
-        Ok(Lookup::None) => no_store(no_key_response()),
+        Ok(KeyState::None) => no_store(no_key_response()),
+    }
+}
+
+/// Why a key service ([`key_state`], [`revoke_for`]) gave no answer. Logged
+/// where it happened, except [`Self::NotASnowflake`], whose words depend on
+/// where the id came from; the caller chooses the status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyError {
+    /// The id is not a Discord snowflake, so it cannot become a key name —
+    /// nor a `nameQuery`. Nothing was asked of the control plane.
+    NotASnowflake,
+    /// The control plane failed. The portal answers `502`.
+    Unavailable,
+    /// The deadline elapsed first. The portal answers `503`.
+    OutOfTime,
+}
+
+/// The state of an account's key, as [`key_state`] read it.
+///
+/// `Debug` is safe: [`KeyValue`]'s prints `<redacted>`.
+#[derive(Debug)]
+pub(crate) enum KeyState {
+    /// Nothing under the name to reveal — never issued, deleted by hand, or
+    /// deleted between the list and the read.
+    None,
+    /// A live key and its value.
+    Active { record: KeyRecord, value: KeyValue },
+    /// The owner's key, revoked; no value is read for it. `revoked_at` is the
+    /// instant the cap is decided from (`naming::revocation_instant`), Unix
+    /// seconds. `next_eligible_at` is the cap's verdict ([`cap::decide`]):
+    /// `Some` (RFC 3339) while a new key is refused, `None` once the
+    /// revocation's period has rolled and the issue round-trip would mint one.
+    Revoked {
+        revoked_at: Option<u64>,
+        next_eligible_at: Option<String>,
+    },
+}
+
+/// The account's key, read-only: list, filter, rank, read — and, for a
+/// revoked key, the cap's verdict. Nothing here mutates; see the module docs
+/// for why that is [0189]'s invariant.
+///
+/// `discord_id` is the bare snowflake (a session's `sub`). The deadline wraps
+/// the whole lookup — `list_named` alone can walk pages, each with its own
+/// per-call budget.
+pub(crate) async fn key_state(
+    gateway: &Gateway,
+    discord_id: &str,
+    deadline: Duration,
+) -> Result<KeyState, KeyError> {
+    let Some(name) = key_name(discord_id) else {
+        return Err(KeyError::NotASnowflake);
+    };
+
+    let looked_up = match tokio::time::timeout(deadline, lookup(gateway, &name)).await {
+        Ok(looked_up) => looked_up,
+        Err(_elapsed) => {
+            tracing::error!(
+                deadline_secs = deadline.as_secs_f32(),
+                "portal key lookup ran out of time"
+            );
+            return Err(KeyError::OutOfTime);
+        }
+    };
+
+    match looked_up {
+        Ok(Lookup::Revoked { revoked_at }) => {
+            let next_eligible_at = match cap::decide(revoked_at, &Period::now()) {
+                Cap::Capped {
+                    next_eligible_at, ..
+                } => Some(next_eligible_at),
+                Cap::Allowed => None,
+            };
+            Ok(KeyState::Revoked {
+                revoked_at,
+                next_eligible_at,
+            })
+        }
+        Ok(Lookup::Key(record, value)) => Ok(KeyState::Active { record, value }),
+        Ok(Lookup::None) => Ok(KeyState::None),
         Err(error) => {
             // `error` cannot carry a key value — see `gateway::sdk_message`.
             tracing::error!(error = %error, "portal key reveal failed");
-            no_store(
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(errors::ErrorEnvelope {
-                        code: KEY_UNAVAILABLE,
-                        message: "could not reach the API key service; try again".into(),
-                        details: None,
-                    }),
-                )
-                    .into_response(),
-            )
+            Err(KeyError::Unavailable)
         }
     }
 }
@@ -535,7 +607,7 @@ fn no_key_response() -> Response {
 /// _rather_than_the_epoch`); an empty string would be a third shape no
 /// consumer is written for, and `describeUtcDay('')` renders it as nothing at
 /// all — the response would lie rather than admit the gap.
-fn rfc3339(secs: u64) -> Option<String> {
+pub(crate) fn rfc3339(secs: u64) -> Option<String> {
     let stamped = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0);
     if stamped.is_none() {
         tracing::warn!(
@@ -1470,7 +1542,7 @@ async fn resolve_target_plan(
 /// because the failure they prevent is one visitor being handed another
 /// visitor's credential, and configuration drifts. The third — a CDN behaviour
 /// — went with the distribution [0195] retired.
-fn no_store(mut response: Response) -> Response {
+pub(crate) fn no_store(mut response: Response) -> Response {
     cache_control::attach(&mut response, cache_control::NO_STORE);
     response
 }
@@ -1670,5 +1742,117 @@ mod tests {
             mock.with(|s| s.ops.is_empty()),
             "a capped issue writes nothing"
         );
+    }
+
+    /// An id that cannot become a key name is refused before the control
+    /// plane is asked anything.
+    #[tokio::test]
+    async fn key_state_refuses_a_non_snowflake_without_a_call() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+
+        let state = key_state(&gateway, "discord:308994132968210433", RECONCILE_DEADLINE).await;
+
+        assert_eq!(state.unwrap_err(), KeyError::NotASnowflake);
+        assert_eq!(mock.with(|s| s.list_calls), 0);
+    }
+
+    #[tokio::test]
+    async fn key_state_is_none_without_a_key() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+
+        let state = key_state(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        assert!(matches!(state, Ok(KeyState::None)), "{state:?}");
+    }
+
+    /// A live key comes back with its value, and `KeyResponse::new` renders
+    /// it the way the reveal answers it.
+    #[tokio::test]
+    async fn key_state_reads_a_live_key_and_its_value() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let created = 1_790_000_000;
+        let id = mock.with(|s| s.seed_on_free_plan(&our_key_name(), created));
+
+        let state = key_state(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        let Ok(KeyState::Active { record, value }) = state else {
+            panic!("expected a live key, got {state:?}");
+        };
+        assert_eq!(record.id, id);
+        let answer = KeyResponse::new(record, value);
+        assert_eq!(answer.key_id, id);
+        assert_eq!(answer.name, our_key_name());
+        assert_eq!(answer.value, format!("VALUE-{id}-CANARY"));
+        assert_eq!(answer.created_at, rfc3339(created));
+        assert_eq!(answer.last_updated_at, rfc3339(created));
+    }
+
+    /// Revoked inside this period: the cap names the instant a new key is
+    /// due, exactly as `cap::decide` does.
+    #[tokio::test]
+    async fn key_state_names_the_next_eligible_instant_of_a_key_revoked_this_period() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let now = harness::now_secs();
+        mock.with(|s| s.seed_revoked(&our_key_name(), now - 60, now));
+
+        let state = key_state(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        let Ok(KeyState::Revoked {
+            revoked_at,
+            next_eligible_at,
+        }) = state
+        else {
+            panic!("expected a revoked key, got {state:?}");
+        };
+        assert_eq!(revoked_at, Some(now));
+        assert_eq!(next_eligible_at, Some(Period::now().resets_at()));
+    }
+
+    /// Revoked in an earlier period: still revoked, but nothing to wait for —
+    /// the reveal answers `no_key` for it and the issue round-trip mints one.
+    #[tokio::test]
+    async fn key_state_waits_for_nothing_once_the_revocations_period_has_rolled() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let last_month = Period::now().start_secs() - 86_400;
+        mock.with(|s| s.seed_revoked(&our_key_name(), last_month - 60, last_month));
+
+        let state = key_state(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        let Ok(KeyState::Revoked {
+            revoked_at,
+            next_eligible_at,
+        }) = state
+        else {
+            panic!("expected a revoked key, got {state:?}");
+        };
+        assert_eq!(revoked_at, Some(last_month));
+        assert_eq!(next_eligible_at, None);
+    }
+
+    #[tokio::test]
+    async fn key_state_reports_a_failing_control_plane_as_unavailable() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.fail_list = true);
+
+        let state = key_state(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
+
+        assert_eq!(state.unwrap_err(), KeyError::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn key_state_reports_a_slow_control_plane_as_out_of_time() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.list_delay_ms = 1_000);
+
+        let state = key_state(&gateway, harness::USER_ID, Duration::from_millis(50)).await;
+
+        assert_eq!(state.unwrap_err(), KeyError::OutOfTime);
     }
 }
