@@ -538,37 +538,69 @@ pub(crate) async fn key_state(
         return Err(KeyError::NotASnowflake);
     };
 
-    let looked_up = match tokio::time::timeout(deadline, lookup(gateway, &name)).await {
-        Ok(looked_up) => looked_up,
+    match tokio::time::timeout(deadline, lookup(gateway, &name)).await {
+        Ok(Ok(state)) => Ok(state),
+        Ok(Err(error)) => {
+            // `error` cannot carry a key value — see `gateway::sdk_message`.
+            tracing::error!(error = %error, "portal key reveal failed");
+            Err(KeyError::Unavailable)
+        }
         Err(_elapsed) => {
             tracing::error!(
                 deadline_secs = deadline.as_secs_f32(),
                 "portal key lookup ran out of time"
             );
-            return Err(KeyError::OutOfTime);
+            Err(KeyError::OutOfTime)
         }
-    };
+    }
+}
 
-    match looked_up {
-        Ok(Lookup::Revoked { revoked_at }) => {
-            let next_eligible_at = match cap::decide(revoked_at, &Period::now()) {
-                Cap::Capped {
-                    next_eligible_at, ..
-                } => Some(next_eligible_at),
-                Cap::Allowed => None,
-            };
-            Ok(KeyState::Revoked {
-                revoked_at,
-                next_eligible_at,
-            })
-        }
-        Ok(Lookup::Key(record, value)) => Ok(KeyState::Active { record, value }),
-        Ok(Lookup::None) => Ok(KeyState::None),
-        Err(error) => {
-            // `error` cannot carry a key value — see `gateway::sdk_message`.
-            tracing::error!(error = %error, "portal key reveal failed");
-            Err(KeyError::Unavailable)
-        }
+/// The account's key as one listing shows it, with no value read (task
+/// 0348): [`KeyState`] without the credential.
+///
+/// What the hub contract's `GET account` answers from. Its token's `act` is
+/// `read`, and a read never pulls a value it does not need — the harness's
+/// rule since 0187 — so the value stays in API Gateway until a `reveal` asks
+/// for it. The same classification [`key_state`] makes, from the same
+/// listing: [`key_state`] is this plus the read.
+///
+/// Its `Debug` prints the record, whose name is `discord-<id>-key`: never
+/// logged with `?`, as [`KeyState`] is not.
+#[derive(Debug)]
+pub(crate) enum KeyStatus {
+    /// No record under the name.
+    None,
+    /// The live key the reveal would read — the earliest live record
+    /// (`naming::current_key`).
+    Active(KeyRecord),
+    /// Every record revoked. As [`KeyState::Revoked`].
+    Revoked {
+        revoked_at: Option<u64>,
+        next_eligible_at: Option<String>,
+    },
+}
+
+/// Classify an account's records — already narrowed to its exact name
+/// (`naming::exact_matches`) — without a call: the current key, and for a
+/// revoked one the cap's verdict ([`cap::decide`]) from the latest
+/// revocation.
+pub(crate) fn key_status(candidates: &[KeyRecord]) -> KeyStatus {
+    let Some(current) = current_key(candidates) else {
+        return KeyStatus::None;
+    };
+    if current.enabled {
+        return KeyStatus::Active(current.clone());
+    }
+    let revoked_at = revocation_instant(candidates);
+    let next_eligible_at = match cap::decide(revoked_at, &Period::now()) {
+        Cap::Capped {
+            next_eligible_at, ..
+        } => Some(next_eligible_at),
+        Cap::Allowed => None,
+    };
+    KeyStatus::Revoked {
+        revoked_at,
+        next_eligible_at,
     }
 }
 
@@ -968,38 +1000,30 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// What the read-only lookup found.
-enum Lookup {
-    /// A live key and its value.
-    Key(KeyRecord, KeyValue),
-    /// The owner's key, revoked — no value is read for it. Carries the
-    /// instant the cap is decided from (`naming::revocation_instant`, the
-    /// latest revocation), which is what the issue path reads too.
-    Revoked { revoked_at: Option<u64> },
-    /// Nothing to reveal.
-    None,
-}
-
-/// The read-only lookup: list, filter, rank, read. Nothing here mutates.
+/// The read-only lookup: list, filter, rank ([`key_status`]), read. Nothing
+/// here mutates.
 ///
-/// `Lookup::None` is "no key to reveal" — including the raced case where the
-/// winner was listed and deleted before its value could be read. The reveal
-/// answers `no_key` for it rather than retrying into a create, because
-/// retrying into a create is exactly what this route gave up.
-async fn lookup(gateway: &Gateway, name: &str) -> Result<Lookup, GatewayError> {
+/// [`KeyState::None`] is "no key to reveal" — including the raced case where
+/// the winner was listed and deleted before its value could be read. The
+/// reveal answers `no_key` for it rather than retrying into a create, because
+/// retrying into a create is exactly what this route gave up. A revoked key's
+/// value is never read: the cap's verdict comes from the listing.
+async fn lookup(gateway: &Gateway, name: &str) -> Result<KeyState, GatewayError> {
     let candidates = exact_matches(gateway.list_named(name).await?, name);
-    let Some(current) = current_key(&candidates).cloned() else {
-        return Ok(Lookup::None);
-    };
-    if !current.enabled {
-        return Ok(Lookup::Revoked {
-            revoked_at: revocation_instant(&candidates),
-        });
-    }
-    match gateway.value_of(&current.id).await? {
-        Some(value) => Ok(Lookup::Key(current, value)),
-        None => Ok(Lookup::None),
-    }
+    Ok(match key_status(&candidates) {
+        KeyStatus::None => KeyState::None,
+        KeyStatus::Revoked {
+            revoked_at,
+            next_eligible_at,
+        } => KeyState::Revoked {
+            revoked_at,
+            next_eligible_at,
+        },
+        KeyStatus::Active(record) => match gateway.value_of(&record.id).await? {
+            Some(value) => KeyState::Active { record, value },
+            None => KeyState::None,
+        },
+    })
 }
 
 /// What the eligibility-checked issue round-trip needs to know.
@@ -1932,6 +1956,65 @@ mod tests {
         }) = state
         else {
             panic!("expected a revoked key, got {state:?}");
+        };
+        assert_eq!(revoked_at, Some(last_month));
+        assert_eq!(next_eligible_at, None);
+    }
+
+    fn record(id: &str, created_at: u64, enabled: bool, updated: Option<u64>) -> KeyRecord {
+        KeyRecord {
+            id: id.to_string(),
+            name: our_key_name(),
+            created_at: Some(created_at),
+            enabled,
+            last_updated_at: updated,
+        }
+    }
+
+    /// The account's key from a listing alone (task 0348), classified as
+    /// the reveal classifies it: nothing, the earliest live key, or the
+    /// latest revocation with the cap's verdict.
+    #[test]
+    fn key_status_classifies_a_listing_as_the_reveal_does() {
+        assert!(matches!(key_status(&[]), KeyStatus::None));
+
+        let older = record("key001", 1_000, true, Some(1_000));
+        let newer = record("key002", 2_000, true, Some(2_000));
+        let KeyStatus::Active(current) = key_status(&[newer.clone(), older.clone()]) else {
+            panic!("a live key is active");
+        };
+        assert_eq!(current, older, "the earliest live key, as the reveal");
+
+        // A live key beside a revoked one is still the live key.
+        let revoked = record("key003", 500, false, Some(harness::now_secs()));
+        let KeyStatus::Active(current) = key_status(&[revoked.clone(), newer.clone()]) else {
+            panic!("a live key beside a revoked one is active");
+        };
+        assert_eq!(current, newer);
+
+        // Revoked this period: capped until the next one.
+        let now = harness::now_secs();
+        let KeyStatus::Revoked {
+            revoked_at,
+            next_eligible_at,
+        } = key_status(&[
+            record("key004", now - 120, false, Some(now - 60)),
+            record("key005", now - 100, false, Some(now)),
+        ])
+        else {
+            panic!("only revoked records is revoked");
+        };
+        assert_eq!(revoked_at, Some(now), "the latest revocation governs");
+        assert_eq!(next_eligible_at, Some(Period::now().resets_at()));
+
+        // Revoked in an earlier period: nothing to wait for.
+        let last_month = Period::now().start_secs() - 86_400;
+        let KeyStatus::Revoked {
+            revoked_at,
+            next_eligible_at,
+        } = key_status(&[record("key006", last_month - 60, false, Some(last_month))])
+        else {
+            panic!("a key revoked last month is revoked");
         };
         assert_eq!(revoked_at, Some(last_month));
         assert_eq!(next_eligible_at, None);
