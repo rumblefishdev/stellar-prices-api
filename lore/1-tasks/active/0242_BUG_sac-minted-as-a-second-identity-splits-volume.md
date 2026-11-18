@@ -298,6 +298,11 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - The 202404 row is copied in §5c with the rest of the residual (the rollback copy) and deleted in §5d.
   - After the reprice, the re-run map expects `only_copy = 0` for 202610 and 202611. The single 202404 row is this recorded loss.
 
+- **2026-11-18, the reprice set-up (plan A).** Run from fishuser-hero, as the 0286 re-ingest was: fishuser-hero's key `~/.ssh/hero-ch-prod` still reaches `deploy@ch-prod-01` (CH answers `default`, 26.3.10.60). Each `events-backfill` runs on the host over SSH, with the password on stdin. No secret is stored on any disk.
+  - Binary: `37e2498ef35adc7b88278182e6889c5cbc91ed86e917febc0f038fdfad470e40`, built from `develop` `00ad6090` with `cargo lambda build --release --target x86_64-unknown-linux-musl -p events-backfill` on the local machine. It replaced `3e0e521a…` (the 0338 build of 2026-11-02, before #390), which is kept as `~/events-backfill.pre-reprice-20261118` on the host.
+  - One-ledger dry run at 51,500,460: `unproven sac swaps: 0`, the 0242 line.
+  - `prices-production-cleanup`: DISABLED.
+
 ## Plan to completion (2026-11-18)
 
 State: stage D done, the 0242 code live since 2026-11-05, the map read on 2026-11-17. 40 SAC ids, all with a classic. Residual: 202404 (Z, a recorded loss) and 202610–202611 (94 only-copy trades, all AMM). Order: A → B → C, with [[0343]] Phase 1 done during B's runs, then D as the first release through the new flow, then E.
