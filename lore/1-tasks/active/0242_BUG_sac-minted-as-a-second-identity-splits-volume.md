@@ -315,6 +315,12 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - SAC-keyed rows sit in 202404, 202610 and 202611 only, on every tier.
   - Byte-level test: `1m`, `15m` and `1h` are fully byte-identical in 202610 and 202611 (79 + 18, 65 + 18, 59 + 18 rows). 23 coarse rows are not byte-identical: 1 on `4h`, 3 on `1d`, 9 on `1w`, 10 on `1M`. In each, the classic row also holds that pair's other trades in the bucket. All 23 were checked: the classic row equals the sum of its classic `1m` children, and holds at least the SAC row's trades. Since every SAC `1m` row is byte-identical, every SAC trade is in the classic coarse row. No trade in 202610 or 202611 is an only copy.
   - The only only-copy rows are 202404's, one per tier, Z's single trade: the recorded loss. **The gate passed.**
+- **2026-11-18, §5c–§5g, the cleanup (plan C).** As `default` from fishuser-hero.
+  - §5c: only `bak_0242_sac_ids` and `bak_0242_seed` existed before. `bak.sql` had 18 statements. The column lists left out only `assets.asset_id` (MATERIALIZED) and the six EPHEMERAL `base_*`/`quote_*` columns. Copies: `assets` 40, `asset_symbol` 40, and `1m` 98, `15m` 84, `1h` 78, `4h` 70, `1d` 47, `1w` 22, `1M` 16 rows. Each tier's copy equals the live SAC-keyed rows exactly: 107 trades and 12,911.293623 base volume, partitions 202404, 202610 and 202611.
+  - §5d: 21 `DELETE … IN PARTITION ID` statements (7 tiers × 3 partitions, fine tiers first). After them, every tier reads 0 SAC-keyed rows (M4). Per source over 10-01 → 11-18, every tier dropped by exactly the SAC copies: aquarius 734,701 → 734,693 (8), comet 6,181 → 6,171 (10), sushiswap 38,005 → 37,917 (88). `1m` to `1d` still agree. Z's 202404 trade went with its partition: the recorded loss.
+  - §5e and §5f: `assets` 40 → 0, then `asset_symbol` 40 → 0.
+  - §5g: M1, the SAC contract rows, read 0. `identity_by_contract` for the 40: 40 contracts, 0 contract rows, `max(n) = 1`. AC4: 215,216 → 215,176 identities and ids (each −40), collisions 0. The 40 classic rows are all present. 42 contract rows remain, the genuine Soroban tokens. Manual probe: `sac_contract_rows: 0`, `collisions: 0`. API: XCR by its SAC is `XCR:GBLJ…`, `credit`, `contract ""`; `/ohlcv` by the SAC and by `CODE:ISSUER` is `SAME`; the XLM SAC answers `native` / `XLM`.
+  - The `bak_0242_*` tables stay until this task is archived (§5h rollback).
 
 ## Plan to completion (2026-11-18)
 
