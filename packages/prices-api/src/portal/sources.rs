@@ -400,7 +400,10 @@ impl HubSource {
     ///
     /// Logs as the five's load does, without its alarm's line: one ERROR per
     /// failed read, one WARN per ask inside the cooldown, and one WARN when
-    /// the read finds none configured.
+    /// the read finds none configured. A read that finds the secret logs one
+    /// INFO with how many keys it holds — never a key — so a change of the
+    /// secret can be seen to have reached the environments (the hub-contract
+    /// runbook, §1).
     pub async fn get(&self) -> Option<Arc<HubSecret>> {
         if let Some(secret) = self.cell.get() {
             return secret.clone();
@@ -419,12 +422,17 @@ impl HubSource {
             };
             let secret = loader().await.map_err(HubUnavailable::Failed)?;
             recorder.armed = false;
-            if secret.is_none() {
-                tracing::warn!(
+            match &secret {
+                Some(secret) => tracing::info!(
+                    keys = secret.keys().count(),
+                    variable = crate::config::hub_secret_variable(),
+                    "the hub contract's secret loaded"
+                ),
+                None => tracing::warn!(
                     "the hub contract has no secret ({} unset): its calls answer 503 \
                      hub_unconfigured; the portal is unaffected",
                     crate::config::HUB_SECRET_VARIABLES
-                );
+                ),
             }
             Ok(secret.map(Arc::new))
         });

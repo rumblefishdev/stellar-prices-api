@@ -29,11 +29,13 @@ use prices_api::portal::auth::crypto;
 use prices_api::portal::hub::secret::HubSecret;
 use prices_api::portal::hub::token::{AUDIENCE, CONTEXT, ISSUER};
 use prices_api::portal::hub::{ACCOUNT_PATH, ISSUE_PATH, REVEAL_PATH, REVOKE_PATH};
-use prices_api::portal::sources::{HubSource, Loaded, PortalSources};
+use prices_api::portal::sources::{HubLoader, HubSource, Loaded, PortalSources};
 use prices_api::{AppConfig, AppState, app_with_portal};
 use serde_json::json;
 
 const SECRET: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+/// A second key, so the load line counts two.
+const PREVIOUS: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=";
 /// A username no log line could contain by accident.
 const USERNAME: &str = "nelly-zq7-username";
 
@@ -126,7 +128,13 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
         portal_rate_limit: Some(5),
         portal_web_origin: None,
     };
-    let secret = HubSecret::parse(&json!({ "current": SECRET }).to_string()).unwrap();
+    // Loaded on the first call, as in the Lambda, so its line is captured.
+    let secret: HubLoader = Arc::new(|| {
+        Box::pin(async {
+            HubSecret::parse(&json!({ "current": SECRET, "previous": PREVIOUS }).to_string())
+                .map(Some)
+        })
+    });
     let app = app_with_portal(
         &config,
         AppState::without_ch(),
@@ -135,7 +143,7 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
             gateway: Some(Arc::new(test_gateway(&mock.base))),
             settings: Some(Arc::new(eligibility(GUILD_ID, "5"))),
         })
-        .with_hub(HubSource::ready(Some(secret))),
+        .with_hub(HubSource::lazy(secret)),
     );
 
     // Every route, in the order a visitor would meet them, each with a jti
@@ -253,9 +261,21 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
 
     let value = revealed.json()["value"].as_str().unwrap().to_string();
     assert!(!value.is_empty());
-    for (what, secret) in [("a key value", value.as_str()), ("a key value", "CANARY")] {
+    for (what, secret) in [
+        ("a key value", value.as_str()),
+        ("a key value", "CANARY"),
+        ("the hub's secret", SECRET),
+        ("the hub's secret", PREVIOUS),
+    ] {
         assert!(!text.contains(secret), "{what} reached the logs: {text}");
     }
+    // The secret's load is seen, once, with how many keys it holds.
+    let loads: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("the hub contract's secret loaded"))
+        .collect();
+    assert_eq!(loads.len(), 1, "{text}");
+    assert!(loads[0].contains("keys=2"), "{}", loads[0]);
     for token in &tokens {
         let (payload, mac) = token.strip_prefix("v1.").unwrap().split_once('.').unwrap();
         for part in [token.as_str(), payload, mac] {
