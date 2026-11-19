@@ -51,6 +51,16 @@ history:
       first release through develop → deploy/production → master, with Phase 1
       only: a manual deploy from deploy/production's tip and master moved
       through the admin bypass.
+  - date: 2026-11-19
+    status: active
+    who: okarcz
+    note: >
+      Phase 1 done. Environment production (4 reviewers, prevent self-review,
+      deploy/production only) and three rulesets: 27627834 deploy/production,
+      27628401 master (update, admin bypass), 27628422 master (history)
+      (deletion + non_fast_forward, no bypass). GitHub refused GitHub Actions
+      as a bypass actor, so promote's push to master is an open point for
+      Phase 2.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -211,6 +221,41 @@ as separate PRs.
 8. Ruleset on `master`: updates blocked, fast-forward only, no deletion.
    Bypass: GitHub Actions and repository admins.
 
+**Done 2026-11-19.** The operator ran each call with `gh api` from the local
+machine; every setting was read back from GitHub afterwards.
+
+| Setting | Id | State |
+| --- | --- | --- |
+| Environment `production` | | Required reviewers karczuRF, adamkoot, stkrolikiewicz, kowalski; `prevent_self_review: true`; custom branch policies on |
+| Deployment branch policy | 67398189 | `deploy/production` (type `branch`), the only entry |
+| Ruleset `deploy/production` | 27627834 | `deletion`, `non_fast_forward`, `pull_request` (1 approval, dismiss stale, `merge` only), `required_status_checks` (`Detect changes`, `TypeScript (lint, build, typecheck, test)`, `Rust (fmt, clippy, test, lambda build)`, app 15368); no bypass |
+| Ruleset `master` | 27628401 | `update`; bypass repository role admin (5), `always` |
+| Ruleset `master (history)` | 27628422 | `deletion`, `non_fast_forward`; no bypass |
+
+`develop` has no rules. `master` and `deploy/production` were both at
+`7a85607b`.
+
+- **`master` takes two rulesets.** A bypass actor skips every rule of the
+  ruleset that lists it, so an admin bypass on a single ruleset would also
+  allow a force push or a deletion. With `deletion` and `non_fast_forward` in a
+  ruleset of their own, nobody can bypass them, and every move of `master` is
+  a fast-forward.
+- **No GitHub Actions bypass.** GitHub refused the built-in Actions app (15368)
+  as a bypass actor: "Actor GitHub Actions integration must be part of the
+  ruleset source or owner organization". It is accepted in required status
+  checks, not as a bypass actor. Until Phase 2, an admin moves `master` by
+  hand.
+- **Admin bypass covers every repository admin.** A repository ruleset cannot
+  name individual users. On 2026-11-19 the repository had seven admins:
+  karczuRF, adamkoot, stkrolikiewicz, Efem67, kowalski, mmisiorek and
+  Roger-RumbleFish. "Emergencies only" is a team rule; GitHub logs each bypass
+  under the ruleset's Rule insights.
+- GitHub added `require_extra_approval_for_unattributed_changes: true` to the
+  PR rule by default. Watch it on the first release PR.
+
+Rollback: `gh api -X DELETE repos/rumblefishdev/stellar-prices-api/rulesets/<id>`
+for each ruleset, and `…/environments/production` for the environment.
+
 **First test of the flow: the [[0242]] alarms release (runbook 0242 §6).** It
 runs with Phase 1 only (decided 2026-11-18): the flag PR to `develop`, a
 release PR to `deploy/production`, `make deploy-production-observability` by
@@ -234,6 +279,11 @@ Phase 2.
     `master` (rejected unless it is a fast-forward), then tags it
     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release on the same day). A
     failed deploy leaves `master` and the tags as they were.
+    **Open (found 2026-11-19):** the `GITHUB_TOKEN` cannot pass ruleset
+    27628401, because GitHub refuses the Actions app as a bypass actor. Choose
+    one of: a deploy key held as a repository secret, with a `DeployKey` bypass
+    on 27628401; or a GitHub App installed on `rumblefishdev`, with that app as
+    the bypass actor. Ruleset 27628422 stays without a bypass either way.
 
 ### Phase 3: guard and docs
 
@@ -244,6 +294,9 @@ Phase 2.
     `master` is never force-moved), the ClickHouse schema rule, and the other
     changes that are not branch state (data repairs, the portal sync), each
     noted on the release tag.
+15. Once `promote` moves `master`, review the admin bypass on ruleset
+    27628401: remove it, or narrow it to a team, since it covers every
+    repository admin (seven on 2026-11-19).
 
 ## Acceptance Criteria
 
