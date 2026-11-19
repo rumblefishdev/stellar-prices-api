@@ -20,7 +20,7 @@ history:
       2026-10-01 → 11-05 reprice, §5c–§5g on 2026-11-18); the three alarms
       live from prod-2026-11-19 (c7dcd26d). AC1–AC4 met; identities 215,206,
       collisions 0. One trade (Z, 2024-04-18) recorded as a loss under PC9.
-      The 11 bak_0242_* tables are dropped after this archive.
+      The 11 bak_0242_* tables were dropped after this archive, the same day.
   - date: "2026-11-18"
     status: active
     who: okarcz
@@ -562,8 +562,23 @@ Measured bases: 0338 enriched 334 rows in about 90 s; the 2026-11-17 map took �
 - [[0350]]: Phoenix `withdraw_liquidity` counted as a failed dispatch, and the
   extractor gap on pool `CBCZGGNO…`.
 - [[0345]] part C: the 12 unclassified swap emitters.
-- After the archive, run by the operator on the host, one table per command:
-  drop the 11 `bak_0242_*` tables (`asset_symbol`, `assets`,
-  `price_ohlcv_{1m,15m,1h,4h,1d,1w,1M}`, `seed`, `sac_ids`; under 110 KiB in
-  all, no dependants), and move `~/events-backfill.pre-reprice-20261118` to
-  `/tmp/`. §5h rollback ends with the drops.
+- Done after the archive, 2026-11-19 (see "After the archive" below).
+
+## After the archive (2026-11-19)
+
+Run by the operator from the local machine as ClickHouse `default` on
+ch-prod-01 (`ssh deploy@168.119.73.161`, `docker exec -i app-clickhouse-1
+clickhouse-client`), one statement per command, each checked as `dev_read`.
+
+- Route check: `default 11` (eleven `bak_0242_*` tables, not the ten the plan
+  named; all in `prices`, under 110 KiB together, no dependants, no
+  materialized view reading them).
+- `DROP TABLE prices.bak_0242_price_ohlcv_1m SYNC` first: 10 left, live
+  `price_ohlcv_1m` untouched (1,473,550,382 rows, newest candle a minute old).
+- Then `15m`, `1h`, `4h`, `1d`, `1w`, `1M`, `asset_symbol`, `assets`, `seed`,
+  `sac_ids`, in that order. After: 0 `bak_0242_*` tables in any database;
+  `prices.assets` 215,206 identities, 215,206 ids, 0 collisions; live ingest
+  current. §5h rollback no longer exists, and Z's 2024-04-18 trade (the
+  recorded loss) went with the copies.
+- `~/events-backfill.pre-reprice-20261118` on the host (sha256
+  `3e0e521ae787e918…`, the 0338 build) moved to `/tmp/`.
