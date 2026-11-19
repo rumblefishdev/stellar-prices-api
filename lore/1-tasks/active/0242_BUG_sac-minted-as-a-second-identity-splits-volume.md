@@ -3,7 +3,7 @@ id: "0242"
 title: "A SAC is minted as a second identity for an asset we already hold — same token under two asset_ids, with volume split across both"
 type: BUG
 status: active
-assignee: akot
+assignee: okarcz
 related_adr: []
 related_tasks: ["0210", "0139", "0120", "0286", "0252"]
 tags: [layer-backend, layer-database, priority-high, effort-medium, milestone-M2, ingest, identity, defect]
@@ -11,6 +11,33 @@ milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/canonical.rs"
 history:
+  - date: "2026-11-18"
+    status: active
+    who: okarcz
+    note: >
+      Plan to completion written: reprice 2026-10-01 → 2026-11-05 with a fresh
+      events-backfill, pre-roll, then §5 cleanup. §6 waits for 0343 Phase 1
+      and is the first release through develop → deploy/production → master.
+  - date: "2026-11-18"
+    status: active
+    who: okarcz
+    note: >
+      Z's single 2024-04-18 Aquarius trade is recorded as a loss under PC9
+      instead of being repriced (Heal log, 2026-11-18). The §5 backfill keeps
+      one events-backfill window, 2026-10-01 → 2026-11-05.
+  - date: "2026-11-17"
+    status: active
+    who: okarcz
+    note: >
+      Handed over by the previous assignee (akot), who approved PR #421 the
+      same day and asked the new assignee to finish §5 (cleanup and backfill),
+      §6 and §7. The plan agreed on 2026-11-12 stands: map every tier and month
+      read-only, classify per row, backfill only uncovered months, back up, then
+      DELETE, then the probe reads 0. Changed by task 0343: the three 0242
+      alarms now sit behind `opsAlarms.sacIdentityAlarmsEnabled` (`false` in
+      production, #421), so Observability is no longer held back (D8) and
+      release #418 merged without waiting for §5. §6 sets the flag `true`
+      together with `sacContractIdentitiesActionsEnabled`.
   - date: "2026-10-05"
     status: active
     who: akot
@@ -249,6 +276,139 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - Cold start: `loaded the is_sac contract set` with `sac_contracts` 4137, then `resumed cursor from ClickHouse` at 65318468. No WARN.
   - `SacUnprovenSkipped` and `SacCandidatesUnavailable`: no datapoints in the first hour.
   - Probe: `sac_contract_rows` **40**, not the runbook's baseline 36 (`sac_contract_scanned` 74, `be_sac_contracts` 4137). The old build ran until this deploy, so contract rows minted since the October baseline (BLNT above among them) count too. §5 counts its residual from today's number, not from 36.
+- **2026-11-17, the map (runbook §5a and §5b, read-only).** Run as `dev_read` (`readonly = 1`) on `ch.sorobanscan.com`, SELECT only. The §5a predicate and the §5b byte-level test were inlined, so no `bak_0242_sac_ids` table was created. Files: `~/heal-0242/{sac_ids,ac4_before,residual}.tsv` on the local machine.
+  - **40 SAC identities, all 40 with a classic** (`classic_id = 0`: 0). No PC9 case without a classic.
+  - AC4 "before": 215,193 identities, 215,193 ids, 0 collisions.
+  - **Residual: three months only, on every tier.** No other partition holds a row under a SAC id.
+
+    | month | `1m` rows (byte-identical / only copy) | only-copy trades `1m` | `1d` rows (identical / only copy) | only-copy trades `1d` |
+    | --- | --- | --- | --- | --- |
+    | 202404 | 1 (0 / 1) | 1 | 1 (0 / 1) | 1 |
+    | 202610 | 79 (12 / 67) | 75 | 35 (1 / 34) | 85 |
+    | 202611 | 18 (0 / 18) | 19 | 11 (0 / 11) | 19 |
+
+    `15m`, `1h`, `4h`, `1w` and `1M` hold the same three months (full table in `residual.tsv`).
+  - By asset (`1d`): Z aquarius 2024-04-18 (1 trade, U2 as expected); BURNMKR aquarius 2026-10-06 (2); USDE sushiswap 10-16 → 11-04 (50); SUSDE sushiswap 10-16 → 11-04 (38); BLNT comet 10-26 (10); USDE aquarius 10-29 → 11-03 (5); SPY aquarius 11-01 (1). **The last row is 2026-11-04: nothing under a SAC id since the 11-05 deploy.**
+  - BLNT's 10 trades are byte-identical on `1m` (the 0338 reprice) but not on the coarse tiers, which is why `1d` counts 10 more only-copy trades than `1m` in 202610.
+  - `dev_read` has a 30 s `max_execution_time`, so the whole-table `1m` query timed out. `1m` was re-run per month over the months `1d` shows (a `1m` row always rolls into `1d`); each took ≤ 2 s.
+  - **Consequence for the PC9 gate:** every only-copy row is from an AMM source, so the backfill is an `events-backfill` reprice (as in 0338), not phase 3, which also refuses the current month 202611. Ranges: 2026-10-01 → 2026-11-05, and 2024-04-18 for Z, or record Z's single trade as a loss.
+- **2026-11-18, Z's trade recorded as a loss (PC9, decided by the operator).** Z on Aquarius, 2024-04-18, 1 trade: the only copy, under Z's SAC id. Stage B wrote 202404 before the 2026-10-06 seed, so the trade never reached the classic id. Z has a classic, but the row is still an only copy, so it takes PC9's path and is not deleted silently.
+  - Not repriced. The backfill has one window: 2026-10-01 → 2026-11-05.
+  - Why: a 2024-04-18 reprice needs its own `events-backfill` window and a second `preroll-amm-reprice.sql` run over 202404, a month phase 3 has already finished. If `1m` no longer holds the whole of 202404, that pre-roll rebuilds the month's `1w`/`1M` buckets from one day of `1m`. One trade does not justify that risk.
+  - The 202404 row is copied in §5c with the rest of the residual (the rollback copy) and deleted in §5d.
+  - After the reprice, the re-run map expects `only_copy = 0` for 202610 and 202611. The single 202404 row is this recorded loss.
+
+- **2026-11-18, the reprice set-up (plan A).** Run from fishuser-hero, as the 0286 re-ingest was: fishuser-hero's key `~/.ssh/hero-ch-prod` still reaches `deploy@ch-prod-01` (CH answers `default`, 26.3.10.60). Each `events-backfill` runs on the host over SSH, with the password on stdin. No secret is stored on any disk.
+  - Binary: `37e2498ef35adc7b88278182e6889c5cbc91ed86e917febc0f038fdfad470e40`, built from `develop` `00ad6090` with `cargo lambda build --release --target x86_64-unknown-linux-musl -p events-backfill` on the local machine. It replaced `3e0e521a…` (the 0338 build of 2026-11-02, before #390), which is kept as `~/events-backfill.pre-reprice-20261118` on the host.
+  - One-ledger dry run at 51,500,460: `unproven sac swaps: 0`, the 0242 line.
+  - `prices-production-cleanup`: DISABLED.
+- **2026-11-18, the reprice and the pre-roll (plan B).** From fishuser-hero.
+  - Dry run 64,705,404 → 65,318,468 (9 s): 1,558,996 events, the same count measured beforehand. Ticks: aquarius 504,153, comet 3,372, phoenix 1,465, soroswap 68,961 (= BE's raw swaps), sushiswap 30,631. `unproven sac swaps: 0`, `unresolved pools: 0`.
+  - Two warnings, neither caused by this run. First, 8 Phoenix events fail on pool `CBCZGGNO…` with "unexpected topic shape": BE holds 1,469 Phoenix swaps, the tool and live both 1,465, so it is an existing extractor gap and no 0242 asset trades on Phoenix. Second, the coverage probe sees 12 contracts outside `pool_registry` (308,611 events); `prices-production-coverage-sweep-unclassified` has been in ALARM since 2026-11-09, outside this task.
+  - Reprice at 12:48 UTC (10 s): 263,934 `1m` rows, the same tick counts.
+  - Manual `prices-production-enrichment` run: 859 rows enriched. 99 % of the window's remaining `close_usd = 0` rows are in pairs never priced in the window (no USD route), so they are not repriced rows left unpriced.
+  - The six `mv_reconcile_*` views were stopped (checked `Disabled`). `preroll-live-gap.sql` ran over `2026-10-01 00:00:00` → `2026-11-18 12:00:00` (`PREROLL OK`, a few minutes). The views were started again (checked `Scheduled`, no exception). The password was unset on fishuser-hero.
+  - After the pre-roll, every tier equals `1m` per source over 10-01 → 11-18. Sushiswap went 37,917 → 38,005 and aquarius 734,695 → 734,701; nothing else moved. October and November `1M` equal their days, and the 7 weeks from 09-28 equal their days.
+  - The pre-roll set about 120 `sdex` coarse rows to `close_usd = 0` (103 / 15 / 3 on `1h` / `4h` / `1d`), as in 0338, where the next coarse sweep restored them.
+- **2026-11-18, §5a and the §5b gate (plan C).**
+  - §5a: `bak_0242_sac_ids` created as `default` from fishuser-hero: `40 0`. AC4 "before": 215,216 identities, 215,216 ids, 0 collisions.
+  - SAC-keyed rows sit in 202404, 202610 and 202611 only, on every tier.
+  - Byte-level test: `1m`, `15m` and `1h` are fully byte-identical in 202610 and 202611 (79 + 18, 65 + 18, 59 + 18 rows). 23 coarse rows are not byte-identical: 1 on `4h`, 3 on `1d`, 9 on `1w`, 10 on `1M`. In each, the classic row also holds that pair's other trades in the bucket. All 23 were checked: the classic row equals the sum of its classic `1m` children, and holds at least the SAC row's trades. Since every SAC `1m` row is byte-identical, every SAC trade is in the classic coarse row. No trade in 202610 or 202611 is an only copy.
+  - The only only-copy rows are 202404's, one per tier, Z's single trade: the recorded loss. **The gate passed.**
+- **2026-11-18, §5c–§5g, the cleanup (plan C).** As `default` from fishuser-hero.
+  - §5c: only `bak_0242_sac_ids` and `bak_0242_seed` existed before. `bak.sql` had 18 statements. The column lists left out only `assets.asset_id` (MATERIALIZED) and the six EPHEMERAL `base_*`/`quote_*` columns. Copies: `assets` 40, `asset_symbol` 40, and `1m` 98, `15m` 84, `1h` 78, `4h` 70, `1d` 47, `1w` 22, `1M` 16 rows. Each tier's copy equals the live SAC-keyed rows exactly: 107 trades and 12,911.293623 base volume, partitions 202404, 202610 and 202611.
+  - §5d: 21 `DELETE … IN PARTITION ID` statements (7 tiers × 3 partitions, fine tiers first). After them, every tier reads 0 SAC-keyed rows (M4). Per source over 10-01 → 11-18, every tier dropped by exactly the SAC copies: aquarius 734,701 → 734,693 (8), comet 6,181 → 6,171 (10), sushiswap 38,005 → 37,917 (88). `1m` to `1d` still agree. Z's 202404 trade went with its partition: the recorded loss.
+  - §5e and §5f: `assets` 40 → 0, then `asset_symbol` 40 → 0.
+  - §5g: M1, the SAC contract rows, read 0. `identity_by_contract` for the 40: 40 contracts, 0 contract rows, `max(n) = 1`. AC4: 215,216 → 215,176 identities and ids (each −40), collisions 0. The 40 classic rows are all present. 42 contract rows remain, the genuine Soroban tokens. Manual probe: `sac_contract_rows: 0`, `collisions: 0`. API: XCR by its SAC is `XCR:GBLJ…`, `credit`, `contract ""`; `/ohlcv` by the SAC and by `CODE:ISSUER` is `SAME`; the XLM SAC answers `native` / `XLM`.
+  - The `bak_0242_*` tables stay until this task is archived (§5h rollback).
+  - Scheduled probe: `SacContractIdentities` 40 until 13:01 UTC, then 0 at 13:16 and 13:31. §6's pre-check (0 for at least two periods) is met.
+  - The 13:30 coarse sweep restored the `sdex` coarse `close_usd = 0` counts the pre-roll had raised, to exactly their earlier values: `1h` 2,670,725, `4h` 1,527,763, `1d` 556,120.
+
+## Plan to completion (2026-11-18)
+
+State: stage D done, the 0242 code live since 2026-11-05, the map read on 2026-11-17. 40 SAC ids, all with a classic. Residual: 202404 (Z, a recorded loss) and 202610–202611 (94 only-copy trades, all AMM). Order: A → B → C, with [[0343]] Phase 1 done during B's runs, then D as the first release through the new flow, then E.
+
+Three findings shape the plan:
+
+- The `events-backfill` on the host was built for [[0338]] around 12:33 UTC on 2026-11-02, before #390 merged (13:28). A fresh build is needed.
+- An enriched row outranks a reprice row of the same minute (0338). A classic-id minute that already holds a row keeps it, and the repriced trades of that minute are lost. The re-run map (step 9) catches this.
+- A pre-roll that ends at 2026-11-05 rebuilds the week of 11-02 and November's `1M` from a partial slice. 0338 left those buckets to the reconcile MVs, but their 7-day look-back no longer reaches 11-05.
+
+### A. Before the reprice
+
+**Who runs what (decided 2026-11-18).** Every write runs on the Hetzner host as ClickHouse's `default` user (SSH, then `docker exec -i app-clickhouse-1 clickhouse-client`), the same place and user as `events-backfill`. The operator holds no `dev_shared` certificate, so the runbook's `chq` writes are replaced by this route. The agent prepares each write as a block with the real values and checks each result as `dev_read` before the next step. The operator pastes and runs every write.
+
+1. **Host:** `SELECT currentUser()` prints `default`. The checks run as `dev_read` from the local machine.
+2. **Ledgers (measured 2026-11-18, `dev_read`):** start **64,705,404** (closed 2026-10-01 00:00:02; 64,705,403 closed 09-30 23:59:57). End **65,318,468** (closed 2026-11-05 11:32:59): the cursor the 0242 build resumed from at its cold start (Heal log). Every earlier ledger was written by the old build. About 613k ledgers.
+3. **Local machine → host:** build `events-backfill` from the current `develop` (`cargo lambda build --target x86_64-unknown-linux-musl`, as in 0338). It must contain #390. Record its sha256 here.
+4. `prices-production-cleanup` is still DISABLED. It stays disabled until step 7 is done.
+
+### B. The reprice, 2026-10-01 → 2026-11-05
+
+5. **Host, as `default`, under `tmux`:** `--start 64705404 --end 65318468 --dry-run --verbose`; compare the tick counts with BE's swap count for the range; then run again without `--dry-run`.
+6. **`1m`:** the repriced trades sit under the classic ids (USDE, SUSDE, BURNMKR, BLNT, SPY, per source and day). Every repriced row has `close_usd`; if not, `coarse-repair --table price_ohlcv_1m` for 202610 and 202611 (0338 step 7).
+7. **Pre-roll with `preroll-live-gap.sql`.** Never `preroll-amm-reprice.sql`: it is historical since [[0286]].
+   - `start_ts = '2026-10-01 00:00:00'`, a month edge; the script aligns the week itself.
+   - `end_ts` = the start of the current hour at run time (decided 2026-11-18), not 2026-11-05. Ending at 11-05 would leave the classic rows of the week of 11-02 and of November without the repriced trades: the pre-roll's partial rows lose on version to live's rows, and the reconcile MVs no longer reach back to 11-05.
+   - The window then overlaps the reconcile MVs' 7-day look-back. Stop the six `mv_reconcile_*` first ([[0286]] runbook §1a; six rows `Disabled`). START them after the checks below. `prices-production-mv-refresh-disabled` fires while they are stopped: expected.
+   - After: each repriced day agrees on `1m`, `15m`, `1h`, `4h` and `1d`; each week equals its days; October and November equal their days.
+   - Count `close_usd = 0` on the coarse tiers in the window. In 0338 the pre-roll left 72 `sdex` rows at 0. Let the enrichment worker price them, or run `coarse-repair`.
+
+During steps 5–7: [[0343]] Phase 1 (the `production` environment and the two rulesets). It touches only GitHub settings.
+
+### C. The gate and the cleanup (runbook §5)
+
+8. **§5a:** create `bak_0242_sac_ids`. Expect **40** rows (the runbook says 36), with `classic_id = 0` at 0. Record AC4's "before": identities, ids, collisions.
+9. **§5b, the re-run map:** `only_copy = 0` on every tier for 202610 and 202611. 202404 reads 1 only-copy row, Z's recorded loss. Any other only-copy row is a minute lost to an enriched row: STOP, and decide it under PC9 before step 10.
+10. **§5c:** pre-check that only `bak_0242_sac_ids` and `bak_0242_seed` exist (there is no `bak_0242_seed_stage`). After the copies, each tier equals its `residual_rows`, and `assets` and `asset_symbol` hold 40 each.
+11. **§5d → §5f:** the candles fine tiers first, then the 40 `assets` rows, then the 40 `asset_symbol` rows. Every post-check reads 0.
+12. **§5g:**
+    - M1: 0 SAC contract rows.
+    - `identity_by_contract`: 40 contracts, 0 contract rows, `max(n) = 1`.
+    - AC4: identities and ids each down by exactly 40, collisions unchanged.
+    - The probe reads `sac_contract_rows = 0`.
+    - The API: XCR by SAC and by classic print `SAME`; the XLM SAC answers as XLM.
+
+### D. The alarms (runbook §6): the first release through the [[0343]] flow
+
+Precondition: 0343 Phase 1 done. Until this deploy, no alarm watches `SacUnprovenSkipped` or `SacContractIdentities`: read both by hand at least daily (D8).
+
+13. A PR to `develop` sets `opsAlarms.sacIdentityAlarmsEnabled` and `opsAlarms.sacContractIdentitiesActionsEnabled` to `true` in `infra/envs/production.json`.
+14. Before the release PR: `git diff origin/deploy/production origin/develop -- . ':!lore'` holds only that flag change, or every other change in it is known and meant to ship. On 2026-11-18 the two branches differed only in `lore/`.
+15. Pre-check: `SacContractIdentities` reads `0` for at least two periods (30 min).
+16. A release PR `develop` → `deploy/production`, approved, merged with a merge commit. From a clean checkout at its tip: `cd infra && make deploy-production-observability`.
+17. Post-check: all three alarms print `True`, then `OK`.
+18. `master` fast-forwarded to the deployed commit through the admin bypass (no workflow until 0343 Phase 2), and the commit tagged `prod-YYYY-MM-DD`.
+
+This release tests the branch rules. It does not test the `production` environment approval or the `promote` job: those come with 0343 Phase 2.
+
+### E. Close
+
+19. §7 evidence into this task: the outputs of §5a, §5b, §5g and §6, against AC1–AC4.
+20. Tell BE: each SAC now resolves to one classic row in `identity_by_contract`.
+21. Archive this task as `completed`. Then drop the `bak_0242_*` tables, one by one.
+
+### Rollback
+
+§5h restores the copies, metadata first. A reprice needs no rollback of its own: a re-run only replaces.
+
+### Estimate
+
+| Part | Hands-on |
+| --- | --- |
+| A + B (preparation, reprice, pre-roll, checks) | 2–4 h |
+| C (§5a–§5g) | 1–2 h |
+| §5h, only if a check fails | 15–30 min |
+| D (§6, without review waits) | ~1 h |
+
+Measured bases: 0338 enriched 334 rows in about 90 s; the 2026-11-17 map took ≤ 2 s per month on `1m`. No reprice or pre-roll wall time is on record, so those two are the largest unknowns.
+
+### Settled 2026-11-18
+
+- The pre-roll `end_ts`: the start of the current hour, with the reconcile MVs stopped (step 7).
+- Both ledgers measured (step 2).
+- The write user: `default` on the host. The split: the agent prepares, the operator runs (top of A).
+- No conflict between the reprice and the reconcile MVs: they look back 7 days (11-11 → 11-18), and the reprice writes `1m` for 10-01 → 11-05.
 
 ## Acceptance Criteria
 

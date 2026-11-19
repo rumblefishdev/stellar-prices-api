@@ -19,6 +19,7 @@ import {
   pricesLambdaDefaults,
 } from '../lambda-baseline.js';
 import {
+  hubTokenSecretName,
   mtlsSecretArnFromParts,
   mtlsSecretName,
   portalOauthSecretName,
@@ -194,6 +195,15 @@ export class ComputeStack extends cdk.Stack {
    */
   public readonly portalOauthSecretName: string;
   /**
+   * `PORTAL_HUB_SECRET_NAME` the api-handler reads for the API hub's
+   * dashboard contract (task 0348) — the key the hub's tokens are signed
+   * with, `{"current", "previous"?}`. Set on the Function env below; the role
+   * is granted read on exactly this secret (`PortalReadHubTokenSecret`). Not
+   * under `prices/`: the hub's backend reads the same secret (see
+   * `hubTokenSecretName`). Operator-created; the value never appears here.
+   */
+  public readonly portalHubSecretName: string;
+  /**
    * `PORTAL_FREE_PLAN_PARAM` the api-handler reads for self-service key
    * issuance (task 0187) — the NAME of the SSM parameter holding the
    * `pricing-api-free` usage-plan id, not the id itself.
@@ -236,6 +246,9 @@ export class ComputeStack extends cdk.Stack {
     // grant is on that name's wildcard ARN, and the operator owns the value
     // (task 0186). Only the api-handler reads it — no worker signs a cookie.
     this.portalOauthSecretName = portalOauthSecretName(envName);
+    // Fourth, the hub's (task 0348): named by the shared helper too, but the
+    // name is the hub's spec's, since its backend reads the same secret.
+    this.portalHubSecretName = hubTokenSecretName(envName);
     // Must match `ApiGatewayStack`'s `PricingApiFreePlanIdParam` exactly — the
     // two are the write and the read of one value, in two stacks that cannot
     // reference each other. Task 0194 audits the pair.
@@ -514,6 +527,35 @@ export class ComputeStack extends cdk.Stack {
             awsRegion,
             accountId,
             this.portalOauthSecretName,
+          ),
+        ],
+      }),
+    );
+
+    // Read on the API hub's token secret (task 0348), the same shape as the
+    // OAuth grant above: this one function, this one secret, by its
+    // wildcard-suffixed ARN, so the grant needs no secret at synth. Nothing in
+    // the baseline covers it — the name is not under `prices/` (see
+    // `hubTokenSecretName`). The default `aws/secretsmanager` key encrypts it
+    // (the create command in the hub's README names no KMS key), so no
+    // `kms:Decrypt` is needed, as for the OAuth secret.
+    //
+    // A missing secret, or this grant missing, closes the contract only: the
+    // hub's four routes answer `503 hub_unconfigured` and the api-handler logs
+    // `the hub contract's secret did not load` naming
+    // `PORTAL_HUB_SECRET_NAME`; the first hub call after a 2 s cooldown reads
+    // again. The portal, `/api/config` and `/v1` are unaffected, and the
+    // portal-load-failed alarm does not fire for it
+    // (`packages/prices-api/src/portal/sources.rs`, `HubSource`).
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadHubTokenSecret',
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          mtlsSecretArnFromParts(
+            awsRegion,
+            accountId,
+            this.portalHubSecretName,
           ),
         ],
       }),
@@ -942,6 +984,18 @@ export class ComputeStack extends cdk.Stack {
         // this name resolving to a missing secret fails read 1 of the five
         // portal-load reads listed on `PORTAL_ENABLED`.
         PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
+        // The NAME of the API hub's token secret (task 0348), never its value:
+        // the hub's four calls under `/api/hub/v1/` verify their bearer token
+        // against it. Read through the same extension on the first hub call
+        // per execution environment, awaited beside the portal's five reads
+        // but NOT one of them — it is not a deploy gate: a missing secret
+        // answers the hub's calls `503 hub_unconfigured` and changes nothing
+        // else (see `PortalReadHubTokenSecret` above). A successful read is
+        // kept for the environment's life, so changing the value needs a
+        // recycle on this side: the order is in
+        // `docs/runbooks/hub-contract.md`. The local seam `PORTAL_HUB_SECRET`
+        // (the JSON itself) is compiled out of this build.
+        PORTAL_HUB_SECRET_NAME: this.portalHubSecretName,
         // The NAME of the SSM parameter holding the `pricing-api-free` usage
         // plan id (task 0187) — see `portalFreePlanParameterName` for why it is
         // a name, why it is not a cross-stack reference, and why it is not

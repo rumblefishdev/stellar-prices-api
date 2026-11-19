@@ -35,6 +35,32 @@ history:
       Phase 0 step 1 opened as PR #421. Read-only diff and AWS checks recorded
       under "Measured on 2026-11-17". Prices-Cicd was never deployed, and its
       OIDC provider would collide with the account's existing one.
+  - date: 2026-11-17
+    status: active
+    who: okarcz
+    note: >
+      Phase 0 done. #421 merged (7d9e9e70), Secrets deployed (13:05 UTC),
+      #418 merged to master (7a85607b, 13:37 UTC), master merged back into
+      develop (ebeaa31f, identical tree), deploy/production created at
+      7a85607b, unprotected until Phase 1.
+  - date: 2026-11-18
+    status: active
+    who: okarcz
+    note: >
+      Planned: Phase 1 goes in while 0242's backfill runs. 0242's alarms release is the
+      first release through develop → deploy/production → master, with Phase 1
+      only: a manual deploy from deploy/production's tip and master moved
+      through the admin bypass.
+  - date: 2026-11-19
+    status: active
+    who: okarcz
+    note: >
+      Phase 1 done. Environment production (4 reviewers, prevent self-review,
+      deploy/production only) and three rulesets: 27627834 deploy/production,
+      27628401 master (update, admin bypass), 27628422 master (history)
+      (deletion + non_fast_forward, no bypass). GitHub refused GitHub Actions
+      as a bypass actor, so promote's push to master is an open point for
+      Phase 2.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -49,8 +75,9 @@ introduces a three-branch release flow, `develop` → `deploy/production` →
 
 ## Status: Active
 
-**Current state:** decisions made and plan written (2026-11-17), nothing
-implemented. Phase 0 starts with the alarm-flag PR.
+**Current state:** Phase 0 done on 2026-11-17: `master` is what production
+runs, `develop` holds the same tree, and `deploy/production` exists without
+protection. Next is Phase 1 (GitHub settings).
 
 ## Context
 
@@ -160,7 +187,16 @@ as separate PRs.
 
 ## Implementation Plan
 
-### Phase 0: `master` equal to production (manual)
+### Phase 0: `master` equal to production (manual) — done 2026-11-17
+
+| Step | Result |
+| --- | --- |
+| 1 | #421 merged into `develop` as `7d9e9e70`. The production synth before and after differs only in the three alarms (dashboard strip 90 → 87) |
+| 2 | Only the Secrets description differed. `make deploy-production-secrets` from `7d9e9e70` at 13:05 UTC changed it; the value is unchanged (SSM version 1 → 2) |
+| 3 | #418 merged into `master` as `7a85607b` (13:37 UTC), with a merge commit |
+| 4 | `master` merged into `develop` as `ebeaa31f`; `git diff origin/master origin/develop` is empty |
+| 5 | `deploy/production` created at `7a85607b`. No workflow runs on it yet |
+
 
 1. PR to `develop` (#421): a config flag in `infra/envs/production.json` that leaves
    out the three 0242 alarms (`ledger-processor-sac-unproven`,
@@ -185,6 +221,49 @@ as separate PRs.
 8. Ruleset on `master`: updates blocked, fast-forward only, no deletion.
    Bypass: GitHub Actions and repository admins.
 
+**Done 2026-11-19.** The operator ran each call with `gh api` from the local
+machine; every setting was read back from GitHub afterwards.
+
+| Setting | Id | State |
+| --- | --- | --- |
+| Environment `production` | | Required reviewers karczuRF, adamkoot, stkrolikiewicz, kowalski; `prevent_self_review: true`; custom branch policies on |
+| Deployment branch policy | 67398189 | `deploy/production` (type `branch`), the only entry |
+| Ruleset `deploy/production` | 27627834 | `deletion`, `non_fast_forward`, `pull_request` (1 approval, dismiss stale, `merge` only), `required_status_checks` (`Detect changes`, `TypeScript (lint, build, typecheck, test)`, `Rust (fmt, clippy, test, lambda build)`, app 15368); no bypass |
+| Ruleset `master` | 27628401 | `update`; bypass repository role admin (5), `always` |
+| Ruleset `master (history)` | 27628422 | `deletion`, `non_fast_forward`; no bypass |
+
+`develop` has no rules. `master` and `deploy/production` were both at
+`7a85607b`.
+
+- **`master` takes two rulesets.** A bypass actor skips every rule of the
+  ruleset that lists it, so an admin bypass on a single ruleset would also
+  allow a force push or a deletion. With `deletion` and `non_fast_forward` in a
+  ruleset of their own, nobody can bypass them, and every move of `master` is
+  a fast-forward.
+- **No GitHub Actions bypass.** GitHub refused the built-in Actions app (15368)
+  as a bypass actor: "Actor GitHub Actions integration must be part of the
+  ruleset source or owner organization". It is accepted in required status
+  checks, not as a bypass actor. Until Phase 2, an admin moves `master` by
+  hand.
+- **Admin bypass covers every repository admin.** A repository ruleset cannot
+  name individual users. On 2026-11-19 the repository had seven admins:
+  karczuRF, adamkoot, stkrolikiewicz, Efem67, kowalski, mmisiorek and
+  Roger-RumbleFish. "Emergencies only" is a team rule; GitHub logs each bypass
+  under the ruleset's Rule insights.
+- GitHub added `require_extra_approval_for_unattributed_changes: true` to the
+  PR rule by default. Watch it on the first release PR.
+
+Rollback: `gh api -X DELETE repos/rumblefishdev/stellar-prices-api/rulesets/<id>`
+for each ruleset, and `…/environments/production` for the environment.
+
+**First test of the flow: the [[0242]] alarms release (runbook 0242 §6).** It
+runs with Phase 1 only (decided 2026-11-18): the flag PR to `develop`, a
+release PR to `deploy/production`, `make deploy-production-observability` by
+hand from its tip, then `master` fast-forwarded and tagged through the admin
+bypass. It tests the branch rules, not the `production` environment approval
+or the `promote` job; those get their first test on the first release after
+Phase 2.
+
 ### Phase 2: the deploy workflow
 
 9. `.github/workflows/deploy-production.yml`, triggered by a push to
@@ -200,6 +279,11 @@ as separate PRs.
     `master` (rejected unless it is a fast-forward), then tags it
     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release on the same day). A
     failed deploy leaves `master` and the tags as they were.
+    **Open (found 2026-11-19):** the `GITHUB_TOKEN` cannot pass ruleset
+    27628401, because GitHub refuses the Actions app as a bypass actor. Choose
+    one of: a deploy key held as a repository secret, with a `DeployKey` bypass
+    on 27628401; or a GitHub App installed on `rumblefishdev`, with that app as
+    the bypass actor. Ruleset 27628422 stays without a bypass either way.
 
 ### Phase 3: guard and docs
 
@@ -210,13 +294,16 @@ as separate PRs.
     `master` is never force-moved), the ClickHouse schema rule, and the other
     changes that are not branch state (data repairs, the portal sync), each
     noted on the release tag.
+15. Once `promote` moves `master`, review the admin bypass on ruleset
+    27628401: remove it, or narrow it to a team, since it covers every
+    repository admin (seven on 2026-11-19).
 
 ## Acceptance Criteria
 
 - [ ] `deploy/production` exists, is protected, and takes only approved PRs
 - [ ] A production deploy from any other commit is refused
-- [ ] `master` equals production after Phase 0: #418 merged, `make
-      diff-production` shows only Lambda code hashes
+- [x] `master` equals production after Phase 0: #418 merged, `make
+      diff-production` shows only Lambda code hashes (2026-11-17)
 - [ ] Every deploy records the commit it was deployed from (GitHub
       deployment), readable without access to the deployer's machine
 - [ ] After a successful deploy `master` points at the deployed commit and

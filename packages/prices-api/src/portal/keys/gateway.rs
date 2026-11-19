@@ -92,9 +92,30 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Explorer, and to task 0194's audit.
 const TAG_MANAGED_BY: (&str, &str) = ("ManagedBy", "prices-portal");
 
-/// The task that introduced the key, so a later slice can tell an 0187 key from
-/// one issued after eligibility ([0189]) landed.
-const TAG_ISSUED_BY: (&str, &str) = ("IssuedBy", "task-0187");
+/// The tag naming what issued the key, so a later slice can tell an 0187 key
+/// from one issued after eligibility ([0189]) landed — and, since task 0348,
+/// the portal's own keys from the hub contract's. The value is the caller's:
+/// [`Gateway::create`] takes it.
+const TAG_ISSUED_BY: &str = "IssuedBy";
+
+/// The `IssuedBy` value of every key the portal's own round-trip creates —
+/// the task that introduced the key.
+pub(crate) const ISSUED_BY_PORTAL: &str = "task-0187";
+
+/// The `IssuedBy` value of every key the API hub's contract creates (task
+/// 0348) — the hub's `key/issue`, after the hub proved membership itself.
+pub(crate) const ISSUED_BY_HUB: &str = "hub-contract";
+
+/// The description a created key carries in the console, after what issued
+/// it (`issued_by`, the `IssuedBy` tag): the hub contract's keys say so, and
+/// anything else reads as the portal's own, as every key did before task 0348.
+fn description_for(issued_by: &str) -> &'static str {
+    if issued_by == ISSUED_BY_HUB {
+        "Self-service key issued through the API hub (task 0348)"
+    } else {
+        "Self-service key issued by the Stellar Prices API portal (task 0187)"
+    }
+}
 
 /// An API key value, which is a bearer credential.
 ///
@@ -661,7 +682,14 @@ impl Gateway {
     /// one without a second call. Tagged on creation rather than afterwards:
     /// a separate `TagResource` could fail and leave an untagged key, which is
     /// the one thing tagging exists to prevent.
-    pub async fn create(&self, name: &str) -> Result<(KeyRecord, KeyValue), GatewayError> {
+    ///
+    /// `issued_by` is the `IssuedBy` tag's value — `ISSUED_BY_PORTAL` for
+    /// the portal's own round-trip — and picks the key's description.
+    pub async fn create(
+        &self,
+        name: &str,
+        issued_by: &str,
+    ) -> Result<(KeyRecord, KeyValue), GatewayError> {
         // **No SDK retries on a create.** `CreateApiKey` has no idempotency
         // token, so a retried attempt whose first try actually landed makes a
         // second key — under the user's exact name, enabled, attached to
@@ -674,10 +702,10 @@ impl Gateway {
             .client
             .create_api_key()
             .name(name)
-            .description("Self-service key issued by the Stellar Prices API portal (task 0187)")
+            .description(description_for(issued_by))
             .enabled(true)
             .tags(TAG_MANAGED_BY.0, TAG_MANAGED_BY.1)
-            .tags(TAG_ISSUED_BY.0, TAG_ISSUED_BY.1)
+            .tags(TAG_ISSUED_BY, issued_by)
             .customize()
             .config_override(
                 aws_sdk_apigateway::config::Builder::new()

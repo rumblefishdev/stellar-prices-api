@@ -45,10 +45,19 @@
 pub mod auth;
 pub mod eligibility;
 pub(crate) mod extension;
+pub mod hub;
 pub mod keys;
 pub mod period;
 pub mod sources;
 pub mod usage;
+
+/// The loopback mock of API Gateway's control plane that the integration
+/// tests drive, compiled into the unit tests as well (task 0348) — so the
+/// service functions `keys` and `usage` hand their handlers are tested
+/// against the same wire, not against a fake of it.
+#[cfg(test)]
+#[path = "../../tests/portal_keys/harness.rs"]
+pub(crate) mod test_harness;
 
 use std::time::Duration;
 
@@ -218,6 +227,20 @@ pub(crate) fn apply_with(
     // handle below.
     let usage_state = usage::UsageState::new(None, None).with_sources(sources.clone());
     let usage_cache = usage_state.cache_handle();
+
+    // The hub's dashboard contract (task 0348): four calls the API hub's
+    // backend makes server-to-server, each authorised by a token of its own
+    // (`hub::auth`) rather than by the portal's session cookie. It shares the
+    // portal's sources and, through a clone of the usage state, its usage
+    // cache — one account's usage is one entry whichever route asks, and a
+    // hub revoke or issue evicts it for the portal's `/usage` too. Mounted
+    // under the gate below like every portal route, and OUTSIDE the portal's
+    // CORS layer: no browser calls it, and no origin is granted it.
+    let hub = hub::routes(hub::HubState::new(
+        sources.clone(),
+        usage_state.clone(),
+        config.portal_rate_limit,
+    ));
     let usage = usage::routes(usage_state);
 
     // Sign-in (task 0186) and the eligibility-checked issue round-trip
@@ -274,6 +297,7 @@ pub(crate) fn apply_with(
 
     router
         .merge(portal)
+        .merge(hub)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
 }
 

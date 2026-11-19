@@ -65,6 +65,7 @@ use std::time::{Duration, Instant};
 use axum::response::Response;
 
 use super::super::eligibility::{self, Eligibility, EligibilitySettings};
+use super::super::keys::gateway::ISSUED_BY_PORTAL;
 use super::super::keys::{self, IssueOutcome};
 use super::super::usage::UsageCache;
 #[cfg(test)]
@@ -528,8 +529,8 @@ async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
     // `with_deadline` test seam keeps working.
     let deadline = remaining.min(state.issue.deadline);
 
-    match keys::issue_for(gateway, user_id, deadline).await {
-        IssueOutcome::Issued { created } => {
+    match keys::issue_for(gateway, user_id, deadline, ISSUED_BY_PORTAL).await {
+        IssueOutcome::Issued { created, .. } => {
             // A key now exists, so a cached "no key" on the usage route is
             // false — same eviction the reveal performs, for the page this
             // redirect is about to land on.
@@ -538,7 +539,9 @@ async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
             }
             Issued { created }
         }
-        IssueOutcome::Capped { next_eligible_date } => Capped { next_eligible_date },
+        IssueOutcome::Capped {
+            next_eligible_date, ..
+        } => Capped { next_eligible_date },
         IssueOutcome::Failed => Failed,
     }
 }

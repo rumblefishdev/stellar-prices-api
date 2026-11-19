@@ -2,7 +2,7 @@
 id: "0101"
 title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→07-11 hole)"
 type: FEATURE
-status: blocked
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0282", "0285", "0271", "0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128", "0264", "0176", "0088"]
@@ -135,6 +135,16 @@ history:
       drawn from it, so a write run should wait until 0285 has at least
       classified the two dominant unregistered groups. That is a SECOND reason
       to hold, independent of the 0282 sequencing already recorded.
+  - date: 2026-11-18
+    status: completed
+    who: okarcz
+    note: >
+      Closed with no reprice: the 0286 phase-3 re-ingest rebuilt July 2026 with
+      the fixed extractors and a rediscovered pool registry, which healed both
+      gaps. Measured read-only as dev_read: Soroswap and Phoenix candle trades
+      equal BE's raw swaps on every day 2026-07-06 → 07-17, on 1m, 1h and 1d.
+      A sweep over every day of the AMM era (2024-03 → 2026-11-04) finds no
+      day with swaps and no candles. Both blockers (0282, 0285) were archived.
 ---
 
 # Reprice the live-era AMM gap
@@ -485,16 +495,17 @@ zeros in between. Tracked as step 11, not as a blocker.
 
 ## Acceptance Criteria
 
-- [ ] Phoenix candles in `[63352612, end]` reflect the variable-length fix
+- [x] Phoenix candles in `[63352612, end]` reflect the variable-length fix
       (compare against `soroban_events`: 8-event **and** 7-event groups both
       priced), in `1m` **and** coarse.
-- [ ] Soroswap candles exist for 2026-07-06 09:35 → 07-11 21:00 in `1m` and
+- [x] Soroswap candles exist for 2026-07-06 09:35 → 07-11 21:00 in `1m` and
       coarse; Soroswap history is continuous from activation to the live tip.
       ⚠️ Range **corrected 2026-09-14** from 07-06 → 07-15. ⚠️ The resumption
       minute **21:00 is itself partial** — the replay entered it mid-minute at
       ledger 63,433,850 — so the run must cover it, not stop below it.
-- [ ] Conservation holds per source at every granularity; no level below `1m`.
-- [ ] SDEX untouched (row count + `1d` tip unchanged — **capture the baseline
+- [x] Conservation holds per source at every granularity; no level below `1m`.
+      Checked on `1m`, `1h` and `1d` (§Resolution).
+- [x] Moot, no reprice was run (§Resolution). ~~SDEX untouched~~ (row count + `1d` tip unchanged — **capture the baseline
       BEFORE the run this time**; 0097 skipped it and could only sanity-check).
 - [x] ~~`prices-production-cleanup` re-enabled after verification.~~
       🔒 **WITHDRAWN 2026-09-14 by operator decision** — the rule stays
@@ -503,7 +514,7 @@ zeros in between. Tracked as step 11, not as a blocker.
       it: verified from EventBridge + CloudTrail that it has been disabled since
       **2026-07-20 16:22:33** and has not fired in 56 days, so the July `1m` rows
       this reprice targets are intact. Releasing it is [[0200]]'s call, after M3.
-- [ ] Both run bounds minute-aligned (not just `--end`) — see
+- [x] Moot, no run (§Resolution). ~~Both run bounds minute-aligned~~ (not just `--end`) — see
       §Cross-invocation minute boundary.
 
 Merged from [[0271]]:
@@ -526,14 +537,73 @@ Merged from [[0271]]:
       action from the slot their venues actually use — Soroswap is the only venue
       with a `String` constant in `topic[0]`, which is also why its events carry
       a `NULL` `signature`.
-- [ ] A sweep over the full AMM range reports whether other instances exist.
+- [x] A sweep over the full AMM range reports whether other instances exist.
+      **None** (§Resolution): 0 days with swaps and no candles, for either venue.
       ⚠️ Sweep on **candle absence per source per day** in `price_ohlcv_1d`, then
       confirm each candidate against raw swap counts — **not** with
       `intDiv(version, 1000)`, which is only a ledger in single-member buckets.
-- [ ] `milestone-2-evidence.md` §8's row is updated to the outcome — it currently
+- [x] No such row exists any more: §8 of `docs/scf/milestone-2-evidence.md` is
+      "Live endpoints and access" and no line reads "cause under investigation".
+      The evidence is a record of what was submitted, so it is not edited.
+      Original wording: `milestone-2-evidence.md` §8's row is updated to the outcome — it currently
       reads "cause under investigation" and promises resolution before
       Tranche 3. **The outcome now exists**, so this is writing it up, not
       investigating.
+
+## Resolution (2026-11-18)
+
+**Healed by the [[0286]] phase-3 re-ingest, with no reprice from this task.**
+Phase 3 dropped and rebuilt every month from 2015-11 to 2026-09, July 2026
+included, with the fixed extractors (0096's Soroswap fix, 0099's Phoenix fix)
+and a pool registry rediscovered to the tip. That is the repair this task
+planned, over a wider range. Both blockers are archived: [[0282]] (fixed) and
+[[0285]].
+
+Measured read-only as `dev_read` on 2026-11-18. Raw swaps are BE's
+`default.soroban_events` for the pools in `prices.pool_registry`. Soroswap counts
+topic[1] = `swap`. Phoenix counts the one `sender` event of each swap group.
+
+| day | Soroswap raw | Soroswap candles `1d` / `1h` | Phoenix raw | Phoenix candles `1d` / `1h` |
+| --- | --- | --- | --- | --- |
+| 07-06 | 426 | 426 (`1d`, `1m`) | 201 | 201 (`1d`, `1m`) |
+| 07-07 | 387 | 387 / 387 | 184 | 184 / 184 |
+| 07-08 | 336 | 336 / 336 | 126 | 126 / 126 |
+| 07-09 | 3,919 | 3,919 / 3,919 | 92 | 92 / 92 |
+| 07-10 | 268 | 268 / 268 | 130 | 130 / 130 |
+| 07-11 | 443 | 443 / 443 | 75 | 75 / 75 |
+| 07-12 | 260 | 260 / 260 | 111 | 111 / 111 |
+| 07-13 | 500 | 500 / 500 | 136 | 136 / 136 |
+| 07-14 | 314 | 314 / 314 | 107 | 107 / 107 |
+| 07-15 | 501 | 501 / 501 | 158 | 158 / 158 |
+| 07-16 | 440 | 440 / 440 | 140 | 140 / 140 |
+| 07-17 | 318 | 318 (`1d`, `1m`) | 107 | 107 (`1d`, `1m`) |
+
+- `1m` over 07-07 → 07-16: Soroswap 7,368 and Phoenix 1,259, equal to the daily sums.
+- On 2026-09-14 the Soroswap candles for 07-07 → 07-10 read 0. They now equal
+  the raw swaps.
+- Phoenix's 7-event groups are priced: `sender`, `sell_token`, `offer_amount` and
+  `actual received amount` give the same count on every day, and the candles
+  equal it.
+
+**The sweep.** The whole AMM era, `1d` against raw, per venue and day, over ledgers
+50,457,424 → 65,318,468. Soroswap: 954 days, 703,191 raw swaps. Phoenix: 922
+days, 250,150. **No day has swaps and no candles.** The differences:
+
+| venue | day | raw | candles |
+| --- | --- | --- | --- |
+| soroswap | 2025-06-05 | 743 | 742 |
+| phoenix | 2026-09-08 | 49 | 48 |
+| phoenix | 2026-09-30 | 49 | 48 |
+| phoenix | 2026-10-01 | 37 | 36 |
+| phoenix | 2026-10-05 | 54 | 52 |
+
+2026-11-05 is left out: the raw range stops mid-day at ledger 65,318,468 and
+the candles do not. The five differences (1–2 trades each) are not a gap and
+are left as they are.
+
+**Limits.** The check compares trade counts, not volumes. It covers only the
+pools in `prices.pool_registry`: a pool missing from it would be missing from
+both sides.
 
 ## Notes
 
