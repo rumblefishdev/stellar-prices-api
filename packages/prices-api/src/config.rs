@@ -338,23 +338,35 @@ pub(crate) async fn hub_secret_from_env() -> Result<Option<HubSecret>, HubSecret
         return HubSecret::parse(&json).map(Some);
     }
 
-    let Ok(name) = std::env::var("PORTAL_HUB_SECRET_NAME") else {
-        return Ok(None);
-    };
-    let name = name.trim();
-    if name.is_empty() {
-        return Ok(None);
+    match hub_secret_name(|var| std::env::var(var).ok()) {
+        Some(name) => HubSecret::from_secrets_manager(&name).await.map(Some),
+        None => Ok(None),
     }
-    HubSecret::from_secrets_manager(name).await.map(Some)
+}
+
+/// The secret's name as `var` reads `PORTAL_HUB_SECRET_NAME`, trimmed;
+/// `None` when it is unset or blank. [`hub_secret_from_env`] with the
+/// environment read out of the way, so a unit test pins the variable's
+/// spelling: no integration test reads it (they hand the router a
+/// `HubSource` of their own), and a misspelled name would answer every hub
+/// call `503 hub_unconfigured` in the deployed Lambda only.
+fn hub_secret_name(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    var("PORTAL_HUB_SECRET_NAME")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// `PORTAL_HUB_SECRET`'s JSON, when it is set and not blank — the local
 /// seam [`hub_secret_from_env`] reads first.
 #[cfg(not(feature = "lambda"))]
 fn inline_hub_secret() -> Option<String> {
-    std::env::var("PORTAL_HUB_SECRET")
-        .ok()
-        .filter(|json| !json.trim().is_empty())
+    inline_hub_secret_from(|var| std::env::var(var).ok())
+}
+
+/// [`inline_hub_secret`] with the environment read out of the way.
+#[cfg(not(feature = "lambda"))]
+fn inline_hub_secret_from(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    var("PORTAL_HUB_SECRET").filter(|json| !json.trim().is_empty())
 }
 
 /// The variable [`hub_secret_from_env`] reads the hub's secret through in
@@ -668,7 +680,61 @@ mod web_origin_tests {
 
 #[cfg(test)]
 mod hub_secret_variable_tests {
-    use super::{HUB_SECRET_VARIABLES, hub_secret_variable, hub_secret_variable_for};
+    use super::{
+        HUB_SECRET_VARIABLES, hub_secret_name, hub_secret_variable, hub_secret_variable_for,
+    };
+
+    /// An environment holding only `vars`, as `std::env::var(..).ok()` reads.
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    /// The secret's name is read from `PORTAL_HUB_SECRET_NAME`, the variable
+    /// `compute-stack.ts` sets (CI's check 7b pins that side), trimmed; unset
+    /// or blank is no secret configured.
+    #[test]
+    fn the_secrets_name_is_read_from_portal_hub_secret_name() {
+        let name = "sorobanscan-hub/production/prices-token";
+        assert_eq!(
+            hub_secret_name(env(&[("PORTAL_HUB_SECRET_NAME", name)])).as_deref(),
+            Some(name)
+        );
+        assert_eq!(
+            hub_secret_name(env(&[("PORTAL_HUB_SECRET_NAME", &format!(" {name}\n"))])).as_deref(),
+            Some(name)
+        );
+        assert_eq!(
+            hub_secret_name(env(&[("PORTAL_HUB_SECRET_NAME", "  ")])),
+            None
+        );
+        assert_eq!(hub_secret_name(env(&[])), None);
+        // Only that variable: the local seam's is not a name.
+        assert_eq!(hub_secret_name(env(&[("PORTAL_HUB_SECRET", name)])), None);
+    }
+
+    /// The local seam is `PORTAL_HUB_SECRET`, and blank is unset.
+    #[cfg(not(feature = "lambda"))]
+    #[test]
+    fn the_local_seam_is_read_from_portal_hub_secret() {
+        use super::inline_hub_secret_from;
+        let json = r#"{"current":"x"}"#;
+        assert_eq!(
+            inline_hub_secret_from(env(&[("PORTAL_HUB_SECRET", json)])).as_deref(),
+            Some(json)
+        );
+        assert_eq!(
+            inline_hub_secret_from(env(&[("PORTAL_HUB_SECRET", " ")])),
+            None
+        );
+        assert_eq!(
+            inline_hub_secret_from(env(&[("PORTAL_HUB_SECRET_NAME", json)])),
+            None
+        );
+    }
 
     /// A line about the hub's secret names the variable it was read through
     /// (task 0348): the local seam when it is set, the secret's name else.
