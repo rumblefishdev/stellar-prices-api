@@ -22,6 +22,12 @@ pub mod portal;
 pub mod state;
 pub mod telemetry;
 
+// The unit tests include `tests/portal_keys/harness.rs`
+// (`portal::test_harness`), which names this crate `prices_api` the way every
+// integration test does.
+#[cfg(test)]
+extern crate self as prices_api;
+
 use std::sync::Arc;
 
 use axum::Router;

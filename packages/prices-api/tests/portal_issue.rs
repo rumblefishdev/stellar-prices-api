@@ -144,6 +144,11 @@ async fn a_member_in_good_standing_gets_a_key_and_lands_on_issue_ok() {
         Some("prices-portal")
     );
     assert_eq!(
+        stored[0].tags.get("IssuedBy").map(String::as_str),
+        Some("task-0187"),
+        "the portal's own round-trip tags its keys as the portal's"
+    );
+    assert_eq!(
         gateway.with(|s| s.plan_keys.clone()),
         vec![(PLAN_ID.to_string(), stored[0].id.clone())],
         "the key is on the plan before anyone is told it exists"

@@ -296,18 +296,48 @@ pub fn decide(
         Membership::Unknown => return Eligibility::Unknown,
     }
 
-    let Some(created_ms) = account_created_ms(snowflake) else {
-        tracing::warn!("a Discord user id did not parse as a snowflake; cannot derive account age");
-        return Eligibility::Unknown;
-    };
+    match account_age(snowflake, min_age_minutes, now_ms) {
+        Some(AccountAge::OldEnough) => Eligibility::Eligible,
+        Some(AccountAge::TooYoung { wait_secs, .. }) => Eligibility::TooYoung { wait_secs },
+        None => {
+            tracing::warn!(
+                "a Discord user id did not parse as a snowflake; cannot derive account age"
+            );
+            Eligibility::Unknown
+        }
+    }
+}
 
-    let old_enough_at = created_ms.saturating_add(min_age_minutes.saturating_mul(60_000));
-    if now_ms >= old_enough_at {
-        return Eligibility::Eligible;
+/// The age half of the verdict, on its own (task 0348).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAge {
+    /// At least the minimum age.
+    OldEnough,
+    /// Younger than the minimum: `wait_secs` until it is not (rounded up),
+    /// and the instant it will be, in ms since Unix epoch.
+    TooYoung {
+        wait_secs: u64,
+        old_enough_at_ms: u64,
+    },
+}
+
+/// Whether the account behind `snowflake` is at least `min_age_minutes` old
+/// at `now_ms`; `None` when the id is not a bare integer.
+///
+/// [`decide`]'s age check, and on its own the hub contract's backstop (task
+/// 0348): a key the hub asks for has had its membership proved by the hub,
+/// and its age is checked here again, from the snowflake, against our own
+/// threshold.
+pub fn account_age(snowflake: &str, min_age_minutes: u64, now_ms: u64) -> Option<AccountAge> {
+    let created_ms = account_created_ms(snowflake)?;
+    let old_enough_at_ms = created_ms.saturating_add(min_age_minutes.saturating_mul(60_000));
+    if now_ms >= old_enough_at_ms {
+        return Some(AccountAge::OldEnough);
     }
-    Eligibility::TooYoung {
-        wait_secs: (old_enough_at - now_ms).div_ceil(1000),
-    }
+    Some(AccountAge::TooYoung {
+        wait_secs: (old_enough_at_ms - now_ms).div_ceil(1000),
+        old_enough_at_ms,
+    })
 }
 
 /// The membership half of the verdict, on its own.
@@ -445,6 +475,26 @@ mod tests {
             decide(&member(Some(false)), DOCUMENTED_SNOWFLAKE, 5, now),
             Eligibility::TooYoung { wait_secs: 91 }
         );
+    }
+
+    /// The age check alone (task 0348's backstop): the same boundary and
+    /// rounding as `decide`, the instant the account clears the threshold,
+    /// and no membership asked.
+    #[test]
+    fn the_age_check_alone_names_the_wait_and_the_instant() {
+        let threshold = DOCUMENTED_CREATED_MS + 5 * 60_000;
+        assert_eq!(
+            account_age(DOCUMENTED_SNOWFLAKE, 5, threshold),
+            Some(AccountAge::OldEnough)
+        );
+        assert_eq!(
+            account_age(DOCUMENTED_SNOWFLAKE, 5, threshold - 90_001),
+            Some(AccountAge::TooYoung {
+                wait_secs: 91,
+                old_enough_at_ms: threshold,
+            })
+        );
+        assert_eq!(account_age("not-a-snowflake", 5, threshold), None);
     }
 
     /// A changed SSM value changes the verdict with no other input changing —
