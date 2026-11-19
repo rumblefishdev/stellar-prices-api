@@ -2,7 +2,7 @@
 id: "0242"
 title: "A SAC is minted as a second identity for an asset we already hold — same token under two asset_ids, with volume split across both"
 type: BUG
-status: active
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0210", "0139", "0120", "0286", "0252"]
@@ -11,6 +11,16 @@ milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/canonical.rs"
 history:
+  - date: "2026-11-19"
+    status: completed
+    who: okarcz
+    note: >
+      Closed. Code #390 (d0c4393d) live since 2026-11-05; all 40 SAC
+      identities merged into their classics (seed, 0286 phase 3, the
+      2026-10-01 → 11-05 reprice, §5c–§5g on 2026-11-18); the three alarms
+      live from prod-2026-11-19 (c7dcd26d). AC1–AC4 met; identities 215,206,
+      collisions 0. One trade (Z, 2024-04-18) recorded as a loss under PC9.
+      The 11 bak_0242_* tables are dropped after this archive.
   - date: "2026-11-18"
     status: active
     who: okarcz
@@ -421,12 +431,139 @@ Measured bases: 0338 enriched 334 rows in about 90 s; the 2026-11-17 map took �
 
 ## Acceptance Criteria
 
-- [ ] A SAC whose classic asset is in the registry no longer mints a second
+- [x] A SAC whose classic asset is in the registry no longer mints a second
       identity — pinned by a test that interns the SAC first and the classic
-      asset second, and vice versa
-- [ ] The 11 existing pairs are resolved, or the decision to leave them with a
-      cross-reference is recorded with its reasoning
-- [ ] For a pair with candles on both sides (XCR is the sharpest), the API
-      reports one asset with one volume, or the split is documented as known
-- [ ] No new duplicate `asset_id` is introduced by whatever is chosen (count
-      per natural identity before and after)
+      asset second, and vice versa. `packages/prices-ledger-processor/tests/sac_identity.rs`
+      (T2 SAC first, T3 both orders, T4 the SAC event after the trade), through
+      the real `process_ledger`; `events-backfill`
+      `a_swap_on_an_unproven_sac_is_skipped_and_counted_and_a_proven_one_prices`
+      (`packages/events-backfill/src/run.rs`). Shipped in #390 (`d0c4393d`,
+      2026-11-02), live since 2026-11-05. Nothing has been keyed on a SAC id
+      since that deploy (map of 2026-11-17), and the probe has read
+      `SacContractIdentities` 0 since 2026-11-18 13:16 UTC.
+- [x] The 11 existing pairs are resolved. All of them, and every other SAC
+      identity found later (40 in total, each with a classic), are merged into
+      their classic identity rather than cross-referenced (D3): group A by the
+      0286 phase-3 re-ingest, group B by the 29-row seed plus phase 3, the
+      2026-10-01 → 11-05 residual by the `events-backfill` reprice, then §5d–§5f.
+      §5g (2026-11-18): 0 SAC contract rows; `identity_by_contract` 40
+      contracts, 0 contract rows, `max(n) = 1`; 0 SAC-keyed candles on every
+      tier. Re-read 2026-11-19: none of the 40 SAC ids is in `prices.assets`,
+      all 40 classic ids are.
+- [x] For a pair with candles on both sides (XCR is the sharpest), the API
+      reports one asset with one volume. §5g: XCR by its SAC answers
+      `XCR:GBLJ…` (`credit`, `contract ""`), and `/ohlcv` by the SAC and by
+      `CODE:ISSUER` prints `SAME`; the XLM SAC answers `native` / `XLM` (D5
+      alias). For BLTA/BLTB/BLTC/PPRIME/LumenJoule, U3: their volume is under
+      the classic ids after stage C; BLTA/BLTB/BLTC carry no price by design
+      (dust).
+- [x] No new duplicate `asset_id` is introduced (identities against distinct
+      ids in `prices.assets`, collisions = their difference):
+
+      | When | Identities | Ids | Collisions |
+      | --- | --- | --- | --- |
+      | §3 seed, 2026-10-06 | — | — | 0 (29 seeded, 29 distinct) |
+      | §5a, 2026-11-17 | 215,193 | 215,193 | 0 |
+      | §5a, 2026-11-18 | 215,216 | 215,216 | 0 |
+      | §5g, 2026-11-18 | 215,176 (−40) | 215,176 (−40) | 0 |
+      | 2026-11-19 | 215,206 | 215,206 | 0 |
+
+## Implementation Notes
+
+- **Code: #390** (adamkoot, merged 2026-11-02 as `d0c4393d`, +3,432 −59):
+  `AssetRegistry::learn_sac(contract, sep11)` accepts a mapping only when
+  `sac_address(sep11) == contract` (D1). The live path feeds it from the same
+  transaction's SAC events before swaps are classified; `events-backfill`
+  preloads one proof per unresolved SAC at run start. An unprovable SAC
+  (BE `is_sac`, no proof) is skipped and counted, never minted (D2). The probe
+  publishes `SacContractIdentities` (D6); the API aliases a SAC address to its
+  classic (D5).
+- **Deploys:** Compute and EventBridge 2026-11-05 (§4e, after stage D, D9);
+  Observability with the three alarms 2026-11-19 12:55 UTC (§6), the first
+  release through `deploy/production` ([[0343]]), tag `prod-2026-11-19`.
+- **Heal:** the seed (2026-10-06), phase 3 stages C and D ([[0286]]), the
+  reprice and pre-roll (2026-11-18), the gate and §5c–§5g (2026-11-18). Every
+  step's numbers are in the Heal log; the runbook is
+  `docs/runbooks/0242-sac-identity-heal.md`.
+- **Writes** ran as ClickHouse `default` on ch-prod-01 from fishuser-hero, each
+  prepared by the agent with real values and run by the operator, each checked
+  as `dev_read` before the next.
+- **Tests:** the AC1 tests above, in CI with #390.
+
+## Issues Encountered
+
+- **The split kept being created until the fix was live.** BURNMKR (2026-09-30)
+  and BLNT's SAC (2026-10-26, it traded on Comet four hours before SDEX
+  interned its classic) minted contract identities after the 2026-10-05
+  measurement, so §5 counted 40 SAC identities, not the runbook's 36. The
+  probe read 40 at the 2026-11-05 deploy. §5 worked from the measured number.
+- **U3 was the 0139 re-key, not a 0242 bug.** Five SAC identities shared their
+  old UInt32 id with unrelated classics, so `asset_id_map_0139` marked them
+  `colliding` and their candles stayed in `__pre0139`. Stage C with the seed
+  rebuilt them; no code fix.
+- **The `events-backfill` on the host predated #390** (the 0338 build of
+  2026-11-02 12:33 UTC, #390 merged 13:28). A fresh build from `develop`
+  `00ad6090` (sha256 `37e2498e…`) ran the reprice; its one-ledger dry run
+  printed the 0242 line `unproven sac swaps: 0`.
+- **`dev_read`'s 30 s limit** stopped the whole-table `1m` map query; it was
+  re-run per month (≤ 2 s each).
+- **23 coarse SAC rows were not byte-identical to their classic rows** in the
+  §5b gate (1 `4h`, 3 `1d`, 9 `1w`, 10 `1M`), because the classic row also holds
+  the pair's other trades in that bucket. Each was proven by containment: the
+  classic row equals the sum of its classic `1m` children and holds at least
+  the SAC row's trades, and every SAC `1m` row is byte-identical.
+- **The pre-roll zeroed about 120 `sdex` coarse `close_usd` values**, as in
+  0338; the 13:30 coarse sweep restored them to their exact earlier counts.
+- **Existing gaps seen during the reprice, not caused by it:** 8 Phoenix
+  events on pool `CBCZGGNO…` fail with "unexpected topic shape" (spawned
+  [[0350]]); 12 contracts outside `pool_registry`
+  (`coverage-sweep-unclassified`, [[0345]] part C).
+
+## Design Decisions
+
+### From Plan
+
+1. **Derive, don't look up** (D1): a SAC maps to its classic only with
+   cryptographic proof, `sac_address(sep11) == contract`, fed in-band.
+2. **An unprovable SAC is skipped and counted, never minted** (D2).
+3. **Heal by re-ingest, not SQL rekey** (D3), then delete the residual
+   SAC-keyed rows and metadata.
+4. **The seed before stage C, stage C through 202609** (D4).
+5. **The API aliases a SAC address to its classic** (D5).
+6. **Guarded by the probe metric and an ingest skip counter** (D6), one PR with
+   ordered slices (D7).
+7. **Observability after the cleanup** (D8) and **Compute after stage D** (D9).
+8. **PC9:** an only-copy row is never deleted silently.
+
+### Emerged
+
+9. **PC3 reversed to fail open** (2026-11-06, Adam): an unreadable `is_sac`
+   set warns and publishes `SacCandidatesUnavailable` instead of failing Init,
+   since the candidates guard a case seen 0 times in 338,601 legs.
+10. **PC6 amended:** a month without the `unproven sac swaps:` line is a note,
+    and a STOP once the same state has printed it.
+11. **The 2026-10-01 → 11-05 residual was repriced with `events-backfill`, not
+    phase 3**, because every only-copy row was AMM and phase 3 refuses the
+    current month.
+12. **Z's single 2024-04-18 trade was recorded as a loss** (PC9, the operator,
+    2026-11-18): repricing it would need a second window and a pre-roll over a
+    month phase 3 had finished, for one trade.
+13. **The pre-roll ran to the start of the current hour, not to 11-05**, with
+    the six reconcile MVs stopped: an end at 11-05 would have left the week of
+    11-02 and November's `1M` without the repriced trades.
+14. **Writes as `default` on the host, prepared by the agent and run by the
+    operator**, because the operator holds no `dev_shared` certificate.
+15. **The alarms release carried [[0348]]**: Compute was already live from
+    `develop` `21b938fa`, so releasing `develop` (not a cherry-pick) kept
+    `master` equal to production.
+
+## Future Work
+
+- [[0350]]: Phoenix `withdraw_liquidity` counted as a failed dispatch, and the
+  extractor gap on pool `CBCZGGNO…`.
+- [[0345]] part C: the 12 unclassified swap emitters.
+- After the archive, run by the operator on the host, one table per command:
+  drop the 11 `bak_0242_*` tables (`asset_symbol`, `assets`,
+  `price_ohlcv_{1m,15m,1h,4h,1d,1w,1M}`, `seed`, `sac_ids`; under 110 KiB in
+  all, no dependants), and move `~/events-backfill.pre-reprice-20261118` to
+  `/tmp/`. §5h rollback ends with the drops.
