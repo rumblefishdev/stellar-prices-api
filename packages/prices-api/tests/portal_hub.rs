@@ -905,6 +905,31 @@ async fn a_hub_issue_evicts_a_cached_no_key() {
     assert_eq!(after.json()["details"]["usage"]["plan"]["tier"], "free");
 }
 
+/// `account` caches "no key"; a key made elsewhere (the portal's own
+/// round-trip, or another execution environment) and then revealed through
+/// the hub proves it false, and the reveal evicts it, so the portal's
+/// `/usage` shows the key inside the TTL.
+#[tokio::test]
+async fn a_hub_reveal_evicts_a_cached_no_key() {
+    let mock = MockGateway::start().await;
+    let app = hub_app(&mock);
+
+    let before = hub_call(&app, "GET", ACCOUNT_PATH, Some(&token("read"))).await;
+    assert_eq!(before.json()["key"]["state"], "none");
+    assert_eq!(before.json()["details"]["usage"], Value::Null);
+
+    // The key appears, created in another request.
+    mock.with(|s| s.seed_on_free_plan(&key_name(), now_secs() - 60));
+
+    let revealed = hub_call(&app, "POST", REVEAL_PATH, Some(&token("reveal"))).await;
+    assert_eq!(revealed.status, StatusCode::OK);
+
+    // Inside the 60 s TTL: only the eviction explains a key here.
+    let usage = portal_usage(&app).await;
+    assert_eq!(usage.status, StatusCode::OK, "{}", usage.json());
+    assert_eq!(usage.json()["plan"]["tier"], "free");
+}
+
 /// `account` caches the key's usage; a hub revoke evicts it, so the next
 /// `account` and `/usage` read the revoked key afresh.
 #[tokio::test]
