@@ -542,7 +542,9 @@ pub(crate) async fn key_state(
         Ok(Ok(state)) => Ok(state),
         Ok(Err(error)) => {
             // `error` cannot carry a key value — see `gateway::sdk_message`.
-            tracing::error!(error = %error, "portal key reveal failed");
+            // Named as a lookup: the portal's reveal and the hub's both come
+            // here.
+            tracing::error!(error = %error, "portal key lookup failed");
             Err(KeyError::Unavailable)
         }
         Err(_elapsed) => {

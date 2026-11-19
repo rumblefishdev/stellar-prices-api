@@ -230,7 +230,7 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
         "the clean revoke's line does not say partial=false: {text}"
     );
     assert!(
-        !text.contains("portal key reveal failed"),
+        !text.contains("portal key lookup failed"),
         "the account's failure was logged as a reveal: {text}"
     );
     // The log rule's `key_id`, on every line that names a key the call
