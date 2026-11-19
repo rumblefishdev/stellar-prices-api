@@ -135,8 +135,8 @@ const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
 /// Error code for a caller who has no key. The same code (and the same
 /// envelope-vs-empty-body distinction from [0183]'s gate) as the usage route's,
 /// because the frontend reads both: a `404` is "no key" only when this
-/// envelope says so.
-const NO_KEY: &str = "no_key";
+/// envelope says so. The hub contract's revoke answers it too (task 0348).
+pub(crate) const NO_KEY: &str = "no_key";
 /// Error code for a caller whose key is revoked and whose replacement is not
 /// due yet (task 0191). A `404` like `no_key` — there is no usable key — but
 /// a distinct code, because the page must not offer the issue round-trip: the
@@ -542,7 +542,9 @@ pub(crate) async fn key_state(
         Ok(Ok(state)) => Ok(state),
         Ok(Err(error)) => {
             // `error` cannot carry a key value — see `gateway::sdk_message`.
-            tracing::error!(error = %error, "portal key reveal failed");
+            // Named as a lookup: the portal's reveal and the hub's both come
+            // here.
+            tracing::error!(error = %error, "portal key lookup failed");
             Err(KeyError::Unavailable)
         }
         Err(_elapsed) => {
@@ -701,7 +703,7 @@ pub(crate) struct RevokeResponse {
     /// Omitted from the JSON in the ordinary case, so the common answer keeps
     /// the shape it had.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    partial: bool,
+    pub(crate) partial: bool,
 }
 
 /// `POST /key/rework` — revoke the caller's key now, issue nothing
@@ -767,7 +769,7 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
             ))
         }
         Err(error) => key_unavailable(error),
-        Ok(RevokeOutcome::Revoked(answer)) => {
+        Ok(RevokeOutcome::Revoked { answer, .. }) => {
             // The cached usage describes a key that is now off. Its counter is
             // preserved (0180 item 8), so the numbers would still be right —
             // but the page's state changed underneath them, and a fresh read
@@ -796,9 +798,17 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
 pub(crate) enum RevokeOutcome {
     /// Nothing under the name to revoke; nothing was written.
     NoKey,
-    /// The key is off — now, or already — and this is the answer the revoke
+    /// The key is off — now, or already — and `answer` is what the revoke
     /// route sends, `partial` included.
-    Revoked(RevokeResponse),
+    Revoked {
+        answer: RevokeResponse,
+        /// The account's key the revocation is about: its current key
+        /// ([`naming::current_key`] — the live key it disabled, or the
+        /// latest revoked record when it found the key already off), for the
+        /// caller's log line (task 0348). A duplicate disabled beside it has
+        /// a line of its own in [`disable_all`].
+        key_id: String,
+    },
 }
 
 /// Revoke the account's key now, issue nothing (task 0191): every enabled
@@ -832,7 +842,7 @@ pub(crate) async fn revoke_for(
     // the same dates and differ only in this flag.
     let partial = matches!(&revoked, Ok(Revocation::Partial { .. }));
     match revoked {
-        Ok(Revocation::Done { at }) | Ok(Revocation::Partial { at }) => {
+        Ok(Revocation::Done { at, key_id }) | Ok(Revocation::Partial { at, key_id }) => {
             if partial {
                 tracing::error!(
                     "portal revoked an API key only in part; a duplicate may still answer"
@@ -855,12 +865,15 @@ pub(crate) async fn revoke_for(
                 // `rfc3339` was changed to stop producing.
                 Cap::Allowed => rfc3339(now_secs()).unwrap_or_else(|| Period::now().resets_at()),
             };
-            Ok(RevokeOutcome::Revoked(RevokeResponse {
-                revoked: true,
-                next_eligible_at,
-                revoked_at: at.and_then(rfc3339),
-                partial,
-            }))
+            Ok(RevokeOutcome::Revoked {
+                answer: RevokeResponse {
+                    revoked: true,
+                    next_eligible_at,
+                    revoked_at: at.and_then(rfc3339),
+                    partial,
+                },
+                key_id,
+            })
         }
         Ok(Revocation::NoKey) => Ok(RevokeOutcome::NoKey),
         Err(error) => {
@@ -907,6 +920,7 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, Gatewa
     let Some(current) = current_key(&keys) else {
         return Ok(Revocation::NoKey);
     };
+    let key_id = current.id.clone();
     if !current.enabled {
         // Already revoked — answer with the recorded instant (the latest,
         // the same one the cap reads), write nothing. Undatable stays
@@ -914,6 +928,7 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, Gatewa
         // date it", and none for the epoch.
         return Ok(Revocation::Done {
             at: revocation_instant(&keys),
+            key_id,
         });
     }
     // The LATEST instant among the disables that landed, which is what
@@ -963,8 +978,8 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, Gatewa
         }
     }
     match (applied, failure) {
-        (Some(at), None) => Ok(Revocation::Done { at }),
-        (Some(at), Some(_)) => Ok(Revocation::Partial { at }),
+        (Some(at), None) => Ok(Revocation::Done { at, key_id }),
+        (Some(at), Some(_)) => Ok(Revocation::Partial { at, key_id }),
         // Nothing of ours landed, so the `502` is honest and the dialog's
         // "we could not deactivate it" is the right thing to say.
         (None, Some(error)) => Err(error),
@@ -977,19 +992,21 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, Gatewa
     }
 }
 
-/// What [`disable_all`] found and did.
+/// What [`disable_all`] found and did. `key_id` is the account's current key
+/// ([`current_key`]), which [`RevokeOutcome::Revoked`] carries to the
+/// caller's log line.
 enum Revocation {
     /// Nothing under the name left to revoke.
     NoKey,
     /// Every key is off. `at` is the revocation instant, `None` only when no
     /// record under the name carries a `lastUpdatedDate`.
-    Done { at: Option<u64> },
+    Done { at: Option<u64>, key_id: String },
     /// Some keys are off and at least one could not be disabled — so a
     /// credential under this name may still answer on `/v1/`. `at` dates the
     /// disables that did land, and the cap is decided from it exactly as for
     /// [`Self::Done`]: the owner is capped either way, because a revocation
     /// they cannot fully complete must not also cost them the refusal.
-    Partial { at: Option<u64> },
+    Partial { at: Option<u64>, key_id: String },
 }
 
 /// Seconds since the Unix epoch, saturating.
@@ -1038,7 +1055,10 @@ pub(crate) enum IssueOutcome {
     /// `created` tells the two apart, and it matters since 2026-08-26: the
     /// sign-in round-trip issues too, and a visitor whose months-old key was
     /// merely ADOPTED must not land on "Your API Key is ready".
-    Issued { created: bool },
+    ///
+    /// `key_id` is the key's id — never its value — for the caller's log
+    /// line (task 0348's log rule).
+    Issued { created: bool, key_id: String },
     /// The owner revoked their key inside the current quota period, so no
     /// new one is issued until it rolls (task 0191). Nothing was written.
     Capped {
@@ -1087,6 +1107,7 @@ pub(crate) async fn issue_for(
             );
             IssueOutcome::Issued {
                 created: outcome.created,
+                key_id: outcome.record.id,
             }
         }
         Ok(Ok(Reconciled::Capped {
@@ -1793,19 +1814,35 @@ mod tests {
 
     /// A key `issue_for` creates carries the caller's `IssuedBy` — the
     /// portal's `task-0187`, or the hub contract's own — beside the
-    /// `ManagedBy` every portal key has.
+    /// `ManagedBy` every portal key has, and a description that names the
+    /// same issuer.
     #[tokio::test]
     async fn issue_for_tags_a_created_key_with_the_callers_issuer() {
-        for issued_by in [gateway::ISSUED_BY_PORTAL, "hub-contract"] {
+        for (issued_by, description) in [
+            (
+                gateway::ISSUED_BY_PORTAL,
+                "Self-service key issued by the Stellar Prices API portal (task 0187)",
+            ),
+            (
+                "hub-contract",
+                "Self-service key issued through the API hub (task 0348)",
+            ),
+        ] {
             let mock = harness::MockGateway::start().await;
             let gateway = harness::test_gateway(&mock.base);
 
             let outcome =
                 issue_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE, issued_by).await;
 
-            assert_eq!(outcome, IssueOutcome::Issued { created: true });
             let keys = mock.with(|s| s.keys.clone());
             assert_eq!(keys.len(), 1, "{issued_by}");
+            assert_eq!(
+                outcome,
+                IssueOutcome::Issued {
+                    created: true,
+                    key_id: keys[0].id.clone()
+                }
+            );
             assert_eq!(keys[0].name, our_key_name());
             assert_eq!(
                 keys[0].tags.get("IssuedBy").map(String::as_str),
@@ -1815,6 +1852,7 @@ mod tests {
                 keys[0].tags.get("ManagedBy").map(String::as_str),
                 Some("prices-portal")
             );
+            assert_eq!(keys[0].description, description, "{issued_by}");
         }
     }
 
@@ -1824,7 +1862,7 @@ mod tests {
     async fn issue_for_adopts_a_key_without_retagging_it() {
         let mock = harness::MockGateway::start().await;
         let gateway = harness::test_gateway(&mock.base);
-        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+        let id = mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
 
         let outcome = issue_for(
             &gateway,
@@ -1834,7 +1872,13 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome, IssueOutcome::Issued { created: false });
+        assert_eq!(
+            outcome,
+            IssueOutcome::Issued {
+                created: false,
+                key_id: id
+            }
+        );
         assert_eq!(mock.with(|s| s.create_calls), 0);
         assert!(mock.with(|s| s.keys[0].tags.is_empty()));
     }
@@ -2079,9 +2123,10 @@ mod tests {
 
         let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
 
-        let Ok(RevokeOutcome::Revoked(answer)) = outcome else {
+        let Ok(RevokeOutcome::Revoked { answer, key_id }) = outcome else {
             panic!("expected a revocation, got {outcome:?}");
         };
+        assert_eq!(key_id, id);
         assert_eq!(mock.with(|s| s.ops.clone()), vec![format!("disable:{id}")]);
         assert_eq!(
             serde_json::to_value(&answer).unwrap(),
@@ -2100,15 +2145,16 @@ mod tests {
         let mock = harness::MockGateway::start().await;
         let gateway = harness::test_gateway(&mock.base);
         let last_month = Period::now().start_secs() - 86_400;
-        mock.with(|s| s.seed_revoked(&our_key_name(), last_month - 60, last_month));
+        let id = mock.with(|s| s.seed_revoked(&our_key_name(), last_month - 60, last_month));
 
         let before = rfc3339(harness::now_secs()).unwrap();
         let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
         let after = rfc3339(harness::now_secs()).unwrap();
 
-        let Ok(RevokeOutcome::Revoked(answer)) = outcome else {
+        let Ok(RevokeOutcome::Revoked { answer, key_id }) = outcome else {
             panic!("expected a revocation, got {outcome:?}");
         };
+        assert_eq!(key_id, id, "the record found already off");
         assert!(mock.with(|s| s.ops.is_empty()));
         assert!(
             before <= answer.next_eligible_at && answer.next_eligible_at <= after,
@@ -2124,17 +2170,19 @@ mod tests {
         let mock = harness::MockGateway::start().await;
         let gateway = harness::test_gateway(&mock.base);
         let now = harness::now_secs();
-        mock.with(|s| {
-            s.seed(&our_key_name(), now - 120);
+        let current = mock.with(|s| {
+            let current = s.seed(&our_key_name(), now - 120);
             let refusing = s.seed(&our_key_name(), now - 60);
             s.fail_disable_of.push(refusing);
+            current
         });
 
         let outcome = revoke_for(&gateway, harness::USER_ID, RECONCILE_DEADLINE).await;
 
-        let Ok(RevokeOutcome::Revoked(answer)) = outcome else {
+        let Ok(RevokeOutcome::Revoked { answer, key_id }) = outcome else {
             panic!("expected a revocation, got {outcome:?}");
         };
+        assert_eq!(key_id, current, "the account's key, the earliest live one");
         assert!(answer.partial);
         assert_eq!(serde_json::to_value(&answer).unwrap()["partial"], true);
     }

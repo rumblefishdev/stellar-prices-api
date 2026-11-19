@@ -651,8 +651,14 @@ impl UsageState {
             return answer.into();
         }
 
-        self.finish(discord_id, start, self.deadline, fetch(gateway, &name))
-            .await
+        self.finish(
+            discord_id,
+            start,
+            self.deadline,
+            None,
+            fetch(gateway, &name),
+        )
+        .await
     }
 
     /// Begin an account's lookup: what the cache holds now, and the epoch
@@ -685,11 +691,8 @@ impl UsageState {
     /// one with a key — so the two halves of one answer never contradict each
     /// other, whatever another execution environment did inside this one's
     /// TTL. Otherwise the key's plan and usage are read under `deadline`,
-    /// with [`Self::answer_for`]'s fallbacks.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the hub contract's GET account is its caller")
-    )]
+    /// with [`Self::answer_for`]'s fallbacks — and they too fall back only to
+    /// an answer that agrees with the listing (see [`Self::fallback`]).
     pub(crate) async fn answer_from_listing(
         &self,
         gateway: &Gateway,
@@ -717,19 +720,22 @@ impl UsageState {
             discord_id,
             start,
             deadline,
+            Some(candidates),
             fetch_listed(gateway, candidates),
         )
         .await
     }
 
     /// The lookup's second half: `fetching` under `deadline`, the last good
-    /// answer when AWS throttles or the deadline elapses, and what was fetched
+    /// answer when AWS throttles or the deadline elapses ([`Self::fallback`],
+    /// held to `listed` when the caller listed), and what was fetched
     /// remembered under the epoch `start` read.
     async fn finish(
         &self,
         discord_id: &str,
         start: UsageStart,
         deadline: Duration,
+        listed: Option<&[KeyRecord]>,
         fetching: impl Future<Output = Result<CachedAnswer, GatewayError>>,
     ) -> UsageOutcome {
         let UsageStart { epoch, today, .. } = start;
@@ -744,7 +750,7 @@ impl UsageState {
                 // throttle arm below: the last good answer (re-stamped, so the
                 // next TTL of loads leaves the struggling control plane alone)
                 // beats the error page.
-                if let Some(entry) = cached(self, discord_id, STALE_KEEP, today) {
+                if let Some(entry) = self.fallback(discord_id, today, listed) {
                     tracing::warn!(
                         deadline_secs = deadline.as_secs_f32(),
                         "portal usage lookup ran out of time; serving the cached answer"
@@ -770,7 +776,7 @@ impl UsageState {
             // or not — beats an error page, because `as_of` makes its age
             // visible.
             Err(GatewayError::Throttled { operation }) => {
-                if let Some(entry) = cached(self, discord_id, STALE_KEEP, today) {
+                if let Some(entry) = self.fallback(discord_id, today, listed) {
                     tracing::warn!(
                         operation,
                         "control plane is throttling; serving the cached usage answer"
@@ -800,6 +806,29 @@ impl UsageState {
                 UsageOutcome::Failed
             }
         }
+    }
+
+    /// The last good answer the throttle and deadline arms of
+    /// [`Self::finish`] serve and store again: the account's entry inside
+    /// [`STALE_KEEP`], for the current period.
+    ///
+    /// For a lookup that finishes from the caller's listing (task 0348's
+    /// `GET account`), only an entry that agrees with that listing
+    /// ([`agrees_with_listing`]). A "no key" cached before another execution
+    /// environment issued the key is exactly what the listing just
+    /// contradicted: served, it would put `usage: null` beside `active`;
+    /// stored again, it would hold the portal's `/api/usage` at `404 no_key`
+    /// for another TTL. Without it the lookup reports the throttle or the
+    /// deadline, as with nothing cached.
+    fn fallback(
+        &self,
+        discord_id: &str,
+        today: NaiveDate,
+        listed: Option<&[KeyRecord]>,
+    ) -> Option<CacheEntry> {
+        cached(self, discord_id, STALE_KEEP, today).filter(|entry| {
+            listed.is_none_or(|candidates| agrees_with_listing(&entry.answer, candidates))
+        })
     }
 }
 
@@ -856,10 +885,6 @@ fn usage_key(candidates: &[KeyRecord]) -> Option<&KeyRecord> {
 /// "no key" only beside a listing with no key to show usage for, a usage
 /// answer only beside one with such a key. See
 /// [`UsageState::answer_from_listing`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the hub contract's GET account is its caller")
-)]
 fn agrees_with_listing(answer: &CachedAnswer, candidates: &[KeyRecord]) -> bool {
     matches!(answer, CachedAnswer::NoKey) == usage_key(candidates).is_none()
 }
@@ -1630,6 +1655,101 @@ mod tests {
             .await;
 
         assert!(matches!(outcome, UsageOutcome::Throttled));
+    }
+
+    /// When the account's entry was stored — what a re-stamping `remember`
+    /// moves.
+    fn stored_at(state: &UsageState) -> Option<Instant> {
+        let cache = state.cache.lock().unwrap();
+        cache
+            .entries
+            .get(harness::USER_ID)
+            .map(|entry| entry.fetched_at)
+    }
+
+    /// A "no key" cached, then a key issued elsewhere (another execution
+    /// environment, so nothing here evicted it), and the account's listing
+    /// made after it: the state the stale fallback must not paper over.
+    async fn no_key_cached_then_a_key_listed(
+        mock: &harness::MockGateway,
+        gateway: &Gateway,
+        state: &UsageState,
+    ) -> (Vec<KeyRecord>, Option<Instant>) {
+        assert!(matches!(
+            state.answer_for(gateway, harness::USER_ID).await,
+            UsageOutcome::NoKey
+        ));
+        let cached_at = stored_at(state);
+        assert!(cached_at.is_some());
+        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+        (listing(gateway).await, cached_at)
+    }
+
+    /// The throttle fallback serves only an answer that agrees with the
+    /// listing (task 0348's review): a cached "no key" beside a listed key is
+    /// neither the answer — the account would say `usage: null` beside
+    /// `active` — nor stored again, which would keep the portal's
+    /// `/api/usage` at `404 no_key` for another TTL.
+    #[tokio::test]
+    async fn a_throttle_never_falls_back_to_a_no_key_the_listing_contradicts() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+        let (records, cached_at) = no_key_cached_then_a_key_listed(&mock, &gateway, &state).await;
+        mock.with(|s| s.throttle_plans = true);
+
+        let start = state.begin(harness::USER_ID);
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+
+        assert!(matches!(outcome, UsageOutcome::Throttled));
+        assert_eq!(
+            stored_at(&state),
+            cached_at,
+            "the 'no key' was stored again"
+        );
+    }
+
+    /// The deadline's fallback, likewise.
+    #[tokio::test]
+    async fn a_deadline_never_falls_back_to_a_no_key_the_listing_contradicts() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        let state = UsageState::new(None, None);
+        let (records, cached_at) = no_key_cached_then_a_key_listed(&mock, &gateway, &state).await;
+
+        let start = state.begin(harness::USER_ID);
+        let outcome = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, Duration::ZERO)
+            .await;
+
+        assert!(matches!(outcome, UsageOutcome::OutOfTime));
+        assert_eq!(
+            stored_at(&state),
+            cached_at,
+            "the 'no key' was stored again"
+        );
+    }
+
+    /// An answer that agrees with the listing is still the fallback: a key's
+    /// last usage, through a throttle, once its TTL has passed.
+    #[tokio::test]
+    async fn a_throttle_falls_back_to_a_usage_the_listing_agrees_with() {
+        let mock = harness::MockGateway::start().await;
+        let gateway = harness::test_gateway(&mock.base);
+        mock.with(|s| s.seed_on_free_plan(&our_key_name(), harness::now_secs()));
+        let state = UsageState::new(None, None).with_ttl(Duration::ZERO);
+        let fetched = state.answer_for(&gateway, harness::USER_ID).await;
+        let records = listing(&gateway).await;
+        mock.with(|s| s.throttle_plans = true);
+
+        let start = state.begin(harness::USER_ID);
+        let served = state
+            .answer_from_listing(&gateway, harness::USER_ID, start, &records, USAGE_DEADLINE)
+            .await;
+
+        assert_eq!(body_of(&served), body_of(&fetched));
     }
 
     #[tokio::test]

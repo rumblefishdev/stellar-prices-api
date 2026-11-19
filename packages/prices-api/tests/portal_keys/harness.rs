@@ -61,6 +61,8 @@ pub struct StoredKey {
     pub name: String,
     pub value: String,
     pub created_at: u64,
+    /// `description` as `CreateApiKey` sent it; empty for a seeded key.
+    pub description: String,
     pub tags: HashMap<String, String>,
     pub enabled: bool,
     /// `lastUpdatedDate` — stamped by `UpdateApiKey` (the revoke, task
@@ -337,6 +339,7 @@ impl Store {
             name: name.to_string(),
             value: format!("VALUE-{id}-CANARY"),
             created_at,
+            description: String::new(),
             tags: HashMap::new(),
             enabled: true,
             last_updated_at: Some(created_at),
@@ -533,6 +536,7 @@ pub async fn create_key(
         // would. `created_at_override` pins it for tests that need a date.
         created_at: store.created_at_override.unwrap_or_else(now_secs),
         last_updated_at: Some(store.created_at_override.unwrap_or_else(now_secs)),
+        description: body["description"].as_str().unwrap_or_default().to_string(),
         tags: body["tags"]
             .as_object()
             .map(|o| {

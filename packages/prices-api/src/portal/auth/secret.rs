@@ -134,8 +134,9 @@ pub enum SecretError {
 /// every load while the secret stays malformed. So only what cannot carry
 /// secret material survives: a missing or duplicated field is named (the names
 /// are this struct's, not the secret's), and everything else is reduced to
-/// its category and position.
-fn describe_malformed(error: &serde_json::Error) -> String {
+/// its category and position. The hub's secret (`portal::hub::secret`) is
+/// described the same way, for the same reason.
+pub(crate) fn describe_malformed(error: &serde_json::Error) -> String {
     use serde_json::error::Category;
     let message = error.to_string();
     if message.starts_with("missing field `") || message.starts_with("duplicate field `") {

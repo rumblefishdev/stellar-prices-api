@@ -541,3 +541,6 @@ The round-trip is in
 - `infra/src/lib/mtls.ts` — `portalOauthSecretName()`
 - `infra/README.md` § "Uploading the real mTLS PEMs" — the same operator-owned
   pattern, for the ClickHouse material
+- [`hub-contract.md`](hub-contract.md) — the API hub's dashboard contract
+  (task 0348): its secret, how to change it, and what it answers. It reuses
+  this runbook's secret and parameters

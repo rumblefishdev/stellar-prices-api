@@ -817,6 +817,96 @@ for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
   }
 }
 
+// --- 7b. Task 0348: the hub's token secret is named, and read on that one alone. ---
+// The API hub's backend and this handler read ONE secret, under one name fixed
+// by the hub's spec (`sorobanscan-hub/production/prices-token`), from two
+// repositories. A drifted name here builds, synthesizes and deploys clean, and
+// then answers every hub call `503 hub_unconfigured` — the hub's Prices tab
+// down, nothing in this repo's alarms. And the grant must stay one secret:
+// whoever reads this value can mint a token for any Discord account.
+{
+  const HUB_SECRET = 'sorobanscan-hub/production/prices-token';
+  if (handlerEnv['PORTAL_HUB_SECRET_NAME'] !== HUB_SECRET) {
+    fail(
+      `error: the api-handler carries PORTAL_HUB_SECRET_NAME=` +
+        `${JSON.stringify(handlerEnv['PORTAL_HUB_SECRET_NAME'] ?? null)}, ` +
+        `expected ${JSON.stringify(HUB_SECRET)}.`,
+      '  → the hub reads the same secret by this name (its spec, decision ' +
+        "12, and its README); a different one closes the hub's contract on " +
+        'the next deploy. `hubTokenSecretName` in infra/src/lib/mtls.ts.',
+    );
+  }
+  // An ARN's text: a literal when the synth knew the account
+  // (`CDK_DEFAULT_ACCOUNT`), an `Fn::Join` around `Ref: AWS::AccountId` when
+  // it did not (CI). Any other shape is kept as its JSON, so a `sorobanscan-hub/`
+  // inside it is still seen — and then fails the exact match below.
+  const arnText = (r) => {
+    if (typeof r === 'string') return r;
+    const join = r?.['Fn::Join'];
+    if (Array.isArray(join) && join.length === 2 && Array.isArray(join[1])) {
+      return join[1]
+        .map((part) => (typeof part === 'string' ? part : '<ref>'))
+        .join(join[0]);
+    }
+    return JSON.stringify(r);
+  };
+  const hubGrants = [];
+  const hubGrantRoles = [];
+  for (const [, policy] of resourcesOfType(
+    computeTemplate,
+    'AWS::IAM::Policy',
+  )) {
+    for (const st of policy.Properties?.PolicyDocument?.Statement ?? []) {
+      const resources = [st.Resource ?? []].flat().map(arnText);
+      if (resources.some((r) => r.includes(':secret:sorobanscan-hub/'))) {
+        hubGrants.push(st);
+        hubGrantRoles.push(policy.Properties?.Roles);
+      }
+    }
+  }
+  const [grant] = hubGrants;
+  const resources = [grant?.Resource ?? []].flat().map(arnText);
+  const actions = [grant?.Action ?? []].flat();
+  if (
+    hubGrants.length !== 1 ||
+    grant.Sid !== 'PortalReadHubTokenSecret' ||
+    grant.Effect !== 'Allow' ||
+    actions.length !== 1 ||
+    actions[0] !== 'secretsmanager:GetSecretValue' ||
+    resources.length !== 1 ||
+    !resources[0].endsWith(`:secret:${HUB_SECRET}-*`)
+  ) {
+    fail(
+      'error: expected exactly one statement, `PortalReadHubTokenSecret`, ' +
+        'allowing only `secretsmanager:GetSecretValue` on only ' +
+        `\`…:secret:${HUB_SECRET}-*\`, found ${JSON.stringify(hubGrants)}.`,
+      '  → the api-handler reads the hub token secret and nothing else under ' +
+        '`sorobanscan-hub/`: the value mints a token for any account. See ' +
+        'compute-stack.ts.',
+    );
+  }
+  // ...and the statement sits on the api-handler's role, alone. The function
+  // names its role as `Fn::GetAtt [<role>, Arn]`, the policy as `Ref <role>`;
+  // the grant moved to another function's role would read the same above.
+  const handlerRole = apiHandler[1].Properties?.Role?.['Fn::GetAtt']?.[0];
+  const [grantRoles] = hubGrantRoles;
+  if (
+    typeof handlerRole !== 'string' ||
+    !Array.isArray(grantRoles) ||
+    grantRoles.length !== 1 ||
+    grantRoles[0]?.Ref !== handlerRole
+  ) {
+    fail(
+      `error: \`PortalReadHubTokenSecret\` is attached to ` +
+        `${JSON.stringify(grantRoles ?? null)}, expected only the ` +
+        `api-handler's role ${JSON.stringify(handlerRole ?? null)}.`,
+      '  → only the api-handler verifies hub tokens, and the value mints a ' +
+        "token for any account: no other role reads it. See compute-stack.ts' " +
+        '`apiHandlerRole.addToPrincipalPolicy`.',
+    );
+  }
+}
+
 // --- 8. Task 0309: an unmapped route answers 404, in the ErrorEnvelope shape. ---
 // API Gateway's own answer for a path or verb it does not map is `403 Missing
 // Authentication Token`, which a caller reads as a bad key. One gateway

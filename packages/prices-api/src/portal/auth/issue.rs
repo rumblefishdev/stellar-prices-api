@@ -530,7 +530,7 @@ async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
     let deadline = remaining.min(state.issue.deadline);
 
     match keys::issue_for(gateway, user_id, deadline, ISSUED_BY_PORTAL).await {
-        IssueOutcome::Issued { created } => {
+        IssueOutcome::Issued { created, .. } => {
             // A key now exists, so a cached "no key" on the usage route is
             // false — same eviction the reveal performs, for the page this
             // redirect is about to land on.
