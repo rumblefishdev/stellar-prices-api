@@ -106,6 +106,17 @@ pub(crate) const ISSUED_BY_PORTAL: &str = "task-0187";
 /// 0348) — the hub's `key/issue`, after the hub proved membership itself.
 pub(crate) const ISSUED_BY_HUB: &str = "hub-contract";
 
+/// The description a created key carries in the console, after what issued
+/// it (`issued_by`, the `IssuedBy` tag): the hub contract's keys say so, and
+/// anything else reads as the portal's own, as every key did before task 0348.
+fn description_for(issued_by: &str) -> &'static str {
+    if issued_by == ISSUED_BY_HUB {
+        "Self-service key issued through the API hub (task 0348)"
+    } else {
+        "Self-service key issued by the Stellar Prices API portal (task 0187)"
+    }
+}
+
 /// An API key value, which is a bearer credential.
 ///
 /// A distinct type from `String` so that "never log a key value" is enforced by
@@ -673,7 +684,7 @@ impl Gateway {
     /// the one thing tagging exists to prevent.
     ///
     /// `issued_by` is the `IssuedBy` tag's value — `ISSUED_BY_PORTAL` for
-    /// the portal's own round-trip.
+    /// the portal's own round-trip — and picks the key's description.
     pub async fn create(
         &self,
         name: &str,
@@ -691,7 +702,7 @@ impl Gateway {
             .client
             .create_api_key()
             .name(name)
-            .description("Self-service key issued by the Stellar Prices API portal (task 0187)")
+            .description(description_for(issued_by))
             .enabled(true)
             .tags(TAG_MANAGED_BY.0, TAG_MANAGED_BY.1)
             .tags(TAG_ISSUED_BY, issued_by)

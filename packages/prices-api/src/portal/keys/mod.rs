@@ -1814,10 +1814,20 @@ mod tests {
 
     /// A key `issue_for` creates carries the caller's `IssuedBy` — the
     /// portal's `task-0187`, or the hub contract's own — beside the
-    /// `ManagedBy` every portal key has.
+    /// `ManagedBy` every portal key has, and a description that names the
+    /// same issuer.
     #[tokio::test]
     async fn issue_for_tags_a_created_key_with_the_callers_issuer() {
-        for issued_by in [gateway::ISSUED_BY_PORTAL, "hub-contract"] {
+        for (issued_by, description) in [
+            (
+                gateway::ISSUED_BY_PORTAL,
+                "Self-service key issued by the Stellar Prices API portal (task 0187)",
+            ),
+            (
+                "hub-contract",
+                "Self-service key issued through the API hub (task 0348)",
+            ),
+        ] {
             let mock = harness::MockGateway::start().await;
             let gateway = harness::test_gateway(&mock.base);
 
@@ -1842,6 +1852,7 @@ mod tests {
                 keys[0].tags.get("ManagedBy").map(String::as_str),
                 Some("prices-portal")
             );
+            assert_eq!(keys[0].description, description, "{issued_by}");
         }
     }
 
