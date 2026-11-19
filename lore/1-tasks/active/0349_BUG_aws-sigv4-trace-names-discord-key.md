@@ -63,11 +63,11 @@ is logged today. The risk is the day someone raises it to find a bug.
 - [x] At `RUST_LOG=trace`, no captured line names `discord-<id>-key` or the
       account's id, on the portal's routes and the hub's. Portal:
       `tests/portal_keys_logs.rs` searches the whole capture for the id
-      (failed before the fix, on four `aws_sigv4` lines). Hub: its log test is
-      on 0348's branch (PR #423), not on `develop`; on #423's head `dab2c3e4`
-      with this branch's commits cherry-picked, the test widened the same way
-      failed without the fix (both accounts' ids, from `aws_sigv4`) and
-      passed with it. The widening lands with 0348 (see Follow-up).
+      (failed before the fix, on four `aws_sigv4` lines). Hub:
+      `tests/portal_hub_logs.rs` searches the whole capture for both
+      accounts' ids, widened here once 0348 merged (2026-11-19): with the
+      guard as `develop` had it, it fails on a Discord id; with the fix it
+      passes.
 - [x] Whether the Lambda's trace output carries `x-amz-security-token` is
       checked and written down: it does not carry the token's value (below).
 - [x] `telemetry.rs`'s doc states the widened rule: credentials **or personal
@@ -156,12 +156,8 @@ nothing.
    starts printing the token would fail CI though the guard still holds it
    (asserted next): deliberate, so this finding is re-checked rather than
    silently going stale.
-7. **The hub's log test is not changed here**, because it is not on
-   `develop`. Checked on #423's head instead (Acceptance Criteria).
-
-## Follow-up
-
-- `tests/portal_hub_logs.rs` (0348, PR #423): search `text`, not `ours`, for
-  `USER_ID` and `OTHER_ID`, and drop the comment that SDK lines are the
-  guard's business. It passes only with this fix, so it goes with whichever
-  of 0348 and 0349 merges second.
+7. **The hub's log test is widened here**, since 0348 merged first
+   (2026-11-19): it searches `text`, not only `prices_api`'s lines, for
+   `USER_ID` and `OTHER_ID`, and no longer says the SDK's lines are the
+   guard's business. It passes only with this fix, so it could land only
+   with whichever of 0348 and 0349 merged second.
