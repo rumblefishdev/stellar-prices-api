@@ -851,6 +851,7 @@ for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
     return JSON.stringify(r);
   };
   const hubGrants = [];
+  const hubGrantRoles = [];
   for (const [, policy] of resourcesOfType(
     computeTemplate,
     'AWS::IAM::Policy',
@@ -859,6 +860,7 @@ for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
       const resources = [st.Resource ?? []].flat().map(arnText);
       if (resources.some((r) => r.includes(':secret:sorobanscan-hub/'))) {
         hubGrants.push(st);
+        hubGrantRoles.push(policy.Properties?.Roles);
       }
     }
   }
@@ -881,6 +883,26 @@ for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
       '  → the api-handler reads the hub token secret and nothing else under ' +
         '`sorobanscan-hub/`: the value mints a token for any account. See ' +
         'compute-stack.ts.',
+    );
+  }
+  // ...and the statement sits on the api-handler's role, alone. The function
+  // names its role as `Fn::GetAtt [<role>, Arn]`, the policy as `Ref <role>`;
+  // the grant moved to another function's role would read the same above.
+  const handlerRole = apiHandler[1].Properties?.Role?.['Fn::GetAtt']?.[0];
+  const [grantRoles] = hubGrantRoles;
+  if (
+    typeof handlerRole !== 'string' ||
+    !Array.isArray(grantRoles) ||
+    grantRoles.length !== 1 ||
+    grantRoles[0]?.Ref !== handlerRole
+  ) {
+    fail(
+      `error: \`PortalReadHubTokenSecret\` is attached to ` +
+        `${JSON.stringify(grantRoles ?? null)}, expected only the ` +
+        `api-handler's role ${JSON.stringify(handlerRole ?? null)}.`,
+      '  → only the api-handler verifies hub tokens, and the value mints a ' +
+        "token for any account: no other role reads it. See compute-stack.ts' " +
+        '`apiHandlerRole.addToPrincipalPolicy`.',
     );
   }
 }
