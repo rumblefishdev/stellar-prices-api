@@ -61,6 +61,14 @@ history:
       (deletion + non_fast_forward, no bypass). GitHub refused GitHub Actions
       as a bypass actor, so promote's push to master is an open point for
       Phase 2.
+  - date: 2026-11-19
+    status: active
+    who: okarcz
+    note: >
+      First release through the flow: #426 develop → deploy/production
+      (c7dcd26d), Observability deployed from its tip, master fast-forwarded
+      through the admin bypass, tag prod-2026-11-19. It carried 0348, whose
+      Compute had been deployed by hand from develop the same morning.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -263,6 +271,29 @@ hand from its tip, then `master` fast-forwarded and tagged through the admin
 bypass. It tests the branch rules, not the `production` environment approval
 or the `promote` job; those get their first test on the first release after
 Phase 2.
+
+**First release, 2026-11-19: `prod-2026-11-19` on `c7dcd26d`.**
+
+| Step | Result |
+| --- | --- |
+| Flag PR #425 → `develop` | Approved by adamkoot, merged as `97b4cd62` |
+| Release diff | Also carried [[0348]] (#422, #423), merged to `develop` at 09:39 UTC. Its owner had deployed Compute by hand from `develop` `21b938fa` at 09:50 UTC (confirmed); `cdk diff Prices-production-Compute` showed only Lambda code hashes. Released with it, Compute not redeployed |
+| Release PR #426 `develop` → `deploy/production` | `BLOCKED` / `REVIEW_REQUIRED` until approved (adamkoot) and the three checks passed; merged as `c7dcd26d` (parents `7a85607b`, `97b4cd62`). No extra approval was asked for unattributed changes |
+| Deploy | `make deploy-production-observability` from a clean detached checkout of `c7dcd26d`, 12:55:28 UTC. Details in [[0242]]'s heal log |
+| `master` | `git push origin c7dcd26d…:refs/heads/master`: "Bypassed rule violations … Cannot update this protected ref", `7a85607b..c7dcd26d` |
+| Tag | Annotated `prod-2026-11-19` on `c7dcd26d` |
+
+After it, `origin/master` = `origin/deploy/production` = `prod-2026-11-19` =
+`c7dcd26d`, and every stack runs that commit's code.
+
+- **Compute went out by hand from `develop` twice (2026-11-18 and 11-19),
+  for [[0348]],** before the team had been told about this flow. Nothing
+  stops it until Phase 3's Makefile guard. Releasing `develop` brought the
+  branches back to what is live; a cherry-picked release would have left
+  `master` claiming a Compute that was not running.
+- `prices-production-coverage-sweep-unclassified` was already in ALARM before
+  this release (since 2026-11-09, [[0345]] part C); the release did not cause
+  that red tile.
 
 ### Phase 2: the deploy workflow
 

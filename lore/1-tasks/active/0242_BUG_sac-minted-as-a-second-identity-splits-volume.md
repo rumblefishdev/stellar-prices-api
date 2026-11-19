@@ -323,6 +323,15 @@ The six latent SACs have other causes. SUSHI and HYPE traded before SushiSwap wa
   - The `bak_0242_*` tables stay until this task is archived (§5h rollback).
   - Scheduled probe: `SacContractIdentities` 40 until 13:01 UTC, then 0 at 13:16 and 13:31. §6's pre-check (0 for at least two periods) is met.
   - The 13:30 coarse sweep restored the `sdex` coarse `close_usd = 0` counts the pre-roll had raised, to exactly their earlier values: `1h` 2,670,725, `4h` 1,527,763, `1d` 556,120.
+- **2026-11-19, §6, the alarms (plan D).** The first release through `deploy/production` ([[0343]]).
+  - #425 set `opsAlarms.sacIdentityAlarmsEnabled` and `opsAlarms.sacContractIdentitiesActionsEnabled` to `true` (approved by adamkoot, merged as `97b4cd62`). Release PR #426 `develop` → `deploy/production` merged as `c7dcd26d` (parents `7a85607b`, `97b4cd62`).
+  - The release also carried [[0348]] (#422, #423). Compute was already live from `develop` `21b938fa` (deployed by its owner at 09:50 UTC, confirmed); `cdk diff Prices-production-Compute` from `c7dcd26d` showed only Lambda code hashes, so Compute was not redeployed.
+  - Pre-check: `SacContractIdentities` `Maximum` 0 in every 15-minute period 09:24–10:24 and 11:22–11:52 UTC. `SacUnprovenSkipped` and `SacCandidatesUnavailable` had no datapoint in the previous two weeks.
+  - Diff of `Prices-production-Observability` from `c7dcd26d`: the three alarms added, the dashboard strip 77 → 80 owned alarms, `DashboardAlarmCount` 87 → 90, nothing replaced or removed. `--strict` also lists 40 existing alarms, each an `AlarmDescription` whose deployed copy reads `?` for a non-ASCII character; no threshold, metric or action changes.
+  - `make deploy-production-observability` from a clean detached checkout of `c7dcd26d`: `UPDATE_COMPLETE` at 12:55:28 UTC. Compute untouched (last update 09:50:48 UTC).
+  - Post-check: `prices-production-sac-contract-identities`, `prices-production-ledger-processor-sac-unproven` and `prices-production-ledger-processor-sac-candidates-unavailable` each `ActionsEnabled = True`, `OK`, one alarm action.
+  - `master` fast-forwarded `7a85607b` → `c7dcd26d` through the admin bypass; tag `prod-2026-11-19` on `c7dcd26d`.
+  - From here the SAC metrics are watched by alarms; the daily read by hand (D8) ends.
 
 ## Plan to completion (2026-11-18)
 
