@@ -5,8 +5,9 @@
 puts Cloudflare rules in front of `prices-api.sorobanscan.com`. No prior context
 assumed.
 
-**Owner of the secret: Adam Kot (`akot`).** He creates it and changes it; the
-hub's backend and Prices both read it.
+**Owner of the secret: the operator** (whoever administers Prices' AWS
+account), who creates it and changes it; the hub's backend and Prices both read
+it.
 
 The hub (`rumblefishdev/sorobanscan-api-portal`) signs a member in with Discord
 once, for every API, and shows a tab per product. Its backend (the BFF) calls
@@ -25,7 +26,7 @@ the hub takes over (the spec's cutover, steps 3 and 4).
 | The secret's **name** (`sorobanscan-hub/production/prices-token`)       | the hub's spec; CDK repeats it — `infra/src/lib/mtls.ts`, `hubTokenSecretName()` |
 | The IAM grant to read it (`PortalReadHubTokenSecret`, api-handler only) | CDK — `compute-stack.ts`                                                         |
 | `PORTAL_HUB_SECRET_NAME` on the api-handler                             | CDK — `compute-stack.ts`                                                         |
-| The secret's **value**                                                  | **akot**, by hand, out of band                                                   |
+| The secret's **value**                                                  | **the operator**, by hand, out of band                                           |
 | The hub's reader of the same secret                                     | the hub's backend, through its own AWS role                                      |
 
 CI pins the name and the grant (`tools/scripts/verify-openapi-routes.mjs`,
@@ -47,7 +48,7 @@ One Secrets Manager secret in `eu-central-1`:
   with its padding, 32 bytes. Both sides refuse anything else (Prices:
   `portal/hub/secret.rs`; the hub: `bff/src/product-secret.ts`).
 
-**Creating it.** Once, by akot, with a value no one sees: the command is in the
+**Creating it.** Once, by the operator, with a value no one sees: the command is in the
 hub's `README.md` (search for `prices-token`). It is not repeated here, so the
 two can't drift. Never `new secretsmanager.Secret` in CDK: the value has a
 reader this repo does not deploy, and a CloudFormation-managed value would be
@@ -71,8 +72,12 @@ Prices keeps the value it read until its execution environment is recycled; the
 hub picks up a new `current` within 5 minutes. So a new key must be accepted by
 every Prices environment **before** the hub can sign with it. Four steps, each
 safe to stop after. Each step builds the new JSON from the secret as stored,
-never from shell variables, so a step can be run in a new shell. Run each step
-once: step 3 run twice swaps the keys back.
+never from shell variables, so a step can be run in a new shell. A step run out
+of turn refuses rather than undoing an earlier one: step 1 refuses while the
+secret holds a `previous` (a rotation step 4 has not finished), and step 3
+refuses unless the stored secret is still the version step 1 wrote, so run
+twice it does not swap the keys back. No step puts a key on a command line:
+the new JSON reaches `aws` on its standard input.
 
 Set these once per shell. They hold no key. A step run without them stops:
 
@@ -87,11 +92,14 @@ KEYS_OK='def ok: type == "string" and test("^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]
 
 Every step below does the same three things in a subshell: reads the stored
 secret, builds the new JSON from it, and checks it with `KEYS_OK` before the
-put. If the check fails, the step prints nothing, writes nothing and stops
-(`jq -e` fails, `pipefail` carries that on). Nothing is put, so the secret
-stays as it was.
+put. If a check fails, the step writes nothing and stops, with `jq`'s
+`refused…` or a `stopped: …` line (`jq -e` fails, `pipefail` carries that on).
+Nothing is put, so the secret stays as it was.
 
 1. **Add the new key as `previous`.** The hub keeps signing with the old one.
+   Refused while the secret already holds a `previous`: within 10 minutes of
+   another rotation's step 3 that is the key the hub may still sign with
+   (step 4).
 
    ```bash
    (
@@ -99,12 +107,18 @@ stays as it was.
      NEW=$(openssl rand -base64 32)
      JSON=$(aws secretsmanager get-secret-value --region eu-central-1 \
          --secret-id "$SECRET_ID" --query SecretString --output text \
-       | jq -ce --arg n "$NEW" '{current} + {previous: $n}' \
+       | NEW="$NEW" jq -ce 'if has("previous")
+           then error("refused: the secret holds a previous; finish the last rotation (step 4) first")
+           else {current, previous: env.NEW} end' \
        | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
-     aws secretsmanager put-secret-value --region eu-central-1 \
-         --secret-id "$SECRET_ID" --secret-string "$JSON"
+     printf %s "$JSON" | aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string file:///dev/stdin \
+         --query VersionId --output text
    )
    ```
+
+   It prints the version it wrote. Keep it: step 3 needs it, as
+   `STEP1_VERSION`.
 
 2. **Recycle Prices' api-handler**, so every environment reads the pair:
 
@@ -123,20 +137,52 @@ stays as it was.
        --function-name prices-production-api-handler
    ```
 
+   Then see that the new environments hold the pair. Each loads the secret on
+   its first hub call, so make some (each answers `401 invalid_token` and logs
+   the expected WARN `hub call refused: its token did not verify`):
+
+   ```bash
+   for i in 1 2 3; do
+     curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer v1.probe.probe' \
+         https://prices-api.sorobanscan.com/api/hub/v1/account
+   done
+   ```
+
+   and in Logs Insights on `/aws/lambda/prices-production-api-handler`, from
+   the recycle on:
+
+   ```
+   fields @timestamp, fields.keys
+   | filter fields.message = "the hub contract's secret loaded"
+   | sort @timestamp desc
+   ```
+
+   At least one line, and every one with `keys` 2. A `1` means that
+   environment read the secret without step 1's key: do not go on; run step 2
+   again. No line: no environment has loaded it yet; probe again.
+
 3. **Swap them: the new key becomes `current`.** Within 5 minutes the hub signs
    with it. Every Prices environment accepts it: the ones recycled in step 2
-   hold it as `previous`, newer ones as `current`. With no `previous` in the
-   stored secret the check fails and nothing is put.
+   hold it as `previous`, newer ones as `current`. Refused unless the stored
+   secret is still the version step 1 wrote: after this step has run once, or
+   after anything else was put since step 1, it stops and puts nothing.
 
    ```bash
    (
      set -euo pipefail
-     JSON=$(aws secretsmanager get-secret-value --region eu-central-1 \
-         --secret-id "$SECRET_ID" --query SecretString --output text \
+     : "${STEP1_VERSION:?set STEP1_VERSION to the version step 1 printed}"
+     STORED=$(aws secretsmanager get-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --query '{v: VersionId, s: SecretString}' --output json)
+     [ "$(printf %s "$STORED" | jq -r .v)" = "$STEP1_VERSION" ] || {
+       echo "stopped: the stored secret is not the version step 1 wrote; nothing was put" >&2
+       exit 1
+     }
+     JSON=$(printf %s "$STORED" | jq -r .s \
        | jq -ce '{current: .previous, previous: .current}' \
        | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
-     aws secretsmanager put-secret-value --region eu-central-1 \
-         --secret-id "$SECRET_ID" --secret-string "$JSON"
+     printf %s "$JSON" | aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string file:///dev/stdin \
+         --query VersionId --output text
    )
    ```
 
@@ -154,8 +200,9 @@ stays as it was.
          --secret-id "$SECRET_ID" --query SecretString --output text \
        | jq -ce '{current}' \
        | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
-     aws secretsmanager put-secret-value --region eu-central-1 \
-         --secret-id "$SECRET_ID" --secret-string "$JSON"
+     printf %s "$JSON" | aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string file:///dev/stdin \
+         --query VersionId --output text
    )
    ```
 
@@ -163,20 +210,79 @@ stays as it was.
 fails, the hub's Prices tab shows Prices' refusal as a `502` (the hub turns
 Prices' `401`/`403` into one, since it is a fault between the two backends),
 and Prices logs `hub call refused: its token did not verify`. Put back the
-previous version and recycle (step 2). Find the two versions, then move
-`AWSCURRENT` back:
+previous version and recycle (step 2). This moves `AWSCURRENT` back to the
+version that holds `AWSPREVIOUS`, and stops without a change if either is
+missing:
 
 ```bash
-aws secretsmanager list-secret-version-ids --region eu-central-1 \
-    --secret-id "$SECRET_ID" \
-    --query 'Versions[].[VersionId, join(`,`, VersionStages), CreatedDate]' \
-    --output text
-# the line with AWSPREVIOUS is the good one (PREV_ID), the one with
-# AWSCURRENT is the bad one (BAD_ID)
-aws secretsmanager update-secret-version-stage --region eu-central-1 \
-    --secret-id "$SECRET_ID" --version-stage AWSCURRENT \
-    --move-to-version-id "$PREV_ID" --remove-from-version-id "$BAD_ID"
+(
+  set -euo pipefail
+  : "${SECRET_ID:?}"
+  stage() {
+    aws secretsmanager list-secret-version-ids --region eu-central-1 \
+        --secret-id "$SECRET_ID" \
+        --query "Versions[?contains(VersionStages, '$1')].VersionId | [0]" --output text
+  }
+  PREV_ID=$(stage AWSPREVIOUS)
+  BAD_ID=$(stage AWSCURRENT)
+  for id in "$PREV_ID" "$BAD_ID"; do
+    case "$id" in "" | None) echo "stopped: no AWSPREVIOUS or no AWSCURRENT version; nothing was moved" >&2; exit 1 ;; esac
+  done
+  aws secretsmanager update-secret-version-stage --region eu-central-1 \
+      --secret-id "$SECRET_ID" --version-stage AWSCURRENT \
+      --move-to-version-id "$PREV_ID" --remove-from-version-id "$BAD_ID"
+  echo "AWSCURRENT is $PREV_ID again; recycle (step 2)"
+)
 ```
+
+### If the secret leaks
+
+Whoever holds it can sign an `issue`, `reveal` or `revoke` token for any
+account until Prices stops accepting it. Do not rotate in four steps: replace
+it at once, and accept that the hub's calls are refused until it reads the new
+value.
+
+1. Write a new key alone, without `previous`:
+
+   ```bash
+   (
+     set -euo pipefail
+     JSON=$(NEW=$(openssl rand -base64 32) jq -nce '{current: env.NEW}' \
+       | jq -ce "if ($KEYS_OK) then . else error(\"refused\") end")
+     printf %s "$JSON" | aws secretsmanager put-secret-value --region eu-central-1 \
+         --secret-id "$SECRET_ID" --secret-string file:///dev/stdin \
+         --query VersionId --output text
+   )
+   ```
+
+2. Recycle at once (step 2, both commands). From then on Prices accepts only
+   the new key.
+3. Wait. The hub reads the new `current` within 5 minutes; until then every
+   hub call is refused (the hub's Prices tab shows a `502`, Prices logs
+   `hub call refused: its token did not verify`).
+4. Find what the leaked secret signed. In Logs Insights on
+   `/aws/lambda/prices-production-api-handler`, from the leak (if it is not
+   known, from the secret's last change) to the recycle:
+
+   ```
+   fields @timestamp, fields.jti, fields.act, fields.outcome, fields.key_id
+   | filter fields.message in ["hub issued an API key", "hub revealed an API key", "hub revoked an API key"]
+   | sort @timestamp asc
+   ```
+
+   The hub's backend logs the `jti` of each reveal, revoke and issue that
+   succeeded (`prices_key_revealed`, `prices_key_revoked`,
+   `prices_key_issue …`), beside the account it was for; a `jti` here that it
+   never logged was not the hub's. Each `key_id` is an
+   API Gateway key, and its name, `discord-<id>-key`, is its owner:
+
+   ```bash
+   aws apigateway get-api-key --region eu-central-1 --api-key "$KEY_ID" \
+       --query name --output text
+   ```
+
+   A key a forged `reveal` returned is known to whoever forged the token:
+   treat it as a leaked key.
 
 **Skipping steps 1–2** (writing `{current: NEW, previous: OLD}` and recycling
 afterwards) leaves a window, from the hub's next read to the recycle, in which
@@ -250,19 +356,24 @@ claims' JSON, HMAC-SHA256 under the context `sorobanscan-hub/prices-token/v1`).
 Accepted when the MAC verifies under `current` or `previous`, `iss` is
 `https://sorobanscan.com/api/hub`, `aud` is `prices`, `sub` is
 `discord:<snowflake>`, `exp > now − 5 s`, `iat ≤ now + 5 s`, `exp − iat ≤ 60 s`,
-and `act` is the route's. One token, one call, one action: a `read` token
-cannot revoke, a `reveal` token cannot issue.
+and `act` is the route's. One action per token: a `read` token cannot revoke, a
+`reveal` token cannot issue. **A token is not single-use**: `jti` is logged,
+never checked, so a captured token works again, for its own action, until
+`exp` + 5 s (at most 65 s after `iat`), and a captured `reveal` token returns
+the key each time. Accepted (ADR 0010 §8a): the hub's backend sends it only to
+Prices, over HTTPS, and a cache of seen `jti`s would hold per execution
+environment only.
 
 ### Errors on every route
 
-| Status | `code`               | Meaning                                                                                                                                                                                                 |
-| ------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `401`  | `invalid_token`      | no bearer, a malformed one, a MAC under neither key, expired, too long-lived, another `aud`, a `sub` that is not a snowflake. One answer for all, so it is not an oracle. No control-plane call is made |
-| `403`  | `action_not_allowed` | a good token for another `act`. No control-plane call is made                                                                                                                                           |
-| `503`  | `hub_unconfigured`   | no secret: not configured, or not readable now (see §2)                                                                                                                                                 |
-| `503`  | `keys_unconfigured`  | the portal's own sources did not load                                                                                                                                                                   |
-| `502`  | `key_unavailable`    | the control plane failed (`account`, `reveal`, `revoke`)                                                                                                                                                |
-| `503`  | `key_unavailable`    | the control plane ran out of time (same three)                                                                                                                                                          |
+| Status | `code`               | Meaning                                                                                                                                                                                                                                                                                                                          |
+| ------ | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `401`  | `invalid_token`      | no bearer, a malformed one, not `v1.`, a MAC under neither key, a claim missing or of the wrong type, another `iss` or `aud`, expired, issued more than 5 s ahead, too long-lived, a `sub` that is not a snowflake, an `act` that is none of the four. One answer for all, so it is not an oracle. No control-plane call is made |
+| `403`  | `action_not_allowed` | a good token for another `act`. No control-plane call is made                                                                                                                                                                                                                                                                    |
+| `503`  | `hub_unconfigured`   | no secret: not configured, or not readable now (see §2)                                                                                                                                                                                                                                                                          |
+| `503`  | `keys_unconfigured`  | the portal's own sources did not load                                                                                                                                                                                                                                                                                            |
+| `502`  | `key_unavailable`    | the control plane failed (`account`, `reveal`, `revoke`)                                                                                                                                                                                                                                                                         |
+| `503`  | `key_unavailable`    | the control plane ran out of time (same three)                                                                                                                                                                                                                                                                                   |
 
 ### `GET account`
 
@@ -287,6 +398,11 @@ cannot revoke, a `reveal` token cannot issue.
   The key's state is still right; the tab shows no figure, as the portal's
   dashboard does while `/usage` fails, and Prices logs why. Only the key
   listing failing is an error (`502`/`503 key_unavailable`).
+- `free_rate_limit_per_second` is the free plan's per-key limit, requests per
+  second, as `/api/config` gives it: the api-handler's `PORTAL_RATE_LIMIT`,
+  which CDK sets from the free usage plan's own setting. `null` when the
+  deployment does not set it. It is the free plan's figure whatever plan the
+  key is on; the key's own plan and its limits are in `usage`.
 - The key's value is never read here; `reveal` reads it.
 - The usage is cached for 60 s per account, shared with the portal's
   `/api/usage` in the same execution environment. A hub issue or revoke drops
@@ -347,19 +463,22 @@ There is no alarm of the contract's own. The api-handler logs JSON lines
 `fields.key_id`); never the token, a key's value, the Discord id or the
 username.
 
-| Line                                                                                                           | Level        | What it means                                                                                                                                                                                                                                                                                             |
-| -------------------------------------------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `the hub contract's secret did not load…`                                                                      | ERROR        | the secret is missing, malformed or not readable: the contract answers `503 hub_unconfigured` until it is fixed. **Act**                                                                                                                                                                                  |
-| `the hub contract has no secret (PORTAL_HUB_SECRET_NAME is unset)…`                                            | WARN         | the variable is missing on the Lambda. **Act**                                                                                                                                                                                                                                                            |
-| `hub contract call answered as unconfigured without a read…`                                                   | WARN         | a hub call inside the 2 s after a failed read: `503 hub_unconfigured`, no read made. Follows the ERROR above                                                                                                                                                                                              |
-| `hub call refused: its token did not verify`                                                                   | WARN         | **expected from strangers**: every scanner with a bad bearer on the public URL makes one. Only a burst together with the hub's Prices tab failing (its `502`) means the two sides disagree: the secret changed on one side only (§1), or a clock more than 5 s adrift. **Never alarm on this line alone** |
-| `hub call refused: its token is for another action`                                                            | WARN         | the hub never sends one. A hub bug, or a captured token replayed. Look                                                                                                                                                                                                                                    |
-| `hub account lookup failed` / `…ran out of time`, `hub reveal failed`, `hub revoke failed`, `hub issue failed` | ERROR / WARN | the control plane, as for the portal's routes                                                                                                                                                                                                                                                             |
-| `hub issue refused: the minimum account age could not be read`                                                 | ERROR        | the issue answered `failed`: the SSM parameter `/prices/production/min-account-age-minutes` did not read. **Act** if it repeats                                                                                                                                                                           |
-| `hub account answered without its usage`                                                                       | WARN         | `usage: null` beside the key's state; see §3                                                                                                                                                                                                                                                              |
-| `hub issued an API key`, `hub revoked an API key`, `hub revealed an API key`                                   | INFO         | the calls, with `jti`, `act`, `outcome` and `key_id`; the revoke line also says `partial=true` when a duplicate key could not be disabled and still answers (**Act**: see the portal's partial-revocation ERROR, which carries no `jti`)                                                                  |
-| `hub answered an account`                                                                                      | INFO         | with `jti`, `act`, the key's `state`, `key_id` (none for `none` or `revoked`) and `usage` (whether it came with one); no `outcome`                                                                                                                                                                        |
-| `hub issue refused`, `hub reveal found…`, `hub revoke found no key`                                            | INFO         | `too_young`, `capped`, `key_revoked`, `no_key`: the account's state, not a fault                                                                                                                                                                                                                          |
+| Line                                                                                                         | Level | What it means                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `the hub contract's secret did not load…`                                                                    | ERROR | the secret is missing, malformed or not readable: the contract answers `503 hub_unconfigured` until it is fixed. **Act**                                                                                                                                                                                  |
+| `the hub contract has no secret (PORTAL_HUB_SECRET_NAME is unset)…`                                          | WARN  | the variable is missing on the Lambda. **Act**                                                                                                                                                                                                                                                            |
+| `hub contract call answered as unconfigured without a read…`                                                 | WARN  | a hub call inside the 2 s after a failed read: `503 hub_unconfigured`, no read made. Follows the ERROR above                                                                                                                                                                                              |
+| `hub call refused: its token did not verify`                                                                 | WARN  | **expected from strangers**: every scanner with a bad bearer on the public URL makes one. Only a burst together with the hub's Prices tab failing (its `502`) means the two sides disagree: the secret changed on one side only (§1), or a clock more than 5 s adrift. **Never alarm on this line alone** |
+| `hub call refused: its token is for another action`                                                          | WARN  | the hub never sends one. A hub bug, or a captured token replayed. Look                                                                                                                                                                                                                                    |
+| `hub call carried an id that names no key; refusing`, `hub call carried an id with no account age; refusing` | WARN  | a token that verified but whose `sub` this side cannot use: answered `401 invalid_token`. The hub never signs one (`token::verify` lets only a snowflake through), so a hub bug. Look                                                                                                                     |
+| `hub account lookup failed`, `hub account lookup ran out of time`                                            | ERROR | the control plane, as for the portal's routes                                                                                                                                                                                                                                                             |
+| `hub reveal failed`, `hub revoke failed`, `hub issue failed`                                                 | WARN  | the control plane, as for the portal's routes; the reveal's cause is on the ERROR line before it, `portal key lookup failed` or `portal key lookup ran out of time`, from the lookup the portal's reveal shares                                                                                           |
+| `hub issue refused: the minimum account age could not be read`                                               | ERROR | the issue answered `failed`: the SSM parameter `/prices/production/min-account-age-minutes` did not read. **Act** if it repeats                                                                                                                                                                           |
+| `hub account answered without its usage`                                                                     | WARN  | `usage: null` beside the key's state; see §3                                                                                                                                                                                                                                                              |
+| `hub issued an API key`, `hub revoked an API key`, `hub revealed an API key`                                 | INFO  | the calls, with `jti`, `act`, `outcome` and `key_id`; the revoke line also says `partial=true` when a duplicate key could not be disabled and still answers (**Act**: see the portal's partial-revocation ERROR, which carries no `jti`)                                                                  |
+| `the hub contract's secret loaded`                                                                           | INFO  | an execution environment read the secret, with `keys` (1, or 2 while a change is under way; §1, step 2). Never a key                                                                                                                                                                                      |
+| `hub answered an account`                                                                                    | INFO  | with `jti`, `act`, the key's `state`, `key_id` (none for `none` or `revoked`) and `usage` (whether it came with one); no `outcome`                                                                                                                                                                        |
+| `hub issue refused`, `hub reveal found…`, `hub revoke found no key`                                          | INFO  | `too_young`, `capped`, `key_revoked`, `no_key`: the account's state, not a fault                                                                                                                                                                                                                          |
 
 A call without any bearer is logged at DEBUG only.
 

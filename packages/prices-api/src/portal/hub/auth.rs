@@ -19,7 +19,9 @@
 //!    `401 invalid_token`.
 //! 5. **The act.** A token whose `act` is not the route's is `403
 //!    action_not_allowed` — a `read` token cannot revoke, a `reveal` token
-//!    cannot issue. One token, one call, one action.
+//!    cannot issue. One action per token, but not one call: `jti` is logged,
+//!    never checked, so a captured token can be replayed for its own action
+//!    until it expires — an accepted risk (ADR 0010 §8a).
 //! 6. **The portal's sources.** A failed load is `503 keys_unconfigured`, the
 //!    portal's own answer for it.
 //!

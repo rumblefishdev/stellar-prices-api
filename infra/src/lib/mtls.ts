@@ -146,7 +146,7 @@ export function portalOauthSecretName(envName: string): string {
  * hub's spec and README rather than by this repo's conventions; only the
  * environment varies.
  *
- * **Created out-of-band by akot, never by CDK**, as {@link portalOauthSecretName}
+ * **Created out-of-band by the operator, never by CDK**, as {@link portalOauthSecretName}
  * is, with one more reason: the value has a reader this stack does not own,
  * and a CloudFormation-managed secret would be restored by our next deploy
  * under the hub's feet.

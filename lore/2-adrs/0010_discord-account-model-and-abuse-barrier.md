@@ -366,6 +366,15 @@ decided by akot (spec decisions 3, 4, 12):
 - **Revoke and reveal need no fresh proof**, as in the portal today: they come
   from a hub session (`act=revoke`, `act=reveal`), and the account's next key
   goes through the issue round trip above.
+- **A token is good for its action until it expires, not for one call.**
+  Prices logs a token's `jti` and does not check it, so a captured token can be
+  replayed for its own action until `exp` + 5 s, at most 65 s after `iat`; a
+  captured `reveal` token returns the key each time. Accepted: the hub's
+  backend sends a token only to Prices, server to server over HTTPS, so
+  capturing one takes a foothold on that path; and a cache of seen `jti`s
+  would hold per Lambda execution environment, so a replay routed to another
+  environment would still pass. A shared store (DynamoDB, say) would close it
+  at the cost of a write on every hub call.
 - **Prices' rules are unchanged** for these keys: one active key per account
   (§2), the once-per-period cap after a revoke, the plan a replacement keeps
   (task 0311), `ManagedBy=prices-portal`. §7 holds: leaving the guild keeps
