@@ -35,9 +35,14 @@ after(() => {
 });
 
 // No user or system git config: a signing or hook setting on the operator's
-// machine must not decide these tests.
+// machine must not decide these tests. And no inherited GIT_* variable: a git
+// hook exports GIT_INDEX_FILE (and in a worktree GIT_DIR), which would point
+// the throwaway repositories' commands at the real repository's index.
+const inherited = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+);
 const gitEnv = {
-  ...process.env,
+  ...inherited,
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'test',
