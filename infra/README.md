@@ -38,12 +38,17 @@ Production changes only through the release flow (task 0343). The code on
 
 1. Open a PR from `develop` to `deploy/production`. CI runs on it, and it
    needs one approval (ruleset `deploy/production`, no bypass).
-2. From the PR's head, take the production diff and paste it into the PR:
+2. From the PR's merge ref, take the production diff and paste it into the
+   PR (`<n>` is the PR number):
 
    ```bash
-   git checkout develop && git pull --ff-only
+   git fetch origin refs/pull/<n>/merge && git checkout --detach FETCH_HEAD
    AWS_PROFILE=soroban-readonly make -C infra diff-production
    ```
+
+   The merge ref is the merge of `develop` into `deploy/production`, which is
+   exactly what deploys. `develop` alone is not: a hotfix that was not yet
+   merged back into `develop` would show there as being reverted.
 
    **This diff is the only place a deletion shows before it happens.** The
    deploy runs `--require-approval never`, because CI cannot answer a prompt,
@@ -55,8 +60,10 @@ Production changes only through the release flow (task 0343). The code on
 3. Merge. `.github/workflows/deploy-production.yml` starts:
    - `build`: the Lambdas, with CI's toolchain and script;
    - `deploy`: waits for the `production` environment's approval (any team
-     member except whoever started the run), then `cdk deploy --all` from the
-     merged commit and the API Gateway cache flush. A stack with no change is
+     member except whoever started the run), checks that the run can promote
+     (its commit is still the tip, `master` fast-forwards to it, the promote
+     key authenticates), then `cdk deploy --all` from the merged commit and
+     the API Gateway cache flush. A stack with no change is
      a no-op, so a docs-only release deploys too;
    - only if all of that succeeded: `master` fast-forwards to the commit and
      the commit is tagged `prod-YYYY-MM-DD` (`-2`, `-3` for another release
@@ -68,6 +75,11 @@ Production changes only through the release flow (task 0343). The code on
 A failed run leaves `master` and the tags as they were. Fix forward with a
 new PR to `deploy/production`, or re-run the workflow on its tip
 (`gh workflow run deploy-production.yml --ref deploy/production`).
+
+Never use GitHub's "Re-run" button on an older run: it reuses that run's
+commit, so it would deploy an old commit over production. The workflow
+refuses such a run before the deploy, but `gh workflow run` on the tip is the
+way to start one.
 
 ### Hotfix
 
@@ -94,6 +106,12 @@ override, by decision: to ship something else, merge it into
 git fetch origin && git checkout --detach origin/deploy/production
 AWS_PROFILE=soroban-admin make -C infra deploy-production-compute
 ```
+
+Do not deploy by hand while a `deploy-production.yml` run is in progress or
+waiting (`gh run list --workflow deploy-production.yml --limit 3`). The guard
+checks the tip once, when the target starts: a hand deploy still building when
+a release lands would ship the older tip over the release, and `master` would
+say otherwise.
 
 A hand deploy does not move `master`. If what it shipped is the release tip
 that the workflow had not deployed, a repository admin fast-forwards `master`
@@ -138,13 +156,35 @@ deletion and non-fast-forward pushes, with no bypass at all. So whoever moves
 - **Rotating the key** (on a schedule, when an admin leaves, or on any doubt):
   add the new key, overwrite the secret, delete the old key. The ruleset does
   not change, because its bypass covers every deploy key of the repository.
+  The key pair lives only in RAM. **Never substitute `/tmp` or any other disk
+  directory** if a command below fails: the private key would stay on disk.
+
+  On Linux (`/dev/shm` is RAM-backed):
 
   ```bash
-  d=$(mktemp -d /dev/shm/promote.XXXXXX)   # RAM, never on disk
+  d=$(mktemp -d /dev/shm/promote.XXXXXX)
   ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
   gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)'
   gh secret set PROMOTE_DEPLOY_KEY --env production < "$d/key"
   shred -u "$d/key" "$d/key.pub" && rmdir "$d"
+  ```
+
+  On macOS (no `/dev/shm`, no `shred`): a 1 MB RAM disk, detached afterwards,
+  which frees the memory and the key with it:
+
+  ```bash
+  dev=$(hdiutil attach -nomount ram://2048 | awk '{print $1}')
+  diskutil erasevolume HFS+ promote-key "$dev" >/dev/null
+  d=/Volumes/promote-key
+  ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
+  gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)'
+  gh secret set PROMOTE_DEPLOY_KEY --env production < "$d/key"
+  hdiutil detach "$dev"
+  ```
+
+  Then, on either:
+
+  ```bash
   gh repo deploy-key list                  # then delete the old one:
   gh repo deploy-key delete <old key id>
   ```
