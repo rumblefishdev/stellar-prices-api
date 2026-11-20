@@ -12,16 +12,146 @@ who has worked on either.
 
 ## Stacks
 
-| Stack                             | File                            | What it holds                                                                                                                                                         |
-| --------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Prices-Cicd`                     | `stacks/cicd-stack.ts`          | GitHub OIDC provider + the `stellar-prices-api-production-deploy` role. Separate app (`src/bin/cicd.ts`), optional — see [CI/CD role](#cicd-role-optional)            |
-| `Prices-production-Secrets`       | `stacks/secrets-stack.ts`       | **No secrets.** Publishes the three secret _names_ to SSM; the operator creates the values                                                                            |
-| `Prices-production-Compute`       | `stacks/compute-stack.ts`       | ledger-processor Lambda + its SQS queue/DLQ subscribed to the platform's ledger-events topic, S3 read on the ledger bucket, the api-handler Lambda, roles, log groups |
-| `Prices-production-ApiGateway`    | `stacks/api-gateway-stack.ts`   | REST API, usage plan + key, ACM certificate, custom domain and its records in your hosted zone. Depends on Compute                                                    |
-| `Prices-production-EventBridge`   | `stacks/eventbridge-stack.ts`   | The scheduled workers and probes (enrichment, rollup sweep, oracle, supply, asset discovery, freshness probes) and their rules                                        |
-| `Prices-production-Observability` | `stacks/observability-stack.ts` | ops-alarms SNS topic, optional Slack delivery through AWS Chatbot, alarms, dashboard. Depends on Compute                                                              |
+| Stack                             | File                            | What it holds                                                                                                                                                                                |
+| --------------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Prices-Cicd`                     | `stacks/cicd-stack.ts`          | The `stellar-prices-api-production-deploy` role that the deploy workflow assumes; imports the account's GitHub OIDC provider. Separate app (`src/bin/cicd.ts`), see [CI/CD role](#cicd-role) |
+| `Prices-production-Secrets`       | `stacks/secrets-stack.ts`       | **No secrets.** Publishes the three secret _names_ to SSM; the operator creates the values                                                                                                   |
+| `Prices-production-Compute`       | `stacks/compute-stack.ts`       | ledger-processor Lambda + its SQS queue/DLQ subscribed to the platform's ledger-events topic, S3 read on the ledger bucket, the api-handler Lambda, roles, log groups                        |
+| `Prices-production-ApiGateway`    | `stacks/api-gateway-stack.ts`   | REST API, usage plan + key, ACM certificate, custom domain and its records in your hosted zone. Depends on Compute                                                                           |
+| `Prices-production-EventBridge`   | `stacks/eventbridge-stack.ts`   | The scheduled workers and probes (enrichment, rollup sweep, oracle, supply, asset discovery, freshness probes) and their rules                                                               |
+| `Prices-production-Observability` | `stacks/observability-stack.ts` | ops-alarms SNS topic, optional Slack delivery through AWS Chatbot, alarms, dashboard. Depends on Compute                                                                                     |
 
 `deploy --all` resolves the order itself (Secrets and Compute first).
+
+## Releasing to production
+
+Production changes only through the release flow (task 0343). The code on
+`master` is the code running in production.
+
+| Branch              | Meaning              | Moved by                                                  |
+| ------------------- | -------------------- | --------------------------------------------------------- |
+| `develop`           | work in progress     | feature PRs                                               |
+| `deploy/production` | approved for release | a release PR from `develop`, approved, merge commit       |
+| `master`            | confirmed live       | the deploy workflow, after it succeeds; fast-forward only |
+
+### A release
+
+1. Open a PR from `develop` to `deploy/production`. CI runs on it, and it
+   needs one approval (ruleset `deploy/production`, no bypass).
+2. From the PR's head, take the production diff and paste it into the PR:
+
+   ```bash
+   git checkout develop && git pull --ff-only
+   AWS_PROFILE=soroban-readonly make -C infra diff-production
+   ```
+
+   **This diff is the only place a deletion shows before it happens.** The
+   deploy runs `--require-approval never`, because CI cannot answer a prompt,
+   and a deploy can destroy a live resource without asking: an API key
+   destroyed this way takes its value with it (task 0157). The approver reads
+   the diff for removals and replacements, not only additions. Lambda
+   `S3Key` hashes differ between build machines and mean nothing.
+
+3. Merge. `.github/workflows/deploy-production.yml` starts:
+   - `build`: the Lambdas, with CI's toolchain and script;
+   - `deploy`: waits for the `production` environment's approval (any team
+     member except whoever started the run), then `cdk deploy --all` from the
+     merged commit and the API Gateway cache flush. A stack with no change is
+     a no-op, so a docs-only release deploys too;
+   - only if all of that succeeded: `master` fast-forwards to the commit and
+     the commit is tagged `prod-YYYY-MM-DD` (`-2`, `-3` for another release
+     the same day);
+   - `release`: creates the tag's GitHub Release.
+4. Apply what is not branch state, from the release commit, and note each in
+   the tag's GitHub Release (below).
+
+A failed run leaves `master` and the tags as they were. Fix forward with a
+new PR to `deploy/production`, or re-run the workflow on its tip
+(`gh workflow run deploy-production.yml --ref deploy/production`).
+
+### Hotfix
+
+A PR straight to `deploy/production`, released like any other. Then merge
+`deploy/production` back into `develop`, so the fix is not lost by the next
+release.
+
+### Rollback
+
+A revert PR on `deploy/production`, released like any other. `master` is
+never moved back and never force-pushed; ruleset `master (history)` refuses
+both, for everyone.
+
+### Deploying by hand
+
+Every `make deploy-production*`, `destroy-production*` and
+`sync-portal-explorer` target first runs `tools/scripts/check-release-commit.sh`.
+It refuses unless the working tree is clean (untracked files included) and
+`HEAD` is the freshly fetched tip of `origin/deploy/production`. There is no
+override, by decision: to ship something else, merge it into
+`deploy/production` by PR first.
+
+```bash
+git fetch origin && git checkout --detach origin/deploy/production
+AWS_PROFILE=soroban-admin make -C infra deploy-production-compute
+```
+
+A hand deploy does not move `master`. If what it shipped is the release tip
+that the workflow had not deployed, a repository admin fast-forwards `master`
+to it (below) and tags it.
+
+### Changes that are not branch state
+
+Applied by hand, from the release commit, and recorded in the tag's GitHub
+Release, one line each (what, when in UTC, who):
+
+- **The portal bundle:** `make -C infra sync-portal-explorer` when
+  `web/portal/` changed (guarded like a deploy).
+- **The ClickHouse schema** (`init.sql`, `views.sql`): applied by CH's
+  `default` user from a detached checkout of `origin/deploy/production`. No
+  script enforces this.
+- **Data repairs** and other one-off operations.
+
+```bash
+gh release view prod-2026-11-21 --json body --jq .body > notes.md
+# edit notes.md: add the line under "Manual steps"
+gh release edit prod-2026-11-21 --notes-file notes.md
+```
+
+### The promote key and `master`'s rules
+
+`master` has two rulesets. `master` refuses every update, with two bypass
+actors: repository admins and deploy keys. `master (history)` refuses
+deletion and non-fast-forward pushes, with no bypass at all. So whoever moves
+`master` can only fast-forward it.
+
+- **The workflow** moves `master` with a write deploy key whose private half
+  is the `production` environment secret `PROMOTE_DEPLOY_KEY`. GitHub never
+  shows a secret's value, so only an approved run can use it.
+- **Admins** can fast-forward `master` by hand, for emergencies only: when a
+  deploy succeeded but promote did not. Every bypass is logged under the
+  ruleset's Rule insights.
+
+  ```bash
+  git push origin <deployed commit>:refs/heads/master
+  ```
+
+- **Rotating the key** (on a schedule, when an admin leaves, or on any doubt):
+  add the new key, overwrite the secret, delete the old key. The ruleset does
+  not change, because its bypass covers every deploy key of the repository.
+
+  ```bash
+  d=$(mktemp -d /dev/shm/promote.XXXXXX)   # RAM, never on disk
+  ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
+  gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)'
+  gh secret set PROMOTE_DEPLOY_KEY --env production < "$d/key"
+  shred -u "$d/key" "$d/key.pub" && rmdir "$d"
+  gh repo deploy-key list                  # then delete the old one:
+  gh repo deploy-key delete <old key id>
+  ```
+
+- **On a leak,** delete the key first (`gh repo deploy-key delete`): it stops
+  working at once. Promote then fails and `master` stays put; an admin
+  catches it up by hand until a new key is in.
 
 ## Fresh-account deployment
 
@@ -273,6 +403,11 @@ npm run infra:deploy:production   # builds, deploys every stack, flushes the API
 aarch64 binary. Deploy through these targets: a raw `npx cdk deploy` ships
 whatever sits in `target/lambda/`.
 
+The deploy targets refuse anything but a clean checkout of
+`origin/deploy/production`'s tip ([Deploying by hand](#deploying-by-hand)), so
+a first deploy runs from that branch too. Later releases go through
+[the release flow](#releasing-to-production).
+
 ### 8. After the deploy
 
 1. **Portal cold start.** The api-handler reads the usage-plan id that
@@ -327,20 +462,31 @@ aws ssm delete-parameters --names /prices/production/slack-workspace-id /prices/
 Log groups are removed with their stacks. The CDK bootstrap stack
 (`CDKToolkit`) is left in place.
 
-## CI/CD role (optional)
+## CI/CD role
 
-`Prices-Cicd` creates a GitHub OIDC provider and a deploy role whose trust is
-limited to this repository's `production` GitHub Environment. **No workflow
-deploys today.** Every deploy is an operator running the make targets above,
-so the stack exists for a future deploy workflow. To create it:
+`Prices-Cicd` holds the deploy role that `deploy-production.yml` assumes. Its
+trust is limited to this repository's `production` GitHub Environment. Besides
+the CDK bootstrap roles and the SSM reads, it may flush the production stage's
+API Gateway cache, and nothing else of the API.
 
 ```bash
-npm run infra:deploy:cicd   # prints Prices-Cicd.ProductionDeployRoleArn
+AWS_PROFILE=soroban-admin npm run infra:deploy:cicd   # prints Prices-Cicd.ProductionDeployRoleArn
+gh secret set AWS_DEPLOY_ROLE_ARN --env production --body <that ARN>
 ```
 
-The OIDC provider is a per-account singleton. In an account that already has
-one, such as an account shared with the platform, the stack fails until
-the provider is imported instead of created.
+The stack **imports** the GitHub OIDC provider; it does not create it. An
+account holds one provider per URL, and this account's belongs to
+soroban-block-explorer's `Explorer-Cicd` stack. Deleting that stack, or
+removing the provider from its code, deletes the provider, and both
+projects' deploy workflows stop until it exists again (a re-created provider
+has the same ARN, so nothing here changes). Moving it to
+soroban-infrastructure is task 0351. On a fresh account without that stack,
+create the provider first:
+
+```bash
+aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com \
+    --client-id-list sts.amazonaws.com --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
 
 ## SSM key contract
 
@@ -384,7 +530,7 @@ From repo root:
 ```bash
 # One-time
 npm run infra:bootstrap         # CDK bootstrap (per AWS account + region)
-npm run infra:deploy:cicd       # optional: CicdStack — OIDC + deploy role
+npm run infra:deploy:cicd       # CicdStack — the deploy role (imports the OIDC provider)
 
 # Production (the only AWS environment)
 npm run infra:synth:production  # Synth env template
@@ -404,7 +550,9 @@ make deploy-production-secrets  # single-stack scoped deploy
 
 Per-stack `deploy-production-{stack}` variants exist for every
 stack in the app — see `infra/Makefile`. Each passes `--exclusively`: it
-deploys that stack and nothing it depends on.
+deploys that stack and nothing it depends on. Every deploy, destroy and
+portal-sync target refuses to run off the tip of `origin/deploy/production`
+([Deploying by hand](#deploying-by-hand)); `diff-production` does not.
 
 `make build` compiles the CDK TypeScript only. The Lambda code is whatever is
 in `../target/lambda/<name>/` at synth time, so every target that can ship a
