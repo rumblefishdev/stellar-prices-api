@@ -55,8 +55,11 @@ cd infra && make deploy-production-eventbridge   # builds the Lambdas first
 
 ## Prerequisites
 
-- You are on `develop` (or the branch carrying the build you intend to ship) and
-  it is up to date.
+- The build you intend to ship is released: merged into `deploy/production`
+  by a release PR. A merge there deploys every stack through
+  `deploy-production.yml`, so this runbook is for a hand deploy of that tip
+  only. The make targets refuse any other checkout (task 0343, see
+  [Deploying by hand](../../infra/README.md#deploying-by-hand)).
 - `export AWS_PROFILE=soroban-admin` — the shared account profile.
 - `export AWS_REGION=eu-central-1`.
 - Node per the repo `.nvmrc`.
@@ -78,7 +81,7 @@ cd <repo-root>
 export AWS_PROFILE=soroban-admin
 export AWS_REGION=eu-central-1
 
-git checkout develop && git pull --ff-only
+git fetch origin && git checkout --detach origin/deploy/production
 git log --oneline -1                       # confirm the build you intend to ship
 
 aws sts get-caller-identity --query '[Account,Arn]' --output text

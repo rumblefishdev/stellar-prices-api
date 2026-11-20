@@ -579,9 +579,11 @@ the range overlaps the last 7 days, stop the reconcile MVs for the duration
 ### 6. Rollback
 
 If the probe Lambda and ObservabilityStack from this change are deployed, roll
-them back first (`make deploy-production-eventbridge` and
-`make deploy-production-observability` from the commit before this change),
-then run the steps below in the same session. What that order buys, and what it
+them back first, then run the steps below as soon as that deploy finishes. The
+rollback is a revert PR on `deploy/production`, released like any other
+(`infra/README.md`, "Rollback"): since task 0343, `make deploy-production-*`
+refuses to deploy the commit before this change, or anything but the release
+tip. What that order buys, and what it
 does not:
 
 - **It removes** the `prices-production-rollup-mismatch-*` and
