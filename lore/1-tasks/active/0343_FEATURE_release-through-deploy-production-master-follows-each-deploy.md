@@ -5,7 +5,7 @@ type: FEATURE
 status: active
 assignee: okarcz
 related_adr: []
-related_tasks: ["0141", "0242"]
+related_tasks: ["0141", "0242", "0351"]
 tags: ["deploy", "release", "ci", "branching", "priority-medium", "effort-medium"]
 links:
   - "../../../infra/Makefile"
@@ -69,6 +69,17 @@ history:
       (c7dcd26d), Observability deployed from its tip, master fast-forwarded
       through the admin bypass, tag prod-2026-11-19. It carried 0348, whose
       Compute had been deployed by hand from develop the same morning.
+  - date: 2026-11-20
+    status: active
+    who: okarcz
+    note: >
+      Phase 2 decisions answered by the operator: promote pushes master with
+      a deploy key held as a production environment secret; every release
+      deploys, docs-only included; the release PR's cdk diff stays manual;
+      the deploy role may flush the production stage cache; CI keeps running
+      on master; the portal sync stays manual. The team agreed to import
+      Explorer-Cicd's OIDC provider as is; moving it to
+      soroban-infrastructure is spawned as 0351.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -310,11 +321,69 @@ After it, `origin/master` = `origin/deploy/production` = `prod-2026-11-19` =
     `master` (rejected unless it is a fast-forward), then tags it
     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release on the same day). A
     failed deploy leaves `master` and the tags as they were.
-    **Open (found 2026-11-19):** the `GITHUB_TOKEN` cannot pass ruleset
-    27628401, because GitHub refuses the Actions app as a bypass actor. Choose
-    one of: a deploy key held as a repository secret, with a `DeployKey` bypass
-    on 27628401; or a GitHub App installed on `rumblefishdev`, with that app as
-    the bypass actor. Ruleset 27628422 stays without a bypass either way.
+    The `GITHUB_TOKEN` cannot pass ruleset 27628401, because GitHub refuses
+    the Actions app as a bypass actor (found 2026-11-19). `promote` pushes with
+    a deploy key instead (decision 7 below).
+
+#### Decisions (2026-11-20)
+
+Answered by the operator. Numbering continues from the 2026-11-17 decisions.
+
+7. **How `promote` passes ruleset 27628401: a deploy key.** One SSH key pair
+   for this repository. The public half is a write deploy key; the private
+   half lives only as a secret of the `production` environment, so only a
+   run a teammate approved can read it, and no copy stays on disk (it goes to
+   `gh secret set` on stdin). 27628401 gets a `DeployKey` bypass next to the
+   admin one; 27628422 keeps no bypass, so the key can only fast-forward
+   `master`. The admin bypass stays until step 15. A GitHub App was rejected.
+   - The bypass covers every write deploy key of the repository, not one key.
+     On 2026-11-20 the repository had none.
+   - Rotation: add the new key, overwrite the secret, delete the old key; the
+     ruleset does not change. On a leak, delete the key first; `promote` then
+     fails and an admin moves `master` by hand until a new key is in.
+8. **Every release deploys, docs-only included.** No `paths-ignore`, so
+   `master` always reaches `deploy/production`'s tip ("`master` = the last
+   release"). Stacks with no change are a no-op.
+9. **The release PR's `cdk diff` is manual.** Whoever opens the release PR
+   runs `make diff-production` from its head and pastes the result into the
+   PR; the approver reads it for removals. `infra/README.md` says so. The
+   workflow deploys with `--require-approval never`, because CI cannot answer
+   a prompt; the PR approval and the `production` environment approval are
+   the human checks.
+10. **The deploy role may flush the production stage cache.** One statement:
+    `apigateway:DELETE` on
+    `arn:aws:apigateway:<region>::/restapis/<id>/stages/production/cache/data`.
+    It drops only cached GET responses (`/api-docs-json` 1 h; six `/v1` routes
+    10–60 s), never data, keys, the stage or the API, and not the authorizer
+    cache. Same flush `make deploy-production` runs today.
+11. **CI keeps running on `master`.** A push with a deploy key starts
+    workflows, so `ci.yml` runs once more on each released commit. Kept.
+12. **The portal sync stays manual.** `make sync-portal-explorer` from the
+    release commit when `web/portal/` changed, noted on the release tag. The
+    deploy role gets no access to the explorer's bucket or distribution.
+
+13. **`Prices-Cicd` imports the GitHub OIDC provider as is** (agreed with the
+    team on 2026-11-20). `fromOpenIdConnectProviderArn` with
+    `arn:aws:iam::750702271865:oidc-provider/token.actions.githubusercontent.com`.
+    `Explorer-Cicd` does not change. Deleting that stack, or removing the
+    provider from its code, would delete the provider and stop both
+    pipelines; the risk is accepted because the team owns both repositories
+    and the explorer's own deploy depends on the same provider. Moving the
+    provider to `soroban-infrastructure` is [[0351]].
+
+#### Measured on 2026-11-20
+
+Read-only, `soroban-readonly`.
+
+- The account has one GitHub OIDC provider, the ARN above, created
+  2026-08-12. Audience `sts.amazonaws.com` and thumbprint `6938fd4d…`, the
+  same values `cicd-stack.ts` uses, so the import needs no change on the
+  explorer's side.
+- It is `GitHubOidcProvider7EBF861F` in `Explorer-Cicd`, a CDK custom
+  resource. The stack also holds `soroban-explorer-production-deploy`, which
+  the explorer's tag-driven `deploy-production.yml` uses (last tags
+  `production-2026.11.12-1`, `-2-CloudWatch`).
+- The repository had no deploy keys.
 
 ### Phase 3: guard and docs
 
@@ -351,10 +420,7 @@ After it, `origin/master` = `origin/deploy/production` = `prod-2026-11-19` =
   0242. Its alarms come back by turning the Phase 0 flag on.
 - The catch-up release (#418) was out of scope until 2026-11-17. It is now
   Phase 0.
-- Open point for Phase 2: whether a release that changes only `lore/` or
-  docs still runs the deploy. If it skips the deploy, as `stellar-x402` does
-  with `paths-ignore`, `master` does not reach `deploy/production`'s tip until
-  the next code release. Running it every time is cheap, because a stack with
-  no change is a no-op.
+- A release that changes only `lore/` or docs still runs the deploy
+  (decision 8, 2026-11-20).
 - [[0141]] is the history behind `build-lambdas`: a deploy shipped stale Lambda
   assets from a laptop. Building in CI removes that class of error.
