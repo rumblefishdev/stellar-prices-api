@@ -385,6 +385,74 @@ Read-only, `soroban-readonly`.
   `production-2026.11.12-1`, `-2-CloudWatch`).
 - The repository had no deploy keys.
 
+#### Phase 2 implementation (PR #427, opened 2026-11-20)
+
+- `.github/workflows/deploy-production.yml`: job `build` (ARM runner, the CI
+  toolchain pair, `build-lambda-assets.sh`, assets passed on as a tar because
+  `upload-artifact` drops the executable bit) and job `deploy` (environment
+  `production`: verify the bootstraps, `cdk deploy --all --require-approval
+  never`, `make flush-production-cache`, then the promote steps).
+- `cicd-stack.ts`: the provider imported by ARN (decision 13), plus
+  `apigateway:DELETE` on `…/restapis/<id>/stages/production/cache/data`, the
+  id taken from `/prices/production/api-gateway-id` (`02mabge71l` on
+  2026-11-20).
+- **Promote is steps in `deploy`, not a job (emerged).** The deploy key is a
+  `production` environment secret, and every job naming an environment with
+  required reviewers asks for its own approval, so a separate `promote` job
+  would need a second one. The steps run only when the deploy and the flush
+  succeeded, which is the same guarantee step 12 asked for.
+- The workflow runs on the first push to `deploy/production` that carries the
+  file, so the setup below must be finished before that release.
+
+#### Phase 2 setup (the operator, before the next release)
+
+All from the local machine, repository root. Steps 1–2 can run any time;
+steps 3–4 run after #427 merges.
+
+1. **Deploy key.** Generated in `/dev/shm` (RAM, never written to disk), the
+   private half goes to the environment secret on stdin, then both halves are
+   shredded:
+   ```bash
+   d=$(mktemp -d /dev/shm/promote.XXXXXX)
+   ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
+   gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)' -R rumblefishdev/stellar-prices-api
+   gh secret set PROMOTE_DEPLOY_KEY --env production -R rumblefishdev/stellar-prices-api < "$d/key"
+   shred -u "$d/key" "$d/key.pub" && rmdir "$d"
+   ```
+   Check: `gh repo deploy-key list -R rumblefishdev/stellar-prices-api` shows
+   one key with read-write; `gh secret list --env production -R rumblefishdev/stellar-prices-api`
+   shows `PROMOTE_DEPLOY_KEY`.
+2. **Bypass on ruleset 27628401.** The full list is sent, so the admin entry
+   stays:
+   ```bash
+   gh api -X PUT repos/rumblefishdev/stellar-prices-api/rulesets/27628401 --input - <<'JSON'
+   {"bypass_actors":[
+     {"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"},
+     {"actor_id":null,"actor_type":"DeployKey","bypass_mode":"always"}
+   ]}
+   JSON
+   gh api repos/rumblefishdev/stellar-prices-api/rulesets/27628401 --jq '{rules:[.rules[].type], bypass_actors}'
+   ```
+   Expected: rules `["update"]`, two bypass actors. Ruleset 27628422 is not
+   touched.
+3. **`make deploy-cicd`** (after #427 merges, from `develop`), with
+   `soroban-admin`. It asks once about the new IAM role; the diff must show
+   one role, one policy and no OIDC provider:
+   ```bash
+   git checkout develop && git pull --ff-only
+   AWS_PROFILE=soroban-admin make -C infra diff-cicd
+   AWS_PROFILE=soroban-admin make -C infra deploy-cicd
+   ```
+4. **Role ARN into the environment:**
+   ```bash
+   gh secret set AWS_DEPLOY_ROLE_ARN --env production -R rumblefishdev/stellar-prices-api --body "$(AWS_PROFILE=soroban-readonly aws cloudformation describe-stacks --stack-name Prices-Cicd --region eu-central-1 --query "Stacks[0].Outputs[?OutputKey=='ProductionDeployRoleArn'].OutputValue" --output text)"
+   ```
+   Check: the value is `arn:aws:iam::750702271865:role/stellar-prices-api-production-deploy`.
+
+First test: the next release PR `develop` → `deploy/production`. Expected:
+`build` green, `deploy` waits for an approval from someone other than the
+merger, then `master` = the release commit and a `prod-*` tag on it.
+
 ### Phase 3: guard and docs
 
 13. `infra/Makefile`: `deploy-production*` refuses unless the working tree is
