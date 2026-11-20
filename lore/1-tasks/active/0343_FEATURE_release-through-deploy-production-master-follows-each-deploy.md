@@ -80,6 +80,14 @@ history:
       on master; the portal sync stays manual. The team agreed to import
       Explorer-Cicd's OIDC provider as is; moving it to
       soroban-infrastructure is spawned as 0351.
+  - date: 2026-11-20
+    status: active
+    who: okarcz
+    note: >
+      Phase 2 opened as #427 (deploy workflow, OIDC import, cache-flush
+      permission, then a GitHub Release job). Phase 3 opened as #428 (release
+      guard on 13 make targets, no override; release-flow docs). Setup
+      runbook for the operator under Phase 2 setup.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -466,9 +474,54 @@ merger, then `master` = the release commit and a `prod-*` tag on it.
     27628401: remove it, or narrow it to a team, since it covers every
     repository admin (seven on 2026-11-19).
 
+#### Decisions (2026-11-20, Phase 3)
+
+Answered by the operator.
+
+14. **The guard has no override.** No variable skips it. An urgent fix is a
+    PR to `deploy/production`, then a deploy of its tip (CI or by hand).
+15. **The guard also covers `sync-portal-explorer` and every
+    `destroy-production*`**, not only `deploy-production*`. `diff-production`
+    stays unguarded, because a release PR is diffed from `develop`.
+    `deploy-cicd` / `destroy-cicd` are not guarded (not asked; the deploy
+    role, not production).
+16. **A release's manual steps go in the tag's GitHub Release.** An annotated
+    tag's message cannot be edited, so "noted on the release tag" means the
+    Release of that tag, created by the workflow and edited with
+    `gh release edit` (portal upload, ClickHouse schema apply, data repair:
+    what, when in UTC, who).
+
+#### Phase 3 implementation
+
+- **#427, second commit:** job `release` after `deploy` creates the tag's
+  GitHub Release, with the run and the release PR linked and an empty
+  "Manual steps" section. **Its own job (emerged)**, holding
+  `contents: write`, so the job with the AWS role and the deploy key keeps
+  `contents: read`; `develop` has no rules, and a write token there could
+  push to it.
+- **#428** (`feat/0343_deploy-guard-and-release-docs`, merge after #427):
+  - `tools/scripts/check-release-commit.sh`, the first prerequisite of all 13
+    guarded targets: fetches `origin/deploy/production`, refuses a dirty tree
+    (untracked files count, ignored ones do not) or a `HEAD` off its tip, and
+    prints `git checkout --detach origin/deploy/production`. Checked on a
+    real checkout: refused before any build started.
+  - **Remote and branch are constants (emerged).** A first draft read them
+    from `RELEASE_REMOTE` / `RELEASE_BRANCH`, which `RELEASE_BRANCH=develop`
+    would have turned into an override; removed, and a test asserts no
+    variable moves the guard.
+  - `tools/scripts/release-guard.test.mjs`, 10 tests: the script against
+    throwaway repositories, and the Makefile wiring (guard first in every
+    target, absent from `diff-production`).
+  - `infra/README.md`: "Releasing to production" (the flow, the manual diff,
+    hotfix, rollback, deploying by hand, non-branch changes, the promote key
+    and its rotation) and the rewritten CI/CD role section.
+  - `docs/runbooks/deploy-ledger-processor.md` deploys from the release tip,
+    not `develop` (emerged: it contradicted the guard).
+
 ## Acceptance Criteria
 
-- [ ] `deploy/production` exists, is protected, and takes only approved PRs
+- [x] `deploy/production` exists, is protected, and takes only approved PRs
+      (Phase 1; #426 stayed `BLOCKED` until approved and green, 2026-11-19)
 - [ ] A production deploy from any other commit is refused
 - [x] `master` equals production after Phase 0: #418 merged, `make
       diff-production` shows only Lambda code hashes (2026-11-17)
