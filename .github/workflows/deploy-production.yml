@@ -45,9 +45,11 @@ on:
   workflow_dispatch:
 
 # One deploy at a time, and never cancelled halfway through a CloudFormation
-# update: a newer release waits for the running one.
+# update: a newer release waits for the running one. The ref is in the group
+# so that a stray manual run from another branch (whose jobs all skip) cannot
+# take the queue's pending slot and cancel a waiting release.
 concurrency:
-  group: deploy-production
+  group: deploy-production-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -122,6 +124,48 @@ jobs:
           tar -xf lambda-assets.tar
           tools/scripts/verify-lambda-bootstraps.sh
 
+      # The key is loaded and every promote precondition checked BEFORE the
+      # deploy, so a run that could not promote fails while production is
+      # still untouched. The key goes from the secret into the agent on stdin,
+      # never to a file. GitHub's host key is pinned (from `gh api meta`), not
+      # scanned.
+      - name: Load the promote key
+        env:
+          PROMOTE_DEPLOY_KEY: ${{ secrets.PROMOTE_DEPLOY_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          printf '%s\n' "$PROMOTE_DEPLOY_KEY" | ssh-add -
+          mkdir -p ~/.ssh
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> ~/.ssh/known_hosts
+          git remote set-url --push origin "git@github.com:${GITHUB_REPOSITORY}.git"
+
+      # What this cannot see: a key the ruleset does not let bypass. That
+      # still fails only at the push to master, after the deploy.
+      - name: Check the run can promote
+        run: |
+          # "Re-run" of an older run reuses its GITHUB_SHA: it would deploy an
+          # old commit over production, then fail to fast-forward master.
+          tip="$(git ls-remote origin refs/heads/deploy/production | cut -f1)"
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::this run is for ${GITHUB_SHA}, but deploy/production is at ${tip}. Start a new run on the tip: gh workflow run deploy-production.yml --ref deploy/production"
+            exit 1
+          fi
+          git fetch --quiet origin master
+          if ! git merge-base --is-ancestor origin/master "$GITHUB_SHA"; then
+            echo "::error::master ($(git rev-parse origin/master)) is not an ancestor of ${GITHUB_SHA}, so it could not be fast-forwarded"
+            exit 1
+          fi
+          # `ssh -T git@github.com` exits 1 even when the key works. Piped
+          # into grep, that fails the step under pipefail (`shell: bash`), so
+          # the output is captured first and matched after.
+          out="$(ssh -T git@github.com 2>&1 || true)"
+          if ! grep -q 'successfully authenticated' <<<"$out"; then
+            echo "::error::the promote key does not authenticate: ${out}"
+            exit 1
+          fi
+
       - name: Read the AWS region
         id: env
         run: echo "region=$(jq -r .awsRegion infra/envs/production.json)" >> "$GITHUB_OUTPUT"
@@ -142,20 +186,6 @@ jobs:
         run: make -C infra flush-production-cache
 
       # ---- promote: only reached when everything above succeeded ----
-
-      # The key goes from the secret into the agent on stdin, never to a file.
-      # GitHub's host key is pinned (from `gh api meta`), not scanned.
-      - name: Load the promote key
-        env:
-          PROMOTE_DEPLOY_KEY: ${{ secrets.PROMOTE_DEPLOY_KEY }}
-        run: |
-          eval "$(ssh-agent -s)"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
-          printf '%s\n' "$PROMOTE_DEPLOY_KEY" | ssh-add -
-          mkdir -p ~/.ssh
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> ~/.ssh/known_hosts
-          git remote set-url --push origin "git@github.com:${GITHUB_REPOSITORY}.git"
 
       # No --force anywhere: git refuses a push that is not a fast-forward,
       # and so does ruleset 27628422, which nobody can bypass.
