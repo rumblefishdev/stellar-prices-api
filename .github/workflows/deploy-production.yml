@@ -1,0 +1,186 @@
+name: Deploy Production
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The release flow (task 0343): develop → deploy/production → master.
+#
+#   • A release is a PR from `develop` to `deploy/production` (ruleset
+#     27627834: one approval, three CI checks, merge commit only). Whoever
+#     opens it runs `make -C infra diff-production` from its head and pastes
+#     the result into the PR; the approver reads it for removals. That diff is
+#     the only place a deletion shows before it happens: the deploy below runs
+#     `--require-approval never`, because CI cannot answer a prompt.
+#   • The merge starts this workflow. `deploy` waits for the `production`
+#     environment's approval (any team member except whoever started the run),
+#     then deploys EVERY stack from the merged commit. A stack with no change
+#     is a no-op, so a docs-only release deploys too and `master` always
+#     reaches the release (decision 8).
+#   • Only after the deploy and the cache flush succeed does `master`
+#     fast-forward to the deployed commit, and the commit gets the tag
+#     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release that day). A failed
+#     run leaves `master` and the tags as they were.
+#
+# The promote steps sit inside `deploy`, not in a job of their own: the deploy
+# key is a `production` environment secret, and a second job naming that
+# environment would ask for a second approval.
+#
+# Not done here, by decision: the portal sync (`make sync-portal-explorer`,
+# by hand from the release commit, noted on the tag), ClickHouse schema
+# applies, data repairs.
+#
+# Prerequisites, in the `production` environment:
+#   AWS_DEPLOY_ROLE_ARN  output of `make -C infra deploy-cicd` (Prices-Cicd)
+#   PROMOTE_DEPLOY_KEY   private half of the repository's write deploy key,
+#                        which ruleset 27628401 lets bypass its `update` rule
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - deploy/production
+  # A re-run of the release tip, e.g. after a failed deploy was fixed outside
+  # the branch. Refused on any other ref below, and by the environment's
+  # branch policy.
+  workflow_dispatch:
+
+# One deploy at a time, and never cancelled halfway through a CloudFormation
+# update: a newer release waits for the running one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Lambdas
+    if: github.ref == 'refs/heads/deploy/production'
+    # Same runner, toolchain pair and script as ci.yml's `rust` job; see the
+    # comments there for why both pins exist (task 0141 for the script).
+    runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-lambda
+        run: pip3 install cargo-lambda==1.9.1
+
+      - name: Build and verify Lambda bootstraps
+        run: tools/scripts/build-lambda-assets.sh
+
+      # tar, because upload-artifact drops the executable bit and a
+      # `bootstrap` without it cannot start.
+      - name: Pack the Lambda assets
+        run: tar -cf lambda-assets.tar target/lambda
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-assets
+          path: lambda-assets.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy and promote
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Full history: the push to master sends the commit itself, and a
+      # shallow clone could not.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambda-assets
+
+      - name: Unpack the Lambda assets
+        run: |
+          tar -xf lambda-assets.tar
+          tools/scripts/verify-lambda-bootstraps.sh
+
+      - name: Read the AWS region
+        id: env
+        run: echo "region=$(jq -r .awsRegion infra/envs/production.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ steps.env.outputs.region }}
+
+      - name: Build the CDK app
+        run: make -C infra build-production
+
+      - name: cdk deploy --all
+        working-directory: infra
+        run: npx cdk --app "node dist/bin/production.js" deploy --all --require-approval never
+
+      - name: Flush the API Gateway stage cache
+        run: make -C infra flush-production-cache
+
+      # ---- promote: only reached when everything above succeeded ----
+
+      # The key goes from the secret into the agent on stdin, never to a file.
+      # GitHub's host key is pinned (from `gh api meta`), not scanned.
+      - name: Load the promote key
+        env:
+          PROMOTE_DEPLOY_KEY: ${{ secrets.PROMOTE_DEPLOY_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          printf '%s\n' "$PROMOTE_DEPLOY_KEY" | ssh-add -
+          mkdir -p ~/.ssh
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> ~/.ssh/known_hosts
+          git remote set-url --push origin "git@github.com:${GITHUB_REPOSITORY}.git"
+
+      # No --force anywhere: git refuses a push that is not a fast-forward,
+      # and so does ruleset 27628422, which nobody can bypass.
+      - name: Fast-forward master
+        run: git push origin "${GITHUB_SHA}:refs/heads/master"
+
+      - name: Tag the release
+        run: |
+          git fetch --tags --quiet origin
+          existing="$(git tag --points-at "$GITHUB_SHA" --list 'prod-*' | head -n1)"
+          if [ -n "$existing" ]; then
+            echo "already tagged $existing"
+            exit 0
+          fi
+          base="prod-$(date -u +%Y-%m-%d)"
+          tag="$base"
+          n=2
+          while git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do
+            tag="$base-$n"
+            n=$((n + 1))
+          done
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "$tag" "$GITHUB_SHA" \
+              -m "Production release of ${GITHUB_SHA}" \
+              -m "Deployed by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          git push origin "refs/tags/$tag"
+          echo "### Released \`$tag\` on \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the agent
+        if: always()
+        run: '[ -z "${SSH_AGENT_PID:-}" ] || ssh-agent -k'
