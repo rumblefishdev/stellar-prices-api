@@ -88,6 +88,14 @@ history:
       permission, then a GitHub Release job). Phase 3 opened as #428 (release
       guard on 13 make targets, no override; release-flow docs). Setup
       runbook for the operator under Phase 2 setup.
+  - date: 2026-11-20
+    status: active
+    who: okarcz
+    note: >
+      Both PRs approved by stkrolikiewicz with 7 non-blocking comments. The
+      operator decided each (decisions 17-23): 6 fixed (#427 d39fac9c, #428
+      455ea818 + d0faceb5), the prod-* tag ruleset left out. Setup step 1
+      gets a macOS variant.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -102,9 +110,10 @@ introduces a three-branch release flow, `develop` → `deploy/production` →
 
 ## Status: Active
 
-**Current state:** Phase 0 done on 2026-11-17: `master` is what production
-runs, `develop` holds the same tree, and `deploy/production` exists without
-protection. Next is Phase 1 (GitHub settings).
+**Current state (2026-11-20):** Phases 0 and 1 done; first release
+`prod-2026-11-19` on `c7dcd26d`. Phase 2 (#427) and Phase 3 (#428) approved,
+review fixes pushed (decisions 17-23). Next: merge #427, then #428, then the
+operator's Phase 2 setup, then the first release through the workflow.
 
 ## Context
 
@@ -353,7 +362,8 @@ Answered by the operator. Numbering continues from the 2026-11-17 decisions.
    `master` always reaches `deploy/production`'s tip ("`master` = the last
    release"). Stacks with no change are a no-op.
 9. **The release PR's `cdk diff` is manual.** Whoever opens the release PR
-   runs `make diff-production` from its head and pastes the result into the
+   runs `make diff-production` from its merge ref (`refs/pull/<n>/merge`,
+   decision 20; first written as "its head") and pastes the result into the
    PR; the approver reads it for removals. `infra/README.md` says so. The
    workflow deploys with `--require-approval never`, because CI cannot answer
    a prompt; the PR approval and the `production` environment approval are
@@ -417,15 +427,27 @@ Read-only, `soroban-readonly`.
 All from the local machine, repository root. Steps 1–2 can run any time;
 steps 3–4 run after #427 merges.
 
-1. **Deploy key.** Generated in `/dev/shm` (RAM, never written to disk), the
-   private half goes to the environment secret on stdin, then both halves are
-   shredded:
+1. **Deploy key.** Generated in RAM, never written to disk; the private half
+   goes to the environment secret on stdin, then the key pair is destroyed.
+   **Never substitute `/tmp` or another disk directory** if a command fails.
+   On Linux (`/dev/shm`):
    ```bash
    d=$(mktemp -d /dev/shm/promote.XXXXXX)
    ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
    gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)' -R rumblefishdev/stellar-prices-api
    gh secret set PROMOTE_DEPLOY_KEY --env production -R rumblefishdev/stellar-prices-api < "$d/key"
    shred -u "$d/key" "$d/key.pub" && rmdir "$d"
+   ```
+   On macOS (no `/dev/shm`, no `shred`; decision 22), a 1 MB RAM disk,
+   detached at the end (not yet run on a Mac):
+   ```bash
+   dev=$(hdiutil attach -nomount ram://2048 | awk '{print $1}')
+   diskutil erasevolume HFS+ promote-key "$dev" >/dev/null
+   d=/Volumes/promote-key
+   ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
+   gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)' -R rumblefishdev/stellar-prices-api
+   gh secret set PROMOTE_DEPLOY_KEY --env production -R rumblefishdev/stellar-prices-api < "$d/key"
+   hdiutil detach "$dev"
    ```
    Check: `gh repo deploy-key list -R rumblefishdev/stellar-prices-api` shows
    one key with read-write; `gh secret list --env production -R rumblefishdev/stellar-prices-api`
@@ -459,7 +481,8 @@ steps 3–4 run after #427 merges.
 
 First test: the next release PR `develop` → `deploy/production`. Expected:
 `build` green, `deploy` waits for an approval from someone other than the
-merger, then `master` = the release commit and a `prod-*` tag on it.
+merger, passes "Check the run can promote", then `master` = the release
+commit and a `prod-*` tag on it.
 
 ### Phase 3: guard and docs
 
@@ -517,6 +540,48 @@ Answered by the operator.
     and its rotation) and the rewritten CI/CD role section.
   - `docs/runbooks/deploy-ledger-processor.md` deploys from the release tip,
     not `develop` (emerged: it contradicted the guard).
+
+#### Review of #427 and #428 (2026-11-20)
+
+stkrolikiewicz approved both at `29382ba1` / `ee361b38`, with 7 non-blocking
+comments. Decided by the operator; numbering continues from decision 16.
+
+17. **Concurrency group carries the ref** (#427, `d39fac9c`):
+    `deploy-production-${{ github.ref }}`. With one group for every ref, a
+    manual run from `develop` (all jobs skipped) took the pending slot and
+    cancelled a waiting release. Kept at workflow level, not moved to the
+    `deploy` job.
+18. **Promote preconditions are checked before the deploy** (#427,
+    `d39fac9c`). "Load the promote key" moved before the AWS login, and a step
+    "Check the run can promote" refuses the run unless its commit is the
+    `deploy/production` tip, `origin/master` is its ancestor, and the key
+    authenticates. The first check stops a "Re-run" of an older run, which
+    reuses that run's `GITHUB_SHA` and would deploy an old commit over
+    production. A key missing from the ruleset bypass still shows only at the
+    push.
+19. **No tag ruleset on `prod-*`.** Tags are a label; `master` is the record.
+20. **The release diff comes from the PR's merge ref** (#428, `d0faceb5`).
+    From `develop`, a hotfix not yet merged back shows as reverted in the one
+    diff the approver reads for removals. Plus a README paragraph: never
+    "Re-run" an older run, use `gh workflow run` on the tip.
+21. **Hand deploy racing a release: a doc line only** (#428, `d0faceb5`).
+    "Deploying by hand" says not to deploy while a `deploy-production.yml` run
+    is in progress or waiting. No second guard run before `cdk`: it narrows
+    the window without closing it.
+22. **Key rotation gets a macOS variant** (#428, `d0faceb5`, and setup step 1
+    above): a RAM disk via `hdiutil`, and a warning never to substitute
+    `/tmp`. Not yet run on a Mac.
+23. **The two runbooks the guard contradicted are fixed** (#428,
+    `d0faceb5`): the 0142 §6 rollback is a revert PR on `deploy/production`;
+    0286's CDK deploys run detached at `origin/deploy/production`. Runbooks
+    that name no branch are left as they are.
+
+- **The guard tests broke under the pre-commit hook (emerged, #428,
+  `455ea818`).** A hook exports `GIT_INDEX_FILE` (and `GIT_DIR` in a
+  worktree); the tests inherited them, so their throwaway repositories wrote
+  into the real index (a staged `app.txt`) and the hook failed. The tests now
+  drop every inherited `GIT_*` variable. Found when committing the review
+  fixes from a worktree.
 
 ## Acceptance Criteria
 
