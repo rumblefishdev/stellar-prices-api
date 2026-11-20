@@ -18,14 +18,16 @@ name: Deploy Production
 #     fast-forward to the deployed commit, and the commit gets the tag
 #     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release that day). A failed
 #     run leaves `master` and the tags as they were.
+#   • Job `release` then creates the tag's GitHub Release, where the manual
+#     steps of the release are recorded.
 #
 # The promote steps sit inside `deploy`, not in a job of their own: the deploy
 # key is a `production` environment secret, and a second job naming that
 # environment would ask for a second approval.
 #
 # Not done here, by decision: the portal sync (`make sync-portal-explorer`,
-# by hand from the release commit, noted on the tag), ClickHouse schema
-# applies, data repairs.
+# by hand from the release commit), ClickHouse schema applies, data repairs.
+# Each is noted in the tag's GitHub Release.
 #
 # Prerequisites, in the `production` environment:
 #   AWS_DEPLOY_ROLE_ARN  output of `make -C infra deploy-cicd` (Prices-Cicd)
@@ -95,6 +97,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       # Full history: the push to master sends the commit itself, and a
       # shallow clone could not.
@@ -159,11 +163,13 @@ jobs:
         run: git push origin "${GITHUB_SHA}:refs/heads/master"
 
       - name: Tag the release
+        id: tag
         run: |
           git fetch --tags --quiet origin
           existing="$(git tag --points-at "$GITHUB_SHA" --list 'prod-*' | head -n1)"
           if [ -n "$existing" ]; then
             echo "already tagged $existing"
+            echo "tag=$existing" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           base="prod-$(date -u +%Y-%m-%d)"
@@ -179,8 +185,41 @@ jobs:
               -m "Production release of ${GITHUB_SHA}" \
               -m "Deployed by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "### Released \`$tag\` on \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop the agent
         if: always()
         run: '[ -z "${SSH_AGENT_PID:-}" ] || ssh-agent -k'
+
+  # The GitHub Release of the tag is where a release's manual, non-git steps
+  # are recorded (decided 2026-11-20): the portal upload, a ClickHouse schema
+  # apply, a data repair, each appended with `gh release edit`. A job of its
+  # own so that `contents: write` never sits next to the AWS role and the
+  # deploy key; it needs no environment and no approval.
+  release:
+    name: GitHub Release
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the release of the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.deploy.outputs.tag }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+            exit 0
+          fi
+          pr="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" --jq '.[0].html_url // empty' || true)"
+          {
+            echo "Deployed \`${GITHUB_SHA}\` to production by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            [ -z "$pr" ] || echo "Release PR: ${pr}"
+            echo
+            echo "## Manual steps"
+            echo
+            echo "None yet. Append one line per step applied from this commit outside CI (portal upload, ClickHouse schema apply, data repair): what, when (UTC), who."
+          } > notes.md
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file notes.md
