@@ -56,6 +56,20 @@ build-production: build
 build-lambdas:
 	../tools/scripts/build-lambda-assets.sh
 
+# The release guard (task 0343). Production changes only from the release
+# commit: a clean tree whose HEAD is the freshly fetched tip of
+# `deploy/production`. FIRST prerequisite of every `deploy-production*`,
+# `destroy-production*` and `sync-portal-explorer`, so it refuses before
+# minutes of building. No override, by decision: an urgent fix is a PR to
+# `deploy/production`, then a deploy of its tip. `diff-production` is not
+# guarded, because a release PR's diff is taken from `develop`. CI's
+# deploy-production.yml does not call these targets; it deploys the commit
+# its run was started for.
+#
+#   git fetch origin && git checkout --detach origin/deploy/production
+check-release-commit:
+	../tools/scripts/check-release-commit.sh
+
 synth-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" synth
 
@@ -93,25 +107,25 @@ flush-production-cache:
 # So `make diff-production` before any production deploy, and read it for removals
 # rather than skimming it for additions. This applies to every deploy target below
 # too; it lives here because this is the one that deploys all stacks at once.
-deploy-production: build-production build-lambdas
+deploy-production: check-release-commit build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy --all --require-approval broadening
 	$(MAKE) flush-production-cache
 
-destroy-production: build-production
+destroy-production: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy --all --force
 
-deploy-production-secrets: build-production
+deploy-production-secrets: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Secrets --exclusively --require-approval broadening
 
-destroy-production-secrets: build-production
+destroy-production-secrets: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Secrets --force
 
 # Ships a new api-handler, so it ships a new OpenAPI document — flush too.
-deploy-production-compute: build-production build-lambdas
+deploy-production-compute: check-release-commit build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --exclusively --require-approval broadening
 	$(MAKE) flush-production-cache
 
-destroy-production-compute: build-production
+destroy-production-compute: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force
 
 # `--exclusively` matters most here. ApiGateway imports the api-handler from
@@ -120,14 +134,14 @@ destroy-production-compute: build-production
 # spans both stacks (a new route AND its handler) needs
 # `deploy-production-compute` FIRST, then this. Deploy only this and the new
 # route proxies to the old handler behind a green deploy.
-deploy-production-apigateway: build-production
+deploy-production-apigateway: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --exclusively --require-approval broadening
 
 # Nothing imports this stack's exports since task 0195 retired
 # `PortalHostingStack` (which used the RestApi id for its execute-api origin),
 # so destroying it — or replacing the RestApi — no longer needs another stack
 # torn down first.
-destroy-production-apigateway: build-production
+destroy-production-apigateway: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
 # The portal (task 0194; the only deploy path since task 0195).
@@ -193,7 +207,7 @@ build-portal-explorer: check-portal-api-origin
 verify-portal-guild:
 	cd .. && node tools/scripts/verify-discord-guild.mjs --ssm --env production
 
-sync-portal-explorer: build-portal-explorer verify-portal-guild
+sync-portal-explorer: check-release-commit build-portal-explorer verify-portal-guild
 	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/prices-api/ \
 	  --exclude '*' --include 'assets/*' \
 	  --cache-control 'public, max-age=31536000, immutable'
@@ -202,10 +216,10 @@ sync-portal-explorer: build-portal-explorer verify-portal-guild
 	  --cache-control 'public, max-age=0, must-revalidate'
 	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/prices-api/*'
 
-deploy-production-eventbridge: build-production build-lambdas
+deploy-production-eventbridge: check-release-commit build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --exclusively --require-approval broadening
 
-destroy-production-eventbridge: build-production
+destroy-production-eventbridge: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force
 
 # Needs the api-handler log group to exist: the portal-load-failed metric
@@ -213,8 +227,8 @@ destroy-production-eventbridge: build-production
 # Compute owns and `destroy-production-compute` deletes (the log removal
 # policy is DESTROY). On a fresh environment, or after a Compute destroy,
 # deploy Compute first or this target fails with "log group does not exist".
-deploy-production-observability: build-production
+deploy-production-observability: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --exclusively --require-approval broadening
 
-destroy-production-observability: build-production
+destroy-production-observability: check-release-commit build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Observability --force
