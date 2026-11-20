@@ -60,8 +60,104 @@ is logged today. The risk is the day someone raises it to find a bug.
 
 ## Acceptance Criteria
 
-- [ ] At `RUST_LOG=trace`, no captured line names `discord-<id>-key` or the
-      account's id, on the portal's routes and the hub's
-- [ ] Whether the Lambda's trace output carries `x-amz-security-token` is
-      checked and written down
-- [ ] `telemetry.rs`'s doc states the widened rule
+- [x] At `RUST_LOG=trace`, no captured line names `discord-<id>-key` or the
+      account's id, on the portal's routes and the hub's. Portal:
+      `tests/portal_keys_logs.rs` searches the whole capture for the id
+      (failed before the fix, on four `aws_sigv4` lines). Hub:
+      `tests/portal_hub_logs.rs` searches the whole capture for both
+      accounts' ids, widened here once 0348 merged (2026-11-19): with the
+      guard as `develop` had it, it fails on a Discord id; with the fix it
+      passes.
+- [x] Whether the Lambda's trace output carries `x-amz-security-token` is
+      checked and written down: it does not carry the token's value (below).
+- [x] `telemetry.rs`'s doc states the widened rule: credentials **or personal
+      data**, with the line each member was found printing.
+
+## The session token: not printed
+
+`tests/telemetry_sigv4.rs` signs a `GetApiKeys?name=discord-<id>-key` lookup
+with the control-plane client and credentials that carry a session token, as
+the role's do in the Lambda (`session_token_mode: Include`), against a
+loopback port nobody listens on (signed, then refused at connect; no AWS
+call), and captures at `trace` twice:
+
+- **Guard off** (bare `EnvFilter`): no crate prints the token's value.
+  `aws_sigv4` 1.4.5 prints the request before signing (the token is not on it
+  yet), its signing params (the identity is `Credentials`' `Debug`: access key
+  id, `secret_access_key: "** redacted **"`, no token field), and the
+  canonical request with `x-amz-security-token:** redacted (length=25) **`.
+  `aws_smithy_runtime`'s `transmitting request` (already held) redacts
+  `authorization` and `x-amz-security-token` the same way. What does reach
+  the log: the Discord id, the access key id (`ASIA…`, four times) and the
+  token's length.
+- **Guard on** (`filter_from("trace")`): no `aws_sigv4` line, no Discord id,
+  no token.
+
+1.4.5 is the only `aws-sigv4` this repo's lockfile has had (`develop` and
+`master` today). 1.4.2, seen in the local cargo registry, logged
+`canonical_request = %creq` unredacted, token included, so the suspicion held
+for older versions. `aws_sigv4` has only `trace` lines, so `info` costs
+nothing.
+
+## Implementation Notes
+
+- `telemetry::CREDENTIAL_BEARING_TARGETS`: `aws_sigv4` and
+  `aws_smithy_http_client` added. The constant's doc gives the rule and each
+  member's line; the module doc says the guard holds personal data too.
+- What the portal's trace capture held before the fix (146 lines): `hyper_util`
+  (pool, connect, client), `aws_sigv4` (14), `aws_smithy_http_client`
+  (connector timing), `axum::serve` (the mock's) and `prices_api`. The four
+  lines naming the id were all `aws_sigv4`'s: the `signing request` URI and
+  the canonical request's query, once per `GetApiKeys` lookup.
+- Other crates checked, in their sources at the locked versions:
+  `aws_smithy_http_client` prints the request URI at `debug` when it adds a
+  proxy's credentials (held, below); `hyper_util` logs pool keys (scheme and
+  host) and connect addresses, never a path or query; `hyper` 1 is built
+  without its `tracing` feature, so it logs nothing; `h2` leaves a frame's
+  headers and data out of its `Debug`; `aws_runtime` and `aws_config` log
+  configuration and `Credentials`' `Debug` (no secret, no token); `reqwest`
+  (Discord's calls, through `log`) logs scheme and host only, and Discord's
+  paths name `@me` and the public guild id, not the account.
+- Tests: `tests/portal_keys_logs.rs` (no Discord id anywhere in the capture),
+  `tests/telemetry_filter.rs` (the signer's and the proxy line's events, with
+  a Discord-id canary, and five more hostile directives), a new
+  `tests/telemetry_sigv4.rs` (the session token, above), and two more refused
+  directives in `telemetry.rs`'s `nothing_else_survives`. The three binaries
+  failed at `3f343fbf` and pass with the fix; with `telemetry.rs` put back as
+  it was, all three fail again.
+- Checks, 2026-11-18: `cargo fmt --check`; `clippy -D warnings` on
+  `prices-api` (all targets, and `--features lambda`) and on the pre-push
+  hook's extractor crates; `CLICKHOUSE_URL=http://127.0.0.1:9 cargo test -p
+  prices-api`: 565 passed, 0 failed, 83 ignored (the new binary's one test
+  included).
+
+## Design Decisions
+
+### From Plan
+
+1. **`aws_sigv4` held to `info`, and the rule widened to personal data.**
+2. **The log tests search the whole capture**, not only `prices_api`'s lines.
+
+### Emerged
+
+3. **`aws_smithy_http_client` held too.** It prints the request URI, so
+   `discord-<id>-key`, at `debug` when a proxy with credentials is set, and
+   `BehaviorVersion::latest()` reads the proxy from the environment
+   (`HTTPS_PROXY`), so a local `serve` behind one would log it. Read in its
+   source (`client.rs`, 1.1.13), not seen in a capture: the tests use no
+   proxy, so `telemetry_filter.rs` emits that line itself.
+4. **The constant keeps its name.** `CREDENTIAL_BEARING_TARGETS` now holds
+   personal data too; its doc says so, and a rename would touch every test
+   for nothing.
+5. **The session-token test signs against a closed loopback port, retries
+   off,** rather than the mock gateway: signing comes before connect, so a
+   dispatch failure proves the request was signed, with no mock and no AWS.
+6. **The guard-off "no token" assertion stays in the test.** An SDK bump that
+   starts printing the token would fail CI though the guard still holds it
+   (asserted next): deliberate, so this finding is re-checked rather than
+   silently going stale.
+7. **The hub's log test is widened here**, since 0348 merged first
+   (2026-11-19): it searches `text`, not only `prices_api`'s lines, for
+   `USER_ID` and `OTHER_ID`, and no longer says the SDK's lines are the
+   guard's business. It passes only with this fix, so it could land only
+   with whichever of 0348 and 0349 merged second.
