@@ -2,7 +2,8 @@
 id: "0352"
 title: "deploy-production.yml's header says the release diff comes from the PR's head — it comes from the merge ref"
 type: CHORE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0343"]
 tags: [layer-infra, ci, docs, priority-low, effort-small]
@@ -15,6 +16,10 @@ history:
     who: okarcz
     note: >
       Spawned from 0343 future work.
+  - date: 2026-11-23
+    status: active
+    who: okarcz
+    note: "Activated; one-line comment fix, PR to develop."
 ---
 
 # deploy-production.yml's header says the release diff comes from the PR's head — it comes from the merge ref
