@@ -282,22 +282,16 @@ async fn no_token_key_discord_id_or_username_reaches_the_logs() {
             assert!(!text.contains(part), "a token reached the logs: {text}");
         }
     }
-    // The account's own lines: everything this crate logs. Lines from the
-    // SDK and the HTTP stack beneath it are the guard's business
-    // (`telemetry`), not this contract's.
-    let ours: Vec<&str> = text
-        .lines()
-        .filter(|line| line.contains("prices_api"))
-        .collect();
-    assert!(!ours.is_empty());
-    for line in ours {
-        for id in [USER_ID, OTHER_ID] {
-            assert!(!line.contains(id), "a Discord id reached the logs: {line}");
-        }
-        assert!(
-            !line.contains(USERNAME),
-            "a username reached the logs: {line}"
-        );
+    // This crate's lines are there, so the searches below look at something.
+    assert!(
+        text.lines().any(|line| line.contains("prices_api")),
+        "{text}"
+    );
+    // The whole capture, not only `prices_api`'s lines: a Discord id reached
+    // the logs through the SDK's signer, which prints each lookup's
+    // `discord-<id>-key`, not through anything this crate wrote (task 0349).
+    for id in [USER_ID, OTHER_ID] {
+        assert!(!text.contains(id), "a Discord id reached the logs: {text}");
     }
     assert!(
         !text.contains(USERNAME),

@@ -41,7 +41,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
 /// The credential a leaking `GetApiKey` response would carry.
 const CANARY: &str = "A-KEY-VALUE-CANARY";
 
-/// Emit, under `rust_log`, the two events that matter: one on an SDK target
+/// The account a key lookup is about: `GetApiKeys?name=discord-<id>-key`
+/// (task 0349).
+const ACCOUNT_CANARY: &str = "discord-424242424242424242-key";
+
+/// Emit, under `rust_log`, the events that matter: each SDK target's line
 /// inside the SDK's own span, and one of ours. Returns what was written.
 fn emit_under(rust_log: &str) -> String {
     let logs = Captured::default();
@@ -59,6 +63,17 @@ fn emit_under(rust_log: &str) -> String {
     tracing::trace!(
         target: "aws_smithy_runtime::client::orchestrator",
         "output_or_error=GetApiKeyOutput {{ value: Some(\"{CANARY}\") }}"
+    );
+    // The signer's line for every request it signs, URI and query included.
+    tracing::trace!(
+        target: "aws_sigv4::http_request::sign",
+        "signing request request=SignableRequest {{ uri: /apikeys?name={ACCOUNT_CANARY} }}"
+    );
+    // The HTTP client's line when a proxy with credentials is configured,
+    // which `BehaviorVersion::latest()` reads from `HTTPS_PROXY`.
+    tracing::debug!(
+        target: "aws_smithy_http_client::client",
+        "added proxy authentication header for https://apigateway.eu-central-1.amazonaws.com/apikeys?name={ACCOUNT_CANARY}"
     );
     tracing::trace!(target: "prices_api::portal::keys", "OUR-OWN-TRACE-EVENT");
 
@@ -105,6 +120,12 @@ fn no_rust_log_value_lets_an_sdk_credential_through() {
         // reasons is doing the work.
         "aws_smithy=trace",
         "aws=trace",
+        // Aimed at the crates that print a request's URI (task 0349).
+        "aws_sigv4=trace",
+        "aws_sigv4:=trace",
+        "aws_sigv4::http_request::sign=trace",
+        "aws_smithy_http_client=debug",
+        "aws_smithy_http_client:=trace",
         // Belt and braces.
         "trace,[try_op]=trace,aws_smithy_runtime=trace",
     ] {
@@ -112,6 +133,10 @@ fn no_rust_log_value_lets_an_sdk_credential_through() {
         assert!(
             !logged.contains(CANARY),
             "RUST_LOG={hostile:?} put a key value in the logs: {logged:?}"
+        );
+        assert!(
+            !logged.contains(ACCOUNT_CANARY),
+            "RUST_LOG={hostile:?} put a Discord id in the logs: {logged:?}"
         );
     }
 }

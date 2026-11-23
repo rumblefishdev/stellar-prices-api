@@ -28,6 +28,12 @@
 //! the same guard. If the guard is weakened, this test prints the key it was
 //! meant to protect.
 //!
+//! Nor does the account's Discord id, on any line, whichever crate wrote it
+//! (task 0349): every key lookup is `GetApiKeys?name=discord-<id>-key`, and
+//! `aws_sigv4` prints the request it signs, query string included, at
+//! `trace`. A Discord id is the account (ADR 0010 §1), so a trace log of the
+//! portal would otherwise say whose key each call was about.
+//!
 //! Two assertions make it non-vacuous, both of which would fail under exactly
 //! the callsite-cache poisoning described above:
 //!
@@ -144,5 +150,11 @@ async fn no_key_value_ever_reaches_the_logs() {
     assert!(
         !text.contains("CANARY"),
         "a key value reached the logs: {text:?}"
+    );
+    // The whole capture, not only `prices_api`'s lines: the id reached the
+    // logs through the SDK's signer, not through anything this crate wrote.
+    assert!(
+        !text.contains(USER_ID),
+        "a Discord id reached the logs: {text:?}"
     );
 }
