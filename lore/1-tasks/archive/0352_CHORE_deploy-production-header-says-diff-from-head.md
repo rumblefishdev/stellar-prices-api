@@ -2,7 +2,7 @@
 id: "0352"
 title: "deploy-production.yml's header says the release diff comes from the PR's head — it comes from the merge ref"
 type: CHORE
-status: active
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0343"]
@@ -20,6 +20,12 @@ history:
     status: active
     who: okarcz
     note: "Activated; one-line comment fix, PR to develop."
+  - date: 2026-11-23
+    status: completed
+    who: okarcz
+    note: >
+      #430 merged to develop as 4af32815 (commit 93de7fca). Comment only;
+      reaches production with the next release.
 ---
 
 # deploy-production.yml's header says the release diff comes from the PR's head — it comes from the merge ref
@@ -42,5 +48,14 @@ merged back shows as reverted.
 
 ## Acceptance Criteria
 
-- [ ] The workflow header and `infra/README.md` name the same ref for the
-      release diff
+- [x] The workflow header and `infra/README.md` name the same ref for the
+      release diff (#430, `4af32815`)
+
+## Implementation Notes
+
+- `.github/workflows/deploy-production.yml` lines 8-9: "from its head" became
+  "from its merge ref (`refs/pull/<n>/merge`, see infra/README.md \"A
+  release\")". No behaviour change; the YAML still parses.
+- Merged without a review on the operator's instruction (comment only;
+  `develop` has no rules). It is not on production until the next release
+  from `develop` to `deploy/production`.
