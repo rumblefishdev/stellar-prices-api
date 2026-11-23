@@ -5,7 +5,8 @@ name: Deploy Production
 #
 #   • A release is a PR from `develop` to `deploy/production` (ruleset
 #     27627834: one approval, three CI checks, merge commit only). Whoever
-#     opens it runs `make -C infra diff-production` from its head and pastes
+#     opens it runs `make -C infra diff-production` from its merge ref
+#     (`refs/pull/<n>/merge`, see infra/README.md "A release") and pastes
 #     the result into the PR; the approver reads it for removals. That diff is
 #     the only place a deletion shows before it happens: the deploy below runs
 #     `--require-approval never`, because CI cannot answer a prompt.
