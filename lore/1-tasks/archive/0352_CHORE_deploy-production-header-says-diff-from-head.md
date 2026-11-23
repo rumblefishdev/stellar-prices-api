@@ -54,8 +54,8 @@ merged back shows as reverted.
 ## Implementation Notes
 
 - `.github/workflows/deploy-production.yml` lines 8-9: "from its head" became
-  "from its merge ref (`refs/pull/<n>/merge`, see infra/README.md \"A
-  release\")". No behaviour change; the YAML still parses.
+  "from its merge ref (`refs/pull/<n>/merge`, see infra/README.md "A
+  release")". No behaviour change; the YAML still parses.
 - Merged without a review on the operator's instruction (comment only;
   `develop` has no rules). It is not on production until the next release
   from `develop` to `deploy/production`.
