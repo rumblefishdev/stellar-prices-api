@@ -2,7 +2,7 @@
 id: "0349"
 title: "Hold aws_sigv4 to info in the log guard: at trace it prints discord-<id>-key, and likely the role's session token"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0348"]
 tags: [portal, logging, security, priority-low, effort-small]
@@ -17,6 +17,15 @@ history:
     status: active
     who: akot
     note: "Activated: on its own branch, fix/0349_aws-sigv4-trace-names-discord-key."
+  - date: "2026-11-23"
+    status: completed
+    who: akot
+    note: >
+      Merged as #424 (c5f89c2a) on akot's word with no approving review; CI
+      green. A code review on 2026-11-23 found nothing blocking. With the guard
+      on, the signer's access key id (`ASIA…`, 4 times with the guard off) is
+      not in the capture either. Not deployed yet: it ships with the next
+      `make -C infra deploy-production-compute` from develop.
 ---
 
 # Hold aws_sigv4 to info in the log guard
