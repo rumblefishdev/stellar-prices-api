@@ -1,14 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
-// GitHub uses a well-known JWKS endpoint for OIDC verification; CDK requires
-// at least one thumbprint but does not actually validate against it. We use
-// GitHub's current OIDC root CA thumbprint as documented by AWS so this value
-// passes compliance scans that look for a real-looking thumbprint.
-const GITHUB_OIDC_THUMBPRINT = '6938fd4d98bab03faadb97b34396831e3780aea1';
-const GITHUB_OIDC_URL = 'https://token.actions.githubusercontent.com';
-/** Condition key prefix — AWS IAM strips the https:// from the issuer URL. */
+/**
+ * Condition key prefix — AWS IAM strips the https:// from the issuer URL. It
+ * is also the provider's name in its ARN, see `oidcProviderArn` below.
+ */
 const GITHUB_OIDC_ISSUER = 'token.actions.githubusercontent.com';
 const GITHUB_OIDC_AUDIENCE = 'sts.amazonaws.com';
 
@@ -26,8 +24,17 @@ export interface CicdStackProps extends cdk.StackProps {
  * plumbing (the BE equivalent lives in the block-explorer repo).
  *
  * Creates:
- * - GitHub Actions OIDC identity provider (singleton per AWS account)
- * - Production deploy role (scoped to GitHub Environment "production")
+ * - Production deploy role (scoped to GitHub Environment "production"),
+ *   assumed by `.github/workflows/deploy-production.yml`
+ *
+ * Imports, never creates, the GitHub Actions OIDC identity provider. An
+ * account holds one provider per URL, and this account's belongs to
+ * soroban-block-explorer's `Explorer-Cicd` stack (measured 2026-11-20, task
+ * 0343). Importing by ARN changes nothing there, but deleting that stack or
+ * removing the provider from its code deletes the provider and stops this
+ * role from being assumed. A re-created provider has the same ARN, so this
+ * stack then works again unchanged. Moving the provider to
+ * soroban-infrastructure is task 0351.
  *
  * The deploy role trusts the CDK bootstrap roles for actual CloudFormation
  * operations. The OIDC trust policy restricts which GitHub workflows can
@@ -48,6 +55,8 @@ export interface CicdStackProps extends cdk.StackProps {
  *   and /prices/{env}/* (prices-api-published outputs)
  * - ssm:PutParameter on /prices/{env}/* (writeable outputs only)
  * - cloudformation:DescribeStacks for post-deploy smoke tests
+ * - apigateway:DELETE on the production stage's cache data only (the
+ *   post-deploy cache flush)
  *
  * No ECR (no Docker images), no S3 SPA (no frontend), no CloudFront
  * (no public CDN) — those scopes belong to soroban-block-explorer.
@@ -59,14 +68,12 @@ export class CicdStack extends cdk.Stack {
     const { githubRepo, awsRegion } = props;
     const accountId = cdk.Stack.of(this).account;
 
-    const oidcProvider = new iam.OpenIdConnectProvider(
+    // The provider's audience is `sts.amazonaws.com`, the one the trust
+    // policy below requires (read back 2026-11-20).
+    const oidcProvider = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(
       this,
       'GitHubOidcProvider',
-      {
-        url: GITHUB_OIDC_URL,
-        clientIds: [GITHUB_OIDC_AUDIENCE],
-        thumbprints: [GITHUB_OIDC_THUMBPRINT],
-      },
+      `arn:aws:iam::${accountId}:oidc-provider/${GITHUB_OIDC_ISSUER}`,
     );
 
     const envName = 'production' as const;
@@ -124,6 +131,26 @@ export class CicdStack extends cdk.Stack {
         actions: ['cloudformation:DescribeStacks'],
         resources: [
           `arn:aws:cloudformation:${awsRegion}:${accountId}:stack/Prices-${envName}-*/*`,
+        ],
+      }),
+    );
+
+    // `make flush-production-cache` after the deploy (task 0124): drops the
+    // stage's cached GET responses so `/api-docs-json`, cached for an hour,
+    // is the new deployment's at once. Only the cache data of this API's
+    // stage: not the stage, not the API, not the authorizer cache. The API id
+    // is the one ApiGateway publishes; a replaced RestApi needs
+    // `make deploy-cicd` again, and until then the flush step fails loudly
+    // and `master` does not move (task 0343, decision 10).
+    const restApiId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/prices/${envName}/api-gateway-id`,
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['apigateway:DELETE'],
+        resources: [
+          `arn:aws:apigateway:${awsRegion}::/restapis/${restApiId}/stages/${envName}/cache/data`,
         ],
       }),
     );

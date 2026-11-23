@@ -5,10 +5,11 @@ build:
 	cd .. && npx nx build @rumblefish/stellar-prices-api-aws-cdk
 
 # --- CI/CD ---
-# Deployed once per AWS account. Provisions the GitHub Actions OIDC
-# provider and the production deploy role. Role ARN lands as a
-# CfnOutput — wire it into the GitHub Environment secret as
-# AWS_DEPLOY_ROLE_ARN.
+# Deployed once per AWS account. Provisions the production deploy role
+# that deploy-production.yml assumes; the GitHub Actions OIDC provider is
+# imported from Explorer-Cicd, not created (task 0343, see cicd-stack.ts).
+# Role ARN lands as a CfnOutput — wire it into the GitHub Environment
+# secret as AWS_DEPLOY_ROLE_ARN.
 
 # A bare `cdk bootstrap` synthesizes the app in cdk.json first, and the
 # production app cannot synth on a fresh clone (no dist/, no Lambda assets).
