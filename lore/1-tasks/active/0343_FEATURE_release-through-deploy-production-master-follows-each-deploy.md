@@ -5,7 +5,7 @@ type: FEATURE
 status: active
 assignee: okarcz
 related_adr: []
-related_tasks: ["0141", "0242"]
+related_tasks: ["0141", "0242", "0351"]
 tags: ["deploy", "release", "ci", "branching", "priority-medium", "effort-medium"]
 links:
   - "../../../infra/Makefile"
@@ -61,6 +61,41 @@ history:
       (deletion + non_fast_forward, no bypass). GitHub refused GitHub Actions
       as a bypass actor, so promote's push to master is an open point for
       Phase 2.
+  - date: 2026-11-19
+    status: active
+    who: okarcz
+    note: >
+      First release through the flow: #426 develop → deploy/production
+      (c7dcd26d), Observability deployed from its tip, master fast-forwarded
+      through the admin bypass, tag prod-2026-11-19. It carried 0348, whose
+      Compute had been deployed by hand from develop the same morning.
+  - date: 2026-11-20
+    status: active
+    who: okarcz
+    note: >
+      Phase 2 decisions answered by the operator: promote pushes master with
+      a deploy key held as a production environment secret; every release
+      deploys, docs-only included; the release PR's cdk diff stays manual;
+      the deploy role may flush the production stage cache; CI keeps running
+      on master; the portal sync stays manual. The team agreed to import
+      Explorer-Cicd's OIDC provider as is; moving it to
+      soroban-infrastructure is spawned as 0351.
+  - date: 2026-11-20
+    status: active
+    who: okarcz
+    note: >
+      Phase 2 opened as #427 (deploy workflow, OIDC import, cache-flush
+      permission, then a GitHub Release job). Phase 3 opened as #428 (release
+      guard on 13 make targets, no override; release-flow docs). Setup
+      runbook for the operator under Phase 2 setup.
+  - date: 2026-11-20
+    status: active
+    who: okarcz
+    note: >
+      Both PRs approved by stkrolikiewicz with 7 non-blocking comments. The
+      operator decided each (decisions 17-23): 6 fixed (#427 d39fac9c, #428
+      455ea818 + d0faceb5), the prod-* tag ruleset left out. Setup step 1
+      gets a macOS variant.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -75,9 +110,10 @@ introduces a three-branch release flow, `develop` → `deploy/production` →
 
 ## Status: Active
 
-**Current state:** Phase 0 done on 2026-11-17: `master` is what production
-runs, `develop` holds the same tree, and `deploy/production` exists without
-protection. Next is Phase 1 (GitHub settings).
+**Current state (2026-11-20):** Phases 0 and 1 done; first release
+`prod-2026-11-19` on `c7dcd26d`. Phase 2 (#427) and Phase 3 (#428) approved,
+review fixes pushed (decisions 17-23). Next: merge #427, then #428, then the
+operator's Phase 2 setup, then the first release through the workflow.
 
 ## Context
 
@@ -264,6 +300,29 @@ bypass. It tests the branch rules, not the `production` environment approval
 or the `promote` job; those get their first test on the first release after
 Phase 2.
 
+**First release, 2026-11-19: `prod-2026-11-19` on `c7dcd26d`.**
+
+| Step | Result |
+| --- | --- |
+| Flag PR #425 → `develop` | Approved by adamkoot, merged as `97b4cd62` |
+| Release diff | Also carried [[0348]] (#422, #423), merged to `develop` at 09:39 UTC. Its owner had deployed Compute by hand from `develop` `21b938fa` at 09:50 UTC (confirmed); `cdk diff Prices-production-Compute` showed only Lambda code hashes. Released with it, Compute not redeployed |
+| Release PR #426 `develop` → `deploy/production` | `BLOCKED` / `REVIEW_REQUIRED` until approved (adamkoot) and the three checks passed; merged as `c7dcd26d` (parents `7a85607b`, `97b4cd62`). No extra approval was asked for unattributed changes |
+| Deploy | `make deploy-production-observability` from a clean detached checkout of `c7dcd26d`, 12:55:28 UTC. Details in [[0242]]'s heal log |
+| `master` | `git push origin c7dcd26d…:refs/heads/master`: "Bypassed rule violations … Cannot update this protected ref", `7a85607b..c7dcd26d` |
+| Tag | Annotated `prod-2026-11-19` on `c7dcd26d` |
+
+After it, `origin/master` = `origin/deploy/production` = `prod-2026-11-19` =
+`c7dcd26d`, and every stack runs that commit's code.
+
+- **Compute went out by hand from `develop` twice (2026-11-18 and 11-19),
+  for [[0348]],** before the team had been told about this flow. Nothing
+  stops it until Phase 3's Makefile guard. Releasing `develop` brought the
+  branches back to what is live; a cherry-picked release would have left
+  `master` claiming a Compute that was not running.
+- `prices-production-coverage-sweep-unclassified` was already in ALARM before
+  this release (since 2026-11-09, [[0345]] part C); the release did not cause
+  that red tile.
+
 ### Phase 2: the deploy workflow
 
 9. `.github/workflows/deploy-production.yml`, triggered by a push to
@@ -279,11 +338,151 @@ Phase 2.
     `master` (rejected unless it is a fast-forward), then tags it
     `prod-YYYY-MM-DD` (`-2`, `-3` for a second release on the same day). A
     failed deploy leaves `master` and the tags as they were.
-    **Open (found 2026-11-19):** the `GITHUB_TOKEN` cannot pass ruleset
-    27628401, because GitHub refuses the Actions app as a bypass actor. Choose
-    one of: a deploy key held as a repository secret, with a `DeployKey` bypass
-    on 27628401; or a GitHub App installed on `rumblefishdev`, with that app as
-    the bypass actor. Ruleset 27628422 stays without a bypass either way.
+    The `GITHUB_TOKEN` cannot pass ruleset 27628401, because GitHub refuses
+    the Actions app as a bypass actor (found 2026-11-19). `promote` pushes with
+    a deploy key instead (decision 7 below).
+
+#### Decisions (2026-11-20)
+
+Answered by the operator. Numbering continues from the 2026-11-17 decisions.
+
+7. **How `promote` passes ruleset 27628401: a deploy key.** One SSH key pair
+   for this repository. The public half is a write deploy key; the private
+   half lives only as a secret of the `production` environment, so only a
+   run a teammate approved can read it, and no copy stays on disk (it goes to
+   `gh secret set` on stdin). 27628401 gets a `DeployKey` bypass next to the
+   admin one; 27628422 keeps no bypass, so the key can only fast-forward
+   `master`. The admin bypass stays until step 15. A GitHub App was rejected.
+   - The bypass covers every write deploy key of the repository, not one key.
+     On 2026-11-20 the repository had none.
+   - Rotation: add the new key, overwrite the secret, delete the old key; the
+     ruleset does not change. On a leak, delete the key first; `promote` then
+     fails and an admin moves `master` by hand until a new key is in.
+8. **Every release deploys, docs-only included.** No `paths-ignore`, so
+   `master` always reaches `deploy/production`'s tip ("`master` = the last
+   release"). Stacks with no change are a no-op.
+9. **The release PR's `cdk diff` is manual.** Whoever opens the release PR
+   runs `make diff-production` from its merge ref (`refs/pull/<n>/merge`,
+   decision 20; first written as "its head") and pastes the result into the
+   PR; the approver reads it for removals. `infra/README.md` says so. The
+   workflow deploys with `--require-approval never`, because CI cannot answer
+   a prompt; the PR approval and the `production` environment approval are
+   the human checks.
+10. **The deploy role may flush the production stage cache.** One statement:
+    `apigateway:DELETE` on
+    `arn:aws:apigateway:<region>::/restapis/<id>/stages/production/cache/data`.
+    It drops only cached GET responses (`/api-docs-json` 1 h; six `/v1` routes
+    10–60 s), never data, keys, the stage or the API, and not the authorizer
+    cache. Same flush `make deploy-production` runs today.
+11. **CI keeps running on `master`.** A push with a deploy key starts
+    workflows, so `ci.yml` runs once more on each released commit. Kept.
+12. **The portal sync stays manual.** `make sync-portal-explorer` from the
+    release commit when `web/portal/` changed, noted on the release tag. The
+    deploy role gets no access to the explorer's bucket or distribution.
+
+13. **`Prices-Cicd` imports the GitHub OIDC provider as is** (agreed with the
+    team on 2026-11-20). `fromOpenIdConnectProviderArn` with
+    `arn:aws:iam::750702271865:oidc-provider/token.actions.githubusercontent.com`.
+    `Explorer-Cicd` does not change. Deleting that stack, or removing the
+    provider from its code, would delete the provider and stop both
+    pipelines; the risk is accepted because the team owns both repositories
+    and the explorer's own deploy depends on the same provider. Moving the
+    provider to `soroban-infrastructure` is [[0351]].
+
+#### Measured on 2026-11-20
+
+Read-only, `soroban-readonly`.
+
+- The account has one GitHub OIDC provider, the ARN above, created
+  2026-08-12. Audience `sts.amazonaws.com` and thumbprint `6938fd4d…`, the
+  same values `cicd-stack.ts` uses, so the import needs no change on the
+  explorer's side.
+- It is `GitHubOidcProvider7EBF861F` in `Explorer-Cicd`, a CDK custom
+  resource. The stack also holds `soroban-explorer-production-deploy`, which
+  the explorer's tag-driven `deploy-production.yml` uses (last tags
+  `production-2026.11.12-1`, `-2-CloudWatch`).
+- The repository had no deploy keys.
+
+#### Phase 2 implementation (PR #427, opened 2026-11-20)
+
+- `.github/workflows/deploy-production.yml`: job `build` (ARM runner, the CI
+  toolchain pair, `build-lambda-assets.sh`, assets passed on as a tar because
+  `upload-artifact` drops the executable bit) and job `deploy` (environment
+  `production`: verify the bootstraps, `cdk deploy --all --require-approval
+  never`, `make flush-production-cache`, then the promote steps).
+- `cicd-stack.ts`: the provider imported by ARN (decision 13), plus
+  `apigateway:DELETE` on `…/restapis/<id>/stages/production/cache/data`, the
+  id taken from `/prices/production/api-gateway-id` (`02mabge71l` on
+  2026-11-20).
+- **Promote is steps in `deploy`, not a job (emerged).** The deploy key is a
+  `production` environment secret, and every job naming an environment with
+  required reviewers asks for its own approval, so a separate `promote` job
+  would need a second one. The steps run only when the deploy and the flush
+  succeeded, which is the same guarantee step 12 asked for.
+- The workflow runs on the first push to `deploy/production` that carries the
+  file, so the setup below must be finished before that release.
+
+#### Phase 2 setup (the operator, before the next release)
+
+All from the local machine, repository root. Steps 1–2 can run any time;
+steps 3–4 run after #427 merges.
+
+1. **Deploy key.** Generated in RAM, never written to disk; the private half
+   goes to the environment secret on stdin, then the key pair is destroyed.
+   **Never substitute `/tmp` or another disk directory** if a command fails.
+   On Linux (`/dev/shm`):
+   ```bash
+   d=$(mktemp -d /dev/shm/promote.XXXXXX)
+   ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
+   gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)' -R rumblefishdev/stellar-prices-api
+   gh secret set PROMOTE_DEPLOY_KEY --env production -R rumblefishdev/stellar-prices-api < "$d/key"
+   shred -u "$d/key" "$d/key.pub" && rmdir "$d"
+   ```
+   On macOS (no `/dev/shm`, no `shred`; decision 22), a 1 MB RAM disk,
+   detached at the end (not yet run on a Mac):
+   ```bash
+   dev=$(hdiutil attach -nomount ram://2048 | awk '{print $1}')
+   diskutil erasevolume HFS+ promote-key "$dev" >/dev/null
+   d=/Volumes/promote-key
+   ssh-keygen -q -t ed25519 -N '' -C 'stellar-prices-api promote (deploy-production.yml)' -f "$d/key"
+   gh repo deploy-key add "$d/key.pub" --allow-write --title 'promote (deploy-production.yml)' -R rumblefishdev/stellar-prices-api
+   gh secret set PROMOTE_DEPLOY_KEY --env production -R rumblefishdev/stellar-prices-api < "$d/key"
+   hdiutil detach "$dev"
+   ```
+   Check: `gh repo deploy-key list -R rumblefishdev/stellar-prices-api` shows
+   one key with read-write; `gh secret list --env production -R rumblefishdev/stellar-prices-api`
+   shows `PROMOTE_DEPLOY_KEY`.
+2. **Bypass on ruleset 27628401.** The full list is sent, so the admin entry
+   stays:
+   ```bash
+   gh api -X PUT repos/rumblefishdev/stellar-prices-api/rulesets/27628401 --input - <<'JSON'
+   {"bypass_actors":[
+     {"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"},
+     {"actor_id":null,"actor_type":"DeployKey","bypass_mode":"always"}
+   ]}
+   JSON
+   gh api repos/rumblefishdev/stellar-prices-api/rulesets/27628401 --jq '{rules:[.rules[].type], bypass_actors}'
+   ```
+   Expected: rules `["update"]`, two bypass actors. Ruleset 27628422 is not
+   touched.
+3. **`make deploy-cicd`** (after #427 merges, from `develop`), with
+   `soroban-admin`. It asks once about the new IAM role; the diff must show
+   one role, one policy and no OIDC provider:
+   ```bash
+   git checkout develop && git pull --ff-only
+   AWS_PROFILE=soroban-admin make -C infra diff-cicd
+   AWS_PROFILE=soroban-admin make -C infra deploy-cicd
+   ```
+4. **Role ARN into the environment:**
+   ```bash
+   gh secret set AWS_DEPLOY_ROLE_ARN --env production -R rumblefishdev/stellar-prices-api --body "$(AWS_PROFILE=soroban-readonly aws cloudformation describe-stacks --stack-name Prices-Cicd --region eu-central-1 --query "Stacks[0].Outputs[?OutputKey=='ProductionDeployRoleArn'].OutputValue" --output text)"
+   ```
+   Check: the value is `arn:aws:iam::750702271865:role/stellar-prices-api-production-deploy`.
+
+First test: the next release PR `develop` → `deploy/production`. Expected:
+`build` green, `deploy` waits for an approval from someone other than the
+merger, passes "Check the run can promote", then `master` = the release
+commit and a `prod-*` tag on it.
 
 ### Phase 3: guard and docs
 
@@ -298,9 +497,96 @@ Phase 2.
     27628401: remove it, or narrow it to a team, since it covers every
     repository admin (seven on 2026-11-19).
 
+#### Decisions (2026-11-20, Phase 3)
+
+Answered by the operator.
+
+14. **The guard has no override.** No variable skips it. An urgent fix is a
+    PR to `deploy/production`, then a deploy of its tip (CI or by hand).
+15. **The guard also covers `sync-portal-explorer` and every
+    `destroy-production*`**, not only `deploy-production*`. `diff-production`
+    stays unguarded, because a release PR is diffed from `develop`.
+    `deploy-cicd` / `destroy-cicd` are not guarded (not asked; the deploy
+    role, not production).
+16. **A release's manual steps go in the tag's GitHub Release.** An annotated
+    tag's message cannot be edited, so "noted on the release tag" means the
+    Release of that tag, created by the workflow and edited with
+    `gh release edit` (portal upload, ClickHouse schema apply, data repair:
+    what, when in UTC, who).
+
+#### Phase 3 implementation
+
+- **#427, second commit:** job `release` after `deploy` creates the tag's
+  GitHub Release, with the run and the release PR linked and an empty
+  "Manual steps" section. **Its own job (emerged)**, holding
+  `contents: write`, so the job with the AWS role and the deploy key keeps
+  `contents: read`; `develop` has no rules, and a write token there could
+  push to it.
+- **#428** (`feat/0343_deploy-guard-and-release-docs`, merge after #427):
+  - `tools/scripts/check-release-commit.sh`, the first prerequisite of all 13
+    guarded targets: fetches `origin/deploy/production`, refuses a dirty tree
+    (untracked files count, ignored ones do not) or a `HEAD` off its tip, and
+    prints `git checkout --detach origin/deploy/production`. Checked on a
+    real checkout: refused before any build started.
+  - **Remote and branch are constants (emerged).** A first draft read them
+    from `RELEASE_REMOTE` / `RELEASE_BRANCH`, which `RELEASE_BRANCH=develop`
+    would have turned into an override; removed, and a test asserts no
+    variable moves the guard.
+  - `tools/scripts/release-guard.test.mjs`, 10 tests: the script against
+    throwaway repositories, and the Makefile wiring (guard first in every
+    target, absent from `diff-production`).
+  - `infra/README.md`: "Releasing to production" (the flow, the manual diff,
+    hotfix, rollback, deploying by hand, non-branch changes, the promote key
+    and its rotation) and the rewritten CI/CD role section.
+  - `docs/runbooks/deploy-ledger-processor.md` deploys from the release tip,
+    not `develop` (emerged: it contradicted the guard).
+
+#### Review of #427 and #428 (2026-11-20)
+
+stkrolikiewicz approved both at `29382ba1` / `ee361b38`, with 7 non-blocking
+comments. Decided by the operator; numbering continues from decision 16.
+
+17. **Concurrency group carries the ref** (#427, `d39fac9c`):
+    `deploy-production-${{ github.ref }}`. With one group for every ref, a
+    manual run from `develop` (all jobs skipped) took the pending slot and
+    cancelled a waiting release. Kept at workflow level, not moved to the
+    `deploy` job.
+18. **Promote preconditions are checked before the deploy** (#427,
+    `d39fac9c`). "Load the promote key" moved before the AWS login, and a step
+    "Check the run can promote" refuses the run unless its commit is the
+    `deploy/production` tip, `origin/master` is its ancestor, and the key
+    authenticates. The first check stops a "Re-run" of an older run, which
+    reuses that run's `GITHUB_SHA` and would deploy an old commit over
+    production. A key missing from the ruleset bypass still shows only at the
+    push.
+19. **No tag ruleset on `prod-*`.** Tags are a label; `master` is the record.
+20. **The release diff comes from the PR's merge ref** (#428, `d0faceb5`).
+    From `develop`, a hotfix not yet merged back shows as reverted in the one
+    diff the approver reads for removals. Plus a README paragraph: never
+    "Re-run" an older run, use `gh workflow run` on the tip.
+21. **Hand deploy racing a release: a doc line only** (#428, `d0faceb5`).
+    "Deploying by hand" says not to deploy while a `deploy-production.yml` run
+    is in progress or waiting. No second guard run before `cdk`: it narrows
+    the window without closing it.
+22. **Key rotation gets a macOS variant** (#428, `d0faceb5`, and setup step 1
+    above): a RAM disk via `hdiutil`, and a warning never to substitute
+    `/tmp`. Not yet run on a Mac.
+23. **The two runbooks the guard contradicted are fixed** (#428,
+    `d0faceb5`): the 0142 §6 rollback is a revert PR on `deploy/production`;
+    0286's CDK deploys run detached at `origin/deploy/production`. Runbooks
+    that name no branch are left as they are.
+
+- **The guard tests broke under the pre-commit hook (emerged, #428,
+  `455ea818`).** A hook exports `GIT_INDEX_FILE` (and `GIT_DIR` in a
+  worktree); the tests inherited them, so their throwaway repositories wrote
+  into the real index (a staged `app.txt`) and the hook failed. The tests now
+  drop every inherited `GIT_*` variable. Found when committing the review
+  fixes from a worktree.
+
 ## Acceptance Criteria
 
-- [ ] `deploy/production` exists, is protected, and takes only approved PRs
+- [x] `deploy/production` exists, is protected, and takes only approved PRs
+      (Phase 1; #426 stayed `BLOCKED` until approved and green, 2026-11-19)
 - [ ] A production deploy from any other commit is refused
 - [x] `master` equals production after Phase 0: #418 merged, `make
       diff-production` shows only Lambda code hashes (2026-11-17)
@@ -320,10 +606,7 @@ Phase 2.
   0242. Its alarms come back by turning the Phase 0 flag on.
 - The catch-up release (#418) was out of scope until 2026-11-17. It is now
   Phase 0.
-- Open point for Phase 2: whether a release that changes only `lore/` or
-  docs still runs the deploy. If it skips the deploy, as `stellar-x402` does
-  with `paths-ignore`, `master` does not reach `deploy/production`'s tip until
-  the next code release. Running it every time is cheap, because a stack with
-  no change is a no-op.
+- A release that changes only `lore/` or docs still runs the deploy
+  (decision 8, 2026-11-20).
 - [[0141]] is the history behind `build-lambdas`: a deploy shipped stale Lambda
   assets from a laptop. Building in CI removes that class of error.

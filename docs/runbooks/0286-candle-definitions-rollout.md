@@ -51,9 +51,11 @@ second tmux pane does not have it — paste the definition again there.
 exactly the table you want between a `DROP VIEW` and its `CREATE`. Use the
 `dev_read` cert for that one query, or watch the target table advance instead.
 
-**CDK deploys** run from a local checkout of this repo, **on `develop`**:
-`make deploy-production-*` builds from the working tree, so the branch you are
-standing on is the code that reaches production. Always `make diff-production`
+**CDK deploys** run from a local checkout of this repo, **detached at the tip
+of `origin/deploy/production`** (`git fetch origin && git checkout --detach
+origin/deploy/production`): `make deploy-production-*` builds from the working
+tree, and since task 0343 it refuses any other commit. Code reaches that tip by
+a release PR from `develop` (`infra/README.md`, "Releasing to production"). Always `make diff-production`
 first and read it for REMOVALS — `--require-approval broadening` prompts on IAM
 widening only, never on a resource being deleted or replaced.
 
