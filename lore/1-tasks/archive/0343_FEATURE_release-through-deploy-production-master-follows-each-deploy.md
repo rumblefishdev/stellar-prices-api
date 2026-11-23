@@ -2,10 +2,10 @@
 id: "0343"
 title: "Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy"
 type: FEATURE
-status: active
+status: completed
 assignee: okarcz
 related_adr: []
-related_tasks: ["0141", "0242", "0351"]
+related_tasks: ["0141", "0242", "0351", "0352"]
 tags: ["deploy", "release", "ci", "branching", "priority-medium", "effort-medium"]
 links:
   - "../../../infra/Makefile"
@@ -96,6 +96,17 @@ history:
       operator decided each (decisions 17-23): 6 fixed (#427 d39fac9c, #428
       455ea818 + d0faceb5), the prod-* tag ruleset left out. Setup step 1
       gets a macOS variant.
+  - date: 2026-11-23
+    status: completed
+    who: okarcz
+    note: >
+      #427 (594fde53) and #428 (49e3c793) merged; Phase 2 setup done (deploy
+      key, DeployKey bypass on 27628401, Prices-Cicd deployed, role ARN
+      secret). First release through the workflow: #429 → 7e50e586, run
+      45171016452 green on the first try, master fast-forwarded by the deploy
+      key, tag prod-2026-11-23, GitHub deployment 7998386907. Guard refused a
+      deploy from develop. Decision 24: the admin bypass stays. Header-comment
+      fix spawned as 0352.
 ---
 
 # Production is deployed by hand from develop and master trails it — release through deploy/production, and move master only after a successful deploy
@@ -108,12 +119,13 @@ introduces a three-branch release flow, `develop` → `deploy/production` →
 `master`, in which production is deployed only from `deploy/production` and
 `master` moves only to a commit whose deploy succeeded.
 
-## Status: Active
+## Status: Completed
 
-**Current state (2026-11-20):** Phases 0 and 1 done; first release
-`prod-2026-11-19` on `c7dcd26d`. Phase 2 (#427) and Phase 3 (#428) approved,
-review fixes pushed (decisions 17-23). Next: merge #427, then #428, then the
-operator's Phase 2 setup, then the first release through the workflow.
+**Final state (2026-11-23):** all phases done. The first release through
+`deploy-production.yml`, `prod-2026-11-23` on `7e50e586`, deployed every stack
+and moved `master` with no manual step. `origin/master` =
+`origin/deploy/production` = `prod-2026-11-23`. See "Phase 2 setup and the
+first release through the workflow (2026-11-23)".
 
 ## Context
 
@@ -583,22 +595,73 @@ comments. Decided by the operator; numbering continues from decision 16.
   drop every inherited `GIT_*` variable. Found when committing the review
   fixes from a worktree.
 
+#### Phase 2 setup and the first release through the workflow (2026-11-23)
+
+The operator ran the key, ruleset, AWS and secret steps; the agent merged
+#427, #428 and #429 on the operator's instruction. The agent session had only
+`soroban-readonly` and checked each step from GitHub and AWS afterwards.
+
+| Step | Result |
+| --- | --- |
+| Merges | #427 → `develop` as `594fde53`, #428 as `49e3c793`; the merged files equal the approved heads |
+| Deploy key | id `170828115`, read-write, 10:46 UTC, generated in `/dev/shm`; `PROMOTE_DEPLOY_KEY` is a `production` environment secret, not a repository one |
+| Ruleset 27628401 | bypass: `DeployKey` and admin (`RepositoryRole` 5). 27628422 unchanged, no bypass |
+| `make diff-cicd` | one role, one policy, one output; no OIDC provider; trust `sub` = `repo:rumblefishdev/stellar-prices-api:environment:production` |
+| `make deploy-cicd` | `Prices-Cicd` `CREATE_COMPLETE` (42 s); `Explorer-Cicd` untouched (last update 2026-08-12); the account still has one GitHub OIDC provider |
+| `AWS_DEPLOY_ROLE_ARN` | `arn:aws:iam::750702271865:role/stellar-prices-api-production-deploy`, environment secret, 11:27 UTC |
+| Release PR #429 | merge ref `fcf13fad`, tree equal to `develop`. `diff-production` from it: Compute and EventBridge change only Lambda `Code.S3Key` (12 functions), the rest no differences; posted on the PR. Approved by stkrolikiewicz, merged as `7e50e586` (12:05:29 UTC) |
+| Run [45171016452](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/45171016452) | build 12:05:39–12:14:16; deploy approved by stkrolikiewicz; "Check the run can promote" passed; `cdk deploy --all` 12:17:24–12:20:30; cache flush 12:20:35; `Fast-forward master` 12:20:50; tag 12:20:56; GitHub Release 12:21:05 |
+| After | `master` = `deploy/production` = `prod-2026-11-23` = `7e50e586`; GitHub deployment `7998386907` (`production`, `7e50e586`, success); 12 Lambdas `Active` with code from 12:18; Secrets, ApiGateway, Observability changed only `CDKMetadata`; `prices-production-cleanup` still `DISABLED`; ledger-processor 42 invocations, 0 errors in the first minutes |
+| Guard | `make -C infra deploy-production-compute` from `develop` `49e3c793` refused at `check-release-commit` (`Makefile:72`) before any build, though that commit's tree equals the release: the guard compares commits, not trees |
+
+The deploy key passed ruleset 27628401 on its first push, so the open point of
+decision 7 ("a key missing from the bypass shows only at the push") is closed.
+
+#### Decisions (2026-11-23)
+
+24. **The admin bypass on ruleset 27628401 stays** (step 15, answered by the
+    operator). It remains the emergency path for a deploy that succeeded but
+    whose promote did not, and it still covers every repository admin (seven
+    on 2026-11-19). Ruleset 27628422 keeps every move of `master` a
+    fast-forward, bypass or not.
+
+#### Emerged (2026-11-23)
+
+25. **The first release carried #424** (0349, prices-api telemetry), merged
+    to `develop` that morning without a review. Releasing all of `develop`
+    is the flow's rule, and leaving it out would have needed a hand-built
+    release branch, so it went out with the release; the release PR asked
+    its reviewer to read `telemetry.rs` too, and its owner was told.
+26. **The release diff was run by the agent, read-only, in a separate
+    worktree** at the merge ref, so the operator's checkout stayed on
+    `develop`. Only `soroban-readonly` was used; the `soroban-admin` steps
+    (`diff-cicd`, `deploy-cicd`) ran in the operator's own terminal.
+
 ## Acceptance Criteria
 
 - [x] `deploy/production` exists, is protected, and takes only approved PRs
-      (Phase 1; #426 stayed `BLOCKED` until approved and green, 2026-11-19)
-- [ ] A production deploy from any other commit is refused
+      (Phase 1; #426 stayed `BLOCKED` until approved and green, 2026-11-19;
+      #429 the same, 2026-11-23)
+- [x] A production deploy from any other commit is refused (by hand: the
+      guard refused `develop` `49e3c793`; by CI: the environment's branch
+      policy and "Check the run can promote", 2026-11-23)
 - [x] `master` equals production after Phase 0: #418 merged, `make
       diff-production` shows only Lambda code hashes (2026-11-17)
-- [ ] Every deploy records the commit it was deployed from (GitHub
+- [x] Every deploy records the commit it was deployed from (GitHub
       deployment), readable without access to the deployer's machine
-- [ ] After a successful deploy `master` points at the deployed commit and
-      carries a release tag, with no manual step
-- [ ] After a failed deploy `master` is unchanged
+      (deployment `7998386907` → `7e50e586`, plus the tag's GitHub Release)
+- [x] After a successful deploy `master` points at the deployed commit and
+      carries a release tag, with no manual step (`prod-2026-11-23`, run
+      45171016452)
+- [x] After a failed deploy `master` is unchanged. By construction, not yet
+      seen in a real failure: `Fast-forward master` and the tag are steps
+      after `cdk deploy --all` and the flush in the same job, so any failure
+      before them skips both
 - ~~A scheduled check reports when the deployed commit and `master` differ~~
   (dropped 2026-11-17, decision 3)
-- [ ] The flow, the hotfix path and the rollback path are documented where
-      deploys are documented (`infra/README.md`)
+- [x] The flow, the hotfix path and the rollback path are documented where
+      deploys are documented (`infra/README.md` "Releasing to production",
+      #428)
 
 ## Notes
 
@@ -608,5 +671,9 @@ comments. Decided by the operator; numbering continues from decision 16.
   Phase 0.
 - A release that changes only `lore/` or docs still runs the deploy
   (decision 8, 2026-11-20).
+- Future work: the header comment of `deploy-production.yml` still says the
+  release diff comes from the PR's head; decision 20 made it the merge ref
+  ([[0352]]). Moving the OIDC provider to `soroban-infrastructure` is
+  [[0351]].
 - [[0141]] is the history behind `build-lambdas`: a deploy shipped stale Lambda
   assets from a laptop. Building in CI removes that class of error.
