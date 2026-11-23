@@ -2,7 +2,7 @@
 id: "0348"
 title: "Answer the API hub's dashboard contract: account, reveal, revoke, issue"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0340", "0186", "0187", "0188", "0189", "0349"]
 tags: ["portal", "hub", "priority-high", "effort-medium"]
@@ -25,6 +25,16 @@ history:
       both answered on the branches. The task's record moves to develop
       (lore/1-tasks/CLAUDE.md), with commit subjects in place of the local
       branch's hashes.
+  - date: "2026-11-23"
+    status: completed
+    who: akot
+    note: >
+      #422 (2a21582d) and #423 (21b938fa) merged into develop on 2026-11-19
+      on akot's word, with no approving review; production's api-handler
+      redeployed from 21b938fa the same day. Follow-up 0349 merged as #424.
+      Closed by akot with two items left in this file, no task for either:
+      the Cloudflare rules (spec decision 16) and `agrees_with_listing`
+      (Future Work).
 ---
 
 # Answer the API hub's dashboard contract: account, reveal, revoke, issue
@@ -39,18 +49,16 @@ with a 60-second HMAC-signed token. Prices answers four calls under
 `POST key/issue`, reusing its own key, cap and usage logic. Today's portal routes
 keep working unchanged until the hub takes over (cutover step 3 of the design).
 
-## Status: Active
+## Status: Completed
 
-**Current state (2026-11-19):** In review as two PRs, #422 (the services
-pulled out of the handlers, no behaviour change) and #423 (the contract,
-stacked on #422). Production's api-handler has answered the contract since
-2026-11-18 12:25 UTC: deployed with `make -C infra deploy-production-compute`
-from a local branch whose tree is #423's as first pushed, with the secret in
-place, and tried from a local hub's Prices tab against it (akot, 2026-11-18).
-Oskar's review of both PRs (2026-11-18) is answered on the branches
-(decisions 26–30). Left: merge #422, then #423 straight after: until both are
-on `develop`, a deploy from `develop` takes the contract off production. Agree
-the Cloudflare rules with 0340's owner (spec decision 16).
+**Closed 2026-11-23.** #422 (the services pulled out of the handlers, no
+behaviour change) and #423 (the contract) merged into `develop` on 2026-11-19,
+with no approving review: Oskar's review of 2026-11-18 is answered on the
+branches (decisions 26–30). Production's api-handler has answered the contract
+since 2026-11-18 12:25 UTC, and was redeployed from `develop` (21b938fa) with
+`make -C infra deploy-production-compute` on 2026-11-19. Not done, and left
+without a task: agree the Cloudflare rules with 0340's owner (spec decision
+16), and `agrees_with_listing` (Future Work).
 
 ## Context
 
