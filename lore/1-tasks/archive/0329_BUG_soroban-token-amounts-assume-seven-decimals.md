@@ -2,7 +2,7 @@
 id: "0329"
 title: "Soroban AMM amounts are scaled as if every token had 7 decimals — every contract token's price is off by 10^(7 − decimals)"
 type: BUG
-status: active
+status: completed
 assignee: stkrolikiewicz
 related_adr: []
 related_tasks: ["0286", "0242", "0210", "0097", "0060", "0048", "0018"]
@@ -12,6 +12,14 @@ links:
   - "../../../packages/asset-discovery/src/symbols.rs"
   - "../../../docs/database-schema/amm-trades-schema.md"
 history:
+  - date: 2026-11-24
+    status: completed
+    who: okarcz
+    note: >
+      AC 3 and AC 4 verified read-only on production and ticked; archived with
+      the author's OK (2026-11-24). All six tokens within 0.05-0.7 % of
+      CoinGecko where a reference exists; price_usd_series and _1h at the
+      right scale in every month, including 2026-09-01 to 2026-10-07.
   - date: "2026-10-07"
     status: active
     who: stkrolikiewicz
@@ -308,6 +316,36 @@ Rejected:
   enrichment, then the affected-only pre-roll. Lightweight `DELETE FROM` is
   used because the corrected rows tie the stale ones on `version`.
 
+## Verification 2026-11-24
+
+Read-only on production (`dev_read`), at the author's request in the board
+triage.
+
+**AC 3, current price vs CoinGecko** (`prices.current_prices`, 13:24–13:43 UTC):
+
+| Token | decimals | Ours ($) | CoinGecko ($) | Diff |
+|---|---|---|---|---|
+| SolvBTC `CBIJBDNZ` | 8 | 59 832 | 59 800 (`solv-btc`) | +0.05 % |
+| XAUM `CC2RBGYN` | 9 | 3 641.20 | 3 616.54 (`matrixdock-gold`) | +0.7 % |
+| XRP `CB7OOP3V` | 6 | 0.9206 | 0.9193 (`ripple`) | +0.15 % |
+| deJAAA `CC64WBDG` | 18 | 1.0504 | 1.056 (`defi-janus-henderson-anemoy-aaa-clo-fund`) | −0.5 % |
+| deJTRSY `CBI7UCH5` | 18 | 1.0262 | no entry for the token | flat 1.025–1.028 since 2026-05 |
+| BnUSD `CCT4ZYIY` | 18 | 1.0003 | 0.968 (`balanced-dollars`, same token unconfirmed) | at the $1 peg |
+
+**AC 4, history.** Monthly min/median/max of `close_usd` per token from each
+token's first candle (BnUSD from 2025-07) to 2026-11, on `price_ohlcv_1d`,
+`price_usd_series` and `price_usd_series_1h`: every month at the right scale,
+no 10×, 100× or 10¹¹ error. The 18-decimal tokens keep their digits
+(1.026…, 1.05…). The window 2026-09-01 → 2026-10-07, repaired by DELETE on rows
+of the same `version`, was checked on both views separately and is clean.
+Whichever `reingest_0286.py` the phase-3 run held, the stored history is right.
+
+**Out of scope, recorded so nobody investigates it again:** BnUSD has two
+off-market buckets, both written live after the fix, not by the re-ingest and
+not a decimals error: 2026-10-17 15:00 UTC at 0.7073 $ and 2026-10-26 11:00 UTC
+at 0.4444 $ (`method = traded`, on `price_usd_series` and `_1h`). That class
+of print is [[0310]]'s.
+
 ## Acceptance Criteria
 
 - [x] Unit test: an 8-, 18- and 6-decimal leg against a 7-decimal leg gives the
@@ -315,9 +353,9 @@ Rejected:
       (`each_leg_is_scaled_by_its_own_tokens_decimals`).
 - [x] A token whose decimals are unresolved never produces a price
       (`a_leg_with_unknown_decimals_prices_nothing_and_is_reported`).
-- [ ] After deploy, all six priced tokens are within a few percent of an
-      external reference.
-- [ ] History of the affected assets re-ingested; `price_usd_series*` right over
+- [x] After deploy, all six priced tokens are within a few percent of an
+      external reference. ✅ 2026-11-24 (see "Verification 2026-11-24").
+- [x] History of the affected assets re-ingested; `price_usd_series*` right over
       the full range, with significant digits restored for the 18-decimal
-      tokens.
+      tokens. ✅ 2026-11-24 (see "Verification 2026-11-24").
 - [x] `amm-trades-schema.md` §3 closed; the `AMM_AMOUNT_SCALE` constant removed.
