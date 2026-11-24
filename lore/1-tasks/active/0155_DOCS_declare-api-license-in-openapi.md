@@ -2,7 +2,8 @@
 id: "0155"
 title: "Decide and declare the API license — the published OpenAPI document emits an empty license object"
 type: DOCS
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0124", "0128"]
 tags: [layer-docs, priority-low, effort-small, openapi, licensing]
@@ -31,6 +32,13 @@ history:
       since been taken by the self-service onboarding portal (#172); 0153
       and 0154 are also claimed, so 0155 is the next free ID. Nothing about
       the work here changed.
+  - date: 2026-11-24
+    status: active
+    who: akot
+    note: >
+      Activated. The decision is made: the repo is public and #419
+      (2026-11-13) added an MIT LICENSE file, so what is left is declaring
+      it in Cargo and the OpenAPI document. One PR to develop.
 ---
 
 # Declare the API license in the OpenAPI document
