@@ -2,7 +2,7 @@
 id: "0296"
 title: "Tranche 3 AC 9 asks for a 7-day post-launch monitoring report — launch agreed as 2026-09-23 09:40 CEST, window to 2026-09-30 09:40"
 type: DOCS
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0294", "0293", "0249", "0260"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, observability, scf, evidence]
@@ -11,6 +11,12 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-11-24
+    status: completed
+    who: okarcz
+    note: >
+      Archived with the author's OK (2026-11-24 board triage). Every AC was
+      met; #367 merged 2026-09-30 and 0294 took Tranche 3 AC 9 from it.
   - date: 2026-09-30
     status: active
     who: claude
