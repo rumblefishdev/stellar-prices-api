@@ -13,6 +13,13 @@ links:
   - "../../../../packages/prices-clickhouse/schema/current.sql"
   - "../../../../docs/scf/milestone-3-evidence.md"
 history:
+  - date: 2026-11-24
+    status: active
+    who: okarcz
+    note: >
+      2026-11-24 board triage: every AC except the Bitstamp spot-check is met.
+      That AC waits only for Marek to accept the measured tolerance (median
+      0.30 %, p95 1.76 %); close the task once he does.
   - date: "2026-10-16"
     status: active
     who: akot
@@ -277,5 +284,7 @@ below).
 - [ ] Spot-check against Bitstamp XLM/USD within an agreed tolerance (measured before
       deploy: median 0.30 %, p95 1.76 %, without 2020-05-28 → 07-15 where Bitstamp
       printed a flat stale price). The tolerance is still to agree with Marek.
+      2026-11-24: the only open AC; waiting for Marek to accept the measured
+      tolerance, then the task closes.
 - [x] Rows from 2021-02-01 on unchanged. ✅ 2026-10-16: the run listed no month
       ≥ 202102, and `system.part_log` shows no insert into 202102–202508.
