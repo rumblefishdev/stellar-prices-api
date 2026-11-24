@@ -19,13 +19,6 @@ extends:
   - recommended-strict
 
 rules:
-  # OFF, deliberately. utoipa fills `info.license` from CARGO_PKG_LICENSE, which
-  # is unset for these crates, so it emits `{"name": ""}` — and the repo has no
-  # LICENSE file or Cargo `license` field to copy from. Declaring a license in a
-  # public API document is a business decision, not a lint fix; until it is
-  # made, the empty object stays and this rule stays off. See task 0155.
-  info-license-strict: off
-
   # Kept ON, at error severity (redundant under recommended-strict, but stated
   # so a future switch back to `recommended` cannot silently demote it). Every
   # key-gated operation documents 401/403 + the ErrorEnvelope body. The two

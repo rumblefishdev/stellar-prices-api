@@ -4,7 +4,8 @@
     "title": "Stellar Prices API",
     "description": "Public read API for Stellar asset prices: current prices, OHLCV candles, oracle readings and the progress of the historical backfill. Prices, volumes and rates are decimal strings rather than JSON numbers, so no precision is lost in transport; counts and ledger sequences are plain integers.",
     "license": {
-      "name": ""
+      "name": "MIT",
+      "identifier": "MIT"
     },
     "version": "0.1.0"
   },

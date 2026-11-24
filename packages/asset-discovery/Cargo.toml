@@ -2,6 +2,7 @@
 name = "asset-discovery"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Asset Discovery worker — seeds prices.assets and resolves Soroban symbols (tasks 0054, 0210)"
 
 [lib]

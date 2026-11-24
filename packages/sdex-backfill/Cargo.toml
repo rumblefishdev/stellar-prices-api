@@ -2,6 +2,7 @@
 name = "sdex-backfill"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "SDEX historical backfill CLI — local workstation tool mirroring BE's backfill-runner pattern"
 
 [[bin]]

@@ -2,6 +2,7 @@
 name = "prices-ingest-core"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Shared ledger→OHLCV ingestion core (decode, extract, canonicalise, bucket, write) used by both the SDEX backfill CLI and the live Prices Ledger Processor Lambda"
 
 [lib]

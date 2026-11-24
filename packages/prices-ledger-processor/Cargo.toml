@@ -2,6 +2,7 @@
 name = "prices-ledger-processor"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Prices Ledger Processor — live S3/SNS-doorbell ingestion into prices.price_ohlcv_1m over mTLS (task 0038)"
 
 [lib]

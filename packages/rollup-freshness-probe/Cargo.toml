@@ -2,6 +2,7 @@
 name = "rollup-freshness-probe"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Publishes per-tier OHLCV rollup lag to CloudWatch for the rollup freshness alarms (task 0137)"
 
 [lib]

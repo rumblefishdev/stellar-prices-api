@@ -2,6 +2,7 @@
 name = "mtls-notafter-probe"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Publishes mTLS client-cert days-to-NotAfter to CloudWatch for the cert-expiry alarm (task 0056)"
 
 [lib]

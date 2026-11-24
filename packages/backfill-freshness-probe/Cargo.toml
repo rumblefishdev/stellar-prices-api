@@ -2,6 +2,7 @@
 name = "backfill-freshness-probe"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Publishes prices.backfill_progress push-age (every 15 minutes, task 0056) and the weekly earliest-claim overclaim reconcile (task 0272) to CloudWatch"
 
 [lib]

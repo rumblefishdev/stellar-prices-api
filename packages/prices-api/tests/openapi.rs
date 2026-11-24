@@ -151,6 +151,14 @@ async fn spec_is_valid_openapi_3() {
         !spec["info"]["version"].as_str().unwrap().is_empty(),
         "info.version must be populated from CARGO_PKG_VERSION"
     );
+    // utoipa copies CARGO_PKG_LICENSE into both fields. With no `license` in
+    // the crate's Cargo.toml the document carried `{"name": ""}` (task 0155),
+    // which tells a reader and a client generator nothing.
+    assert_eq!(
+        spec["info"]["license"],
+        serde_json::json!({ "name": "MIT", "identifier": "MIT" }),
+        "info.license must name the repo's LICENSE by its SPDX identifier"
+    );
 }
 
 #[tokio::test]

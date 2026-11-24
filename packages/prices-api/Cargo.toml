@@ -2,6 +2,7 @@
 name = "prices-api"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Public Prices REST API — axum read handlers on a single Lambda (task 0040, ADR 0008)"
 
 [lib]

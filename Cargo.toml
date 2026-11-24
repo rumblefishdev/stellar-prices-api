@@ -26,6 +26,12 @@ members = [
     "packages/coverage-sweep-probe",
 ]
 
+# The repo's LICENSE file (#419). Each crate inherits it with
+# `license.workspace = true`; utoipa reads prices-api's CARGO_PKG_LICENSE into
+# `info.license` of the OpenAPI document (task 0155).
+[workspace.package]
+license = "MIT"
+
 [workspace.dependencies]
 stellar-xdr = { version = "=30.0.0" }
 stellar-strkey = "0.0.13"

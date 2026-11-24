@@ -2,6 +2,7 @@
 name = "supply-worker"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Prices supply worker — best-effort circulating supply into prices.asset_supply (task 0039)"
 
 [lib]

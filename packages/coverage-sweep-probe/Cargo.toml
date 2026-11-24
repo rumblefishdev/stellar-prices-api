@@ -2,6 +2,7 @@
 name = "coverage-sweep-probe"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Weekly sweep for swap-emitting contracts in neither pool_registry nor the committed allow-list, published to Prices/Coverage (task 0100)"
 
 [lib]

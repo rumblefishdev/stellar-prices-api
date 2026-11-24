@@ -2,6 +2,7 @@
 name = "ledger-processor"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Tranche 1 Ledger Processor — dispatches Soroban swap events to per-venue extractors"
 
 [lib]
