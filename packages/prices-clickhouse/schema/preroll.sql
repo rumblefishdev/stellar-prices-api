@@ -1,7 +1,8 @@
 -- prices coarse-granularity PRE-ROLL — deterministic, full-range.
 --
 -- ⚠️ GENERATED. Every statement below is rendered by
--- `src/rollup_sql.rs::rollup_insert(tier, "prices", &Bounds::Full, None)`, and a
+-- `src/rollup_sql.rs::rollup_insert(tier, "prices", &Bounds::Full,
+-- Some(FULL_RANGE_SETTINGS))`, and a
 -- unit test in `src/lib.rs` asserts this file equals that rendering
 -- whitespace-normalised. It is the same SELECT the six MVs in `rollups.sql`
 -- carry, so a coarse candle means one thing however it was built. Edit the
@@ -87,6 +88,14 @@
 -- fills it from its DEFAULT, and `pf_trade_count DEFAULT trade_count` would
 -- report a dust-only bucket as fully price-forming. The three pf columns are
 -- summed from the children here, so they mean what the 1m tier means.
+--
+-- Task 0302: every INSERT below ends in `SETTINGS max_partitions_per_insert_block
+-- = 1000`. The tables are partitioned `toYYYYMM(timestamp)`, a full-range run
+-- writes every month of history (~131 in 2026-09) in one INSERT block, and the
+-- server's default cap of 100 partitions per block fails it with Code 252
+-- (TOO_MANY_PARTS) — on production 2026-09-22, 0286 phase 1 step 5c. The cap is
+-- on one insert BLOCK, not on the table: 131 partitions is well inside
+-- ClickHouse's own guidance. 1000 months is 83 years of headroom.
 
 INSERT INTO prices.price_ohlcv_15m
     (timestamp, asset_id, quote_asset_id, source,
@@ -112,7 +121,8 @@ SELECT
     sum(t.pf_volume) AS pf_volume,
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1m AS t FINAL
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_partitions_per_insert_block = 1000;
 
 INSERT INTO prices.price_ohlcv_1h
     (timestamp, asset_id, quote_asset_id, source,
@@ -138,7 +148,8 @@ SELECT
     sum(t.pf_volume) AS pf_volume,
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_15m AS t FINAL
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_partitions_per_insert_block = 1000;
 
 INSERT INTO prices.price_ohlcv_4h
     (timestamp, asset_id, quote_asset_id, source,
@@ -164,7 +175,8 @@ SELECT
     sum(t.pf_volume) AS pf_volume,
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1h AS t FINAL
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_partitions_per_insert_block = 1000;
 
 INSERT INTO prices.price_ohlcv_1d
     (timestamp, asset_id, quote_asset_id, source,
@@ -190,7 +202,8 @@ SELECT
     sum(t.pf_volume) AS pf_volume,
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_4h AS t FINAL
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_partitions_per_insert_block = 1000;
 
 INSERT INTO prices.price_ohlcv_1w
     (timestamp, asset_id, quote_asset_id, source,
@@ -216,7 +229,8 @@ SELECT
     sum(t.pf_volume) AS pf_volume,
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1d AS t FINAL
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_partitions_per_insert_block = 1000;
 
 INSERT INTO prices.price_ohlcv_1M
     (timestamp, asset_id, quote_asset_id, source,
@@ -243,4 +257,5 @@ SELECT
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1d AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_partitions_per_insert_block = 1000
 ;

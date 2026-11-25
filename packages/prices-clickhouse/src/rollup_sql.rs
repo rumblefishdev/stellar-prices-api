@@ -620,6 +620,16 @@ pub fn rollup_views() -> Vec<(&'static str, u64)> {
         .collect()
 }
 
+/// The `SETTINGS` every FULL-RANGE pre-roll statement carries (task 0302).
+///
+/// `price_ohlcv_*` is partitioned `toYYYYMM(timestamp)` and a full-range
+/// `INSERT … SELECT` writes every month of history in one block. ClickHouse
+/// caps a block at 100 partitions by default, and the history passed that:
+/// production refused the 1M statement on 2026-09-22 with Code 252
+/// (TOO_MANY_PARTS). The cap is per block, not per table. Bounded pre-rolls
+/// write one or two months and do not need it.
+pub const FULL_RANGE_SETTINGS: &str = "max_partitions_per_insert_block = 1000";
+
 /// The same aggregation as a plain `INSERT … SELECT` over `bounds` — what the
 /// two maintained pre-roll scripts are.
 ///
@@ -666,7 +676,8 @@ mod tests {
             ));
             out.push((
                 format!("preroll {}", tier.name),
-                rollup_insert(&tier, "prices", &Bounds::Full, None).expect("a checked rendering"),
+                rollup_insert(&tier, "prices", &Bounds::Full, Some(FULL_RANGE_SETTINGS))
+                    .expect("a checked rendering"),
             ));
             out.push((
                 format!("live-gap {}", tier.name),

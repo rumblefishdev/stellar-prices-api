@@ -429,12 +429,18 @@ Then run the 1M statement of `schema/preroll.sql` (the last one — full range,
 `FROM prices.price_ohlcv_1d AS t FINAL`). It names all eighteen columns and
 projects the pf aggregates, so the rebuilt months mean what the days mean.
 
-⚠️ **It will not run as generated.** `price_ohlcv_*` is partitioned `toYYYYMM`,
-the statement writes ~131 months in one INSERT block, and ClickHouse caps a
-block at `max_partitions_per_insert_block = 100`:
-`Code: 252 … Too many partitions for single INSERT block`. Raise it for this one
-statement rather than editing the SQL, which is rendered from
-`src/rollup_sql.rs` and pinned to it by a unit test:
+✅ **Since task 0302 it runs as written.** `price_ohlcv_*` is partitioned
+`toYYYYMM`, the statement writes ~131 months in one INSERT block, and ClickHouse
+caps a block at `max_partitions_per_insert_block = 100`:
+`Code: 252 … Too many partitions for single INSERT block`. Every full-range
+statement in `preroll.sql` now ends in
+`SETTINGS max_partitions_per_insert_block = 1000`, so no caller setting is
+needed.
+
+⚠️ **From a checkout older than 0302** the statement has no `SETTINGS` clause
+and fails as above. Raise the cap for that one statement with a URL parameter
+(how it was run on 2026-09-22) rather than editing the SQL, which is rendered
+from `src/rollup_sql.rs` and pinned to it by a unit test:
 
 ```bash
 curl -sS --cert ~/prices-mtls/prices-admin-production.crt \
@@ -446,7 +452,7 @@ curl -sS --cert ~/prices-mtls/prices-admin-production.crt \
 
 131 monthly partitions on a table is well inside ClickHouse's own "under
 1000..10000" guidance — the cap is on one insert _block_, not on the table. The
-generator-level fix is task 0302. Phase 3's per-month pre-rolls are bounded and
+generator-level fix is task 0302 (above). Phase 3's per-month pre-rolls are bounded and
 never approach the cap.
 
 **5d. Create the new view**, the last statement of `schema/rollups.sql`:

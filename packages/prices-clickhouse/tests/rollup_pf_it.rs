@@ -784,3 +784,77 @@ async fn a_legacy_row_that_claims_a_price_it_cannot_print_reaches_no_price_aggre
 
     teardown(&admin, db).await;
 }
+
+/// Task 0302: the full-range pre-roll writes every month of history in one
+/// INSERT block, and ClickHouse caps a block at 100 partitions by default
+/// (`price_ohlcv_*` is partitioned `toYYYYMM`). Production refused the 1M
+/// statement on 2026-09-22 with Code 252. Seed 131 months, prove each of the
+/// six statements is refused WITHOUT the shipped `SETTINGS` clause, and that
+/// the shipped file runs as written with no setting from the caller.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_full_range_preroll_writes_more_than_a_hundred_months_as_shipped() {
+    const MONTHS: u64 = 131;
+    const SETTING: &str = "SETTINGS max_partitions_per_insert_block = 1000";
+    let db = "test_rollup_pf_0302";
+    let admin = setup(db).await;
+
+    // One priced minute on the 1st of each month from 2015-10. The seed is a
+    // full-range insert too, so it needs the same raised cap.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m (timestamp, asset_id, quote_asset_id, source, \
+             open, high, low, close, volume_base, volume_quote, volume_quote_usd, close_usd, \
+             vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume) \
+             SELECT addMonths(toDateTime('2015-10-01 00:00:00'), number), 1, 2, 'sdex', \
+             1, 1, 1, 1, 10, 12, 0, 1, 0, 2, 1, 2, 10, 12 FROM numbers({MONTHS}) {SETTING}"
+        ))
+        .execute()
+        .await
+        .expect("seed 131 months of 1m");
+
+    let shipped = rewrite(prices_clickhouse::PREROLL_SQL, db);
+    let statements: Vec<&str> = shipped
+        .split(';')
+        .filter_map(|s| s.find("INSERT INTO").map(|i| &s[i..]))
+        .collect();
+    assert_eq!(statements.len(), COARSE.len(), "six full-range statements");
+
+    for (statement, table) in statements.iter().zip(COARSE) {
+        assert!(
+            statement.contains(SETTING),
+            "{table}: shipped without the cap"
+        );
+
+        // Without the clause the server's default cap refuses the block.
+        let bare = statement.replace(SETTING, "");
+        let err = prices_clickhouse::apply_sql(&admin, &bare)
+            .await
+            .expect_err(&format!("{table}: the bare statement should be refused"));
+        assert!(
+            format!("{err:?}").contains("TOO_MANY_PARTS"),
+            "{table}: refused for another reason: {err:?}"
+        );
+
+        // As shipped it runs and writes past the default cap.
+        prices_clickhouse::apply_sql(&admin, statement)
+            .await
+            .unwrap_or_else(|e| panic!("{table}: the shipped statement failed: {e:?}"));
+        let partitions = scalar(
+            &admin,
+            &format!("SELECT toFloat64(uniqExact(_partition_id)) FROM {db}.{table}"),
+        )
+        .await;
+        // A week belongs to the month it starts in, so two 1sts can share one;
+        // what matters is that the block crossed the default cap of 100.
+        assert!(
+            partitions > 100.0,
+            "{table}: wrote {partitions} partitions, the test needs more than 100"
+        );
+    }
+
+    // And the file as a whole, the way the runbook applies it.
+    preroll(&admin, db).await;
+
+    teardown(&admin, db).await;
+}
