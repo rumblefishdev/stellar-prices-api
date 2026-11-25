@@ -773,15 +773,17 @@ pub enum Timeframe {
 }
 
 impl Timeframe {
-    /// Auto-selected granularity when `?granularity` is omitted.
-    pub fn default_granularity(self) -> Granularity {
+    /// Fixed granularity used when `?granularity` is omitted, or `None` for
+    /// `all`: its span grows with time, so it has no fixed default and the
+    /// handler computes one with [`Granularity::finest_for_span`] (task 0253).
+    pub fn default_granularity(self) -> Option<Granularity> {
         match self {
-            Timeframe::H1 => Granularity::M1,
-            Timeframe::H24 => Granularity::M15,
-            Timeframe::D7 => Granularity::H1,
-            Timeframe::D30 => Granularity::H4,
-            Timeframe::Y1 => Granularity::D1,
-            Timeframe::All => Granularity::D1,
+            Timeframe::H1 => Some(Granularity::M1),
+            Timeframe::H24 => Some(Granularity::M15),
+            Timeframe::D7 => Some(Granularity::H1),
+            Timeframe::D30 => Some(Granularity::H4),
+            Timeframe::Y1 => Some(Granularity::D1),
+            Timeframe::All => None,
         }
     }
 
