@@ -1465,8 +1465,13 @@ mod tests {
             rollup_sql::TIERS
                 .iter()
                 .map(|t| {
-                    rollup_sql::rollup_insert(t, PROD_DATABASE, &rollup_sql::Bounds::Full, None)
-                        .expect("a checked rendering")
+                    rollup_sql::rollup_insert(
+                        t,
+                        PROD_DATABASE,
+                        &rollup_sql::Bounds::Full,
+                        Some(rollup_sql::FULL_RANGE_SETTINGS),
+                    )
+                    .expect("a checked rendering")
                 })
                 .collect(),
         );
