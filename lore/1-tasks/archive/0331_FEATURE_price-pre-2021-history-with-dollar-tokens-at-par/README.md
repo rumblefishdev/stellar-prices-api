@@ -2,7 +2,7 @@
 id: "0331"
 title: "No USD price before 2021-02 — price that history from an imported hourly XLM/USD rate"
 type: FEATURE
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0286", "0201", "0172", "0212", "0267", "0294"]
@@ -13,6 +13,13 @@ links:
   - "../../../../packages/prices-clickhouse/schema/current.sql"
   - "../../../../docs/scf/milestone-3-evidence.md"
 history:
+  - date: 2026-11-25
+    status: completed
+    who: okarcz
+    note: >
+      Marek accepted the measured Bitstamp tolerance (median 0.30 %, p95
+      1.76 %, without the 2020-05-28 → 07-15 stale-price window), confirmed
+      by the operator 2026-11-25. Last open AC met; task archived.
   - date: 2026-11-24
     status: active
     who: okarcz
@@ -183,7 +190,8 @@ Anyone can issue a token called `USD`, so "every dollar token" needs these:
   that nothing is priced (task 0333).
 - ~~Coverage ceiling~~: native XLM's series is built from the rate (Decision 9), so it
   is no longer bound by the 21, 63 and 257 days of its XLM/USDT candles.
-- The tolerance for the Bitstamp spot-check (Safeguard 5), to agree with Marek.
+- ~~The tolerance for the Bitstamp spot-check~~ (Safeguard 5): Marek accepted the
+  measured tolerance (median 0.30 %, p95 1.76 %), confirmed 2026-11-25.
 
 ## Plan
 
@@ -281,10 +289,11 @@ below).
       ✅ 2026-10-16. The native series has been live since 2026-10-15 on 1081 of
       1081 days. The history run priced 794,672 1h rows, as measured. The rows
       left are explained in "Rollout of the history run".
-- [ ] Spot-check against Bitstamp XLM/USD within an agreed tolerance (measured before
+- [x] Spot-check against Bitstamp XLM/USD within an agreed tolerance (measured before
       deploy: median 0.30 %, p95 1.76 %, without 2020-05-28 → 07-15 where Bitstamp
       printed a flat stale price). The tolerance is still to agree with Marek.
       2026-11-24: the only open AC; waiting for Marek to accept the measured
-      tolerance, then the task closes.
+      tolerance, then the task closes. ✅ 2026-11-25: Marek accepted the measured
+      tolerance (median 0.30 %, p95 1.76 %), confirmed by the operator.
 - [x] Rows from 2021-02-01 on unchanged. ✅ 2026-10-16: the run listed no month
       ≥ 202102, and `system.part_log` shows no insert into 202102–202508.
