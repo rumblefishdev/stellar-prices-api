@@ -2,7 +2,8 @@
 id: "0288"
 title: "The 1024-character alarm-description synth guard only walks ObservabilityStack — the ten -errors alarms in EventBridgeStack can exceed the CloudWatch cap and fail mid-deploy"
 type: CHORE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0223", "0243"]
 tags: [layer-infra, priority-low, effort-small, observability, cloudwatch, alarms]
@@ -10,6 +11,10 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../infra/src/lib/lambda-baseline.ts"
 history:
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: "Activated for implementation (quick-fix queue; Stan OK'd the handover 2026-11-24)."
   - date: 2026-09-15
     status: backlog
     who: stkrolikiewicz
