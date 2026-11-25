@@ -2,13 +2,18 @@
 id: "0211"
 title: "Document OHLCV window boundary semantics — both start and end are inclusive, measured but stated nowhere"
 type: DOCS
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0120", "0119"]
 tags: [layer-docs, priority-low, effort-small, milestone-M2, api, docs]
 milestone: 2
 links: []
 history:
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: "Activated for implementation (quick-fix queue; Stan OK'd the handover 2026-11-24)."
   - date: 2026-08-19
     status: backlog
     who: stkrolikiewicz
