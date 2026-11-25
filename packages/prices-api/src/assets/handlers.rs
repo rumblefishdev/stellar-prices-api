@@ -460,8 +460,12 @@ async fn resolve_usd_refs(
      XLM's own\nmarkets against canonical USDC and USDT only. At\n`15m` and `1m` a bucket appears only where XLM traded, and takes the rate of its \
      hour. A\nbucket the rate does not cover is built as above.\n\n\
      The window is `timeframe`, ending \
-     now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
-     rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
+     now, or `start`/`end`. A candle is returned when its bucket's start time falls inside \
+     the\nwindow, both ends included: `start=2026-08-14&end=2026-08-19` at `1d` returns six \
+     candles,\n08-14 through 08-19. A `start` inside a bucket leaves that bucket out; an `end` \
+     inside a\nbucket keeps it. The newest candle can be the current bucket, still open: it is \
+     returned\nand keeps changing until the bucket ends. A window that would exceed 5000\ncandles \
+     at the chosen granularity is rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
      historical backfill is still running.",
     params(
         ("asset_identifier" = String, Path, description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
@@ -477,11 +481,11 @@ async fn resolve_usd_refs(
           `7d`→`1h`, `30d`→`4h`, `1y`→`1d`; for `start`/`end` windows and `timeframe=all`, the \
           finest size that keeps the window within 5000 candles"),
         ("start" = Option<String>, Query,
-         description = "Window start, inclusive: `YYYY-MM-DD`, an ISO 8601 date-time (a time without an offset \
+         description = "Window start, inclusive (a bucket counts when its start time is at or after it): `YYYY-MM-DD`, an ISO 8601 date-time (a time without an offset \
           is UTC), or a Unix epoch in seconds (milliseconds when 13 or more digits). Overrides \
           the start of `timeframe`"),
         ("end" = Option<String>, Query,
-         description = "Window end, inclusive, in the same forms (default: now). With `end` alone, the \
+         description = "Window end, inclusive (a bucket counts when its start time is at or before it), in the same forms (default: now). With `end` alone, the \
           `timeframe` window ends there"),
         ("base_currency" = Option<BaseCurrency>, Query,
          description = "`USD` (default) or `XLM`; all-lowercase `usd`/`xlm` are accepted as aliases"),
