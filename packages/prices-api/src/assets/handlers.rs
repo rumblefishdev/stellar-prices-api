@@ -574,11 +574,7 @@ pub async fn get_ohlcv(
     // instead of 400ing at a granularity the caller never chose, and bare
     // `timeframe=all` self-coarsens instead of hitting a cliff around 2029.
     let explicit_window = start.is_some() || end.is_some();
-    let granularity = match p.granularity {
-        Some(g) => g,
-        None if !explicit_window && !timeframe.is_all() => timeframe.default_granularity(),
-        None => Granularity::finest_for_span(span, OHLCV_MAX_POINTS),
-    };
+    let granularity = resolve_granularity(p.granularity, explicit_window, timeframe, span);
     // `+ 1`: the SQL bounds are inclusive on both ends, so an aligned window
     // spanning exactly N buckets contains N + 1 bucket-start timestamps —
     // counting span/granularity alone would let a 5001-bucket request through
@@ -940,9 +936,71 @@ fn looks_like_utc_offset(t: &str) -> bool {
     }
 }
 
+/// The `/ohlcv` granularity: the caller's, else the timeframe's fixed default,
+/// else (an explicit window, or `all`) the finest that fits the point cap.
+fn resolve_granularity(
+    requested: Option<Granularity>,
+    explicit_window: bool,
+    timeframe: queries_ch::Timeframe,
+    span: u64,
+) -> Granularity {
+    match (requested, timeframe.default_granularity()) {
+        (Some(g), _) => g,
+        (None, Some(g)) if !explicit_window => g,
+        (None, _) => Granularity::finest_for_span(span, OHLCV_MAX_POINTS),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_time;
+
+    mod granularity {
+        use super::super::{Granularity, OHLCV_MAX_POINTS, resolve_granularity};
+        use crate::assets::queries_ch::Timeframe;
+
+        const DAY: u64 = 86_400;
+
+        #[test]
+        fn all_takes_the_computed_grain_not_a_fixed_default() {
+            // Genesis → 2026-11: under 5000 days, so daily.
+            assert!(matches!(
+                resolve_granularity(None, false, Timeframe::All, 4_074 * DAY),
+                Granularity::D1
+            ));
+            // Genesis → 2029-06-08 crosses 5000 days. A fixed `all → 1d`
+            // default would 400 here; the computed grain steps to weekly.
+            assert!(matches!(
+                resolve_granularity(None, false, Timeframe::All, OHLCV_MAX_POINTS * DAY),
+                Granularity::W1
+            ));
+        }
+
+        #[test]
+        fn fixed_timeframes_keep_their_default_without_a_window() {
+            assert!(matches!(
+                resolve_granularity(None, false, Timeframe::Y1, 365 * DAY),
+                Granularity::D1
+            ));
+            assert!(matches!(
+                resolve_granularity(None, false, Timeframe::H24, DAY),
+                Granularity::M15
+            ));
+        }
+
+        #[test]
+        fn an_explicit_window_or_request_wins() {
+            // `?start=…` with the default `24h` timeframe: computed, not 15m.
+            assert!(matches!(
+                resolve_granularity(None, true, Timeframe::H24, DAY),
+                Granularity::M1
+            ));
+            assert!(matches!(
+                resolve_granularity(Some(Granularity::H4), false, Timeframe::All, 4_074 * DAY),
+                Granularity::H4
+            ));
+        }
+    }
 
     #[test]
     fn parse_time_accepts_common_forms() {
