@@ -2,7 +2,8 @@
 id: "0302"
 title: "The full-range 1M pre-roll exceeds max_partitions_per_insert_block and cannot run as generated"
 type: CHORE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: ["0287"]
 related_tasks: ["0286"]
 tags: [layer-backend, priority-low, effort-small, clickhouse, rollups, runbook]
@@ -12,6 +13,10 @@ links:
   - "../../../packages/prices-clickhouse/schema/preroll.sql"
   - "../../../docs/runbooks/0286-candle-definitions-rollout.md"
 history:
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: "Activated for implementation (quick-fix queue)."
   - date: "2026-09-22"
     status: backlog
     who: okarcz
