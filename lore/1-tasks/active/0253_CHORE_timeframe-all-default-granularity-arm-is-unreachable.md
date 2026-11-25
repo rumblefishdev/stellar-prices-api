@@ -2,7 +2,8 @@
 id: "0253"
 title: "Timeframe::All's default_granularity arm is unreachable — and the value it would return diverges from the computed one in 2029"
 type: CHORE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0119", "0246"]
 tags: ["priority-low", "effort-small", "api", "read-surface", "dead-code"]
@@ -10,6 +11,10 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../packages/prices-api/src/assets/handlers.rs"
 history:
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: "Activated for implementation (quick-fix queue)."
   - date: 2026-09-02
     status: backlog
     who: okarcz
