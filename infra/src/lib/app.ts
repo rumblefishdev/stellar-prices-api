@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 
 import { validateConfig, type EnvironmentConfig } from './types.js';
+import { assertAlarmDescriptionsFitCloudWatch } from './alarm-guards.js';
 import { SecretsStack } from './stacks/secrets-stack.js';
 import { ComputeStack } from './stacks/compute-stack.js';
 import { ApiGatewayStack } from './stacks/api-gateway-stack.js';
@@ -77,6 +78,9 @@ export function createApp({ config }: CreateAppOptions): void {
     config,
   });
   observability.addDependency(compute);
+
+  // Every stack's alarms, measured before anything is synthesized (task 0288).
+  assertAlarmDescriptionsFitCloudWatch(app);
 
   app.synth();
 }
