@@ -2,13 +2,21 @@
 id: "0280"
 title: "Route the protocol-lag watch into #stellar-prices-api-bot through the existing SNS → Chatbot path"
 type: FEATURE
-status: backlog
+status: canceled
 related_adr: []
 related_tasks: ["0098", "0056", "0277"]
 tags: [layer-infra, priority-low, effort-medium, observability, cloudwatch, ci]
 links:
   - "../active/0098_FEATURE_xdr-protocol-version-gap-ci-guard.md"
 history:
+  - date: "2026-11-26"
+    status: canceled
+    who: okarcz
+    reason: wont-do
+    note: >
+      Closed as won't-do by the operator. 0098's GitHub-issue delivery works,
+      needs no secrets and closes itself; moving the alert to Slack changes
+      only where it lands, at medium effort. See Outcome.
   - date: 2026-09-11
     status: backlog
     who: okarcz
@@ -82,3 +90,18 @@ a shipped one.
 - [ ] If option 2: the metric reflects the **deployed** binary, not the
       repository pin, and 0098's "reads the repo, not the binary" limit is
       struck.
+
+## Outcome (2026-11-26): closed as won't-do
+
+- **The current alert is enough.** `xdr-protocol-watch.yml` (from 0098) runs
+  daily from `master`, opens one tracking issue when the pinned protocol lags
+  mainnet, and GitHub emails on the failed run. It needs no credentials and no
+  approval, and the issue closes itself once the lag is gone.
+- **What this task would have added** is the same warning in
+  `#stellar-prices-api-bot`, through a new scheduled Lambda, a CloudWatch
+  metric and alarm, a CDK change and a deploy. That is a change of channel, not
+  a fix, and not worth the effort at low priority.
+- **Given up knowingly:** option 2 could have read the protocol version of the
+  **deployed** binary rather than the repository pin. 0098's "reads the repo,
+  not the binary" limit stays. No follow-up task is spawned for it.
+- Acceptance criteria above are left unchecked: none were attempted.
