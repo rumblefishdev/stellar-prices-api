@@ -1453,7 +1453,8 @@ export class ObservabilityStack extends cdk.Stack {
       topicName: `prices-${config.envName}-signups`,
       displayName: `prices-api ${config.envName} sign-ups`,
     });
-    const signupsChannelParam = config.opsAlarms.slack?.signupsChannelIdSsmParam;
+    const signupsChannelParam =
+      config.opsAlarms.slack?.signupsChannelIdSsmParam;
     if (config.opsAlarms.slack && signupsChannelParam) {
       new chatbot.SlackChannelConfiguration(this, 'SignupsSlackChannel', {
         slackChannelConfigurationName: `prices-${config.envName}-signups`,

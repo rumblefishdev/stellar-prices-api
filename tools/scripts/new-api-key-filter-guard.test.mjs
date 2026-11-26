@@ -19,7 +19,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (...p) => readFileSync(join(root, ...p), 'utf8');
 
 const stack = read('infra', 'src', 'lib', 'stacks', 'observability-stack.ts');
-const portal = read('packages', 'prices-api', 'src', 'portal', 'keys', 'mod.rs');
+const portal = read(
+  'packages',
+  'prices-api',
+  'src',
+  'portal',
+  'keys',
+  'mod.rs',
+);
 const hub = read('packages', 'prices-api', 'src', 'portal', 'hub', 'key.rs');
 
 const filter = stack.match(
@@ -28,7 +35,10 @@ const filter = stack.match(
 
 test('the filter matches the portal line and its created field', () => {
   assert.ok(filter, 'ApiHandlerNewApiKeyFilter not found');
-  assert.match(filter, /'\$\.fields\.message',\s*'=',\s*'portal issued an API key'/);
+  assert.match(
+    filter,
+    /'\$\.fields\.message',\s*'=',\s*'portal issued an API key'/,
+  );
   assert.match(filter, /booleanValue\('\$\.fields\.created', true\)/);
 });
 
