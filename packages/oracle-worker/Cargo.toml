@@ -2,6 +2,7 @@
 name = "oracle-worker"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Prices oracle worker — Reflector (SEP-40) via Soroban RPC into prices.oracle_prices (task 0039)"
 
 [lib]

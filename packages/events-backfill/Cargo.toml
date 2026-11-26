@@ -2,6 +2,7 @@
 name = "events-backfill"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Events-sourced AMM backfill — reprice historical AMM candles from BE's ClickHouse soroban_events (CH-to-CH), no ledger re-download (task 0097)"
 
 [[bin]]

@@ -268,5 +268,6 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
   URL.
 - **CORS on `/v1`** (task 0126) — no browser can call the data routes yet;
   the portal's API reference sends no requests for exactly this reason.
-- **`info.license`** (task 0155) — currently emitted empty; the licensing
-  decision is open.
+- ~~**`info.license`** (task 0155)~~ — the document names MIT, the repo's
+  `LICENSE` (#419), as `name` and SPDX `identifier`. Production serves it from
+  the first API deploy after task 0155.

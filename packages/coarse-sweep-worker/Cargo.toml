@@ -2,6 +2,7 @@
 name = "coarse-sweep-worker"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Coarse-table close_usd / volume_quote_usd sweep Lambda — EventBridge cron worker (task 0218)"
 
 # Its own crate, not a second bin on `enrichment-worker`, because the Lambda

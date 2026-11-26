@@ -2,6 +2,7 @@
 name = "prices-clickhouse"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "prices ClickHouse schema + connection layer (mirrors BE crates/db-clickhouse; task 0060)"
 
 [[bin]]

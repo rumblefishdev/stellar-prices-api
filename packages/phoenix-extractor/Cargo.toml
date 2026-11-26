@@ -2,6 +2,7 @@
 name = "phoenix-extractor"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Phoenix AMM swap extractor — XYK (8-event) and stable (6-event) grouping decoders"
 
 [features]

@@ -69,9 +69,8 @@ endpoints"_.
   `recommended-strict` ruleset, which promotes the recommended set's warnings
   to errors, plus `operation-4xx-response` and `no-invalid-schema-examples` at
   error severity ([`redocly.yaml`](../../redocly.yaml)). CI runs it in the
-  Rust job, on the bytes the API serves (`npm run openapi:lint`). One rule is
-  off: `info-license-strict`, because the API's licence is not decided yet
-  (task 0155). The two anonymous routes, `/health` and `/api-docs-json`, are
+  Rust job, on the bytes the API serves (`npm run openapi:lint`). No rule of
+  the set is off. The two anonymous routes, `/health` and `/api-docs-json`, are
   exempt from `operation-4xx-response` by name in `.redocly.lint-ignore.yaml`.
 - **The reference is not Swagger UI.** `https://sorobanscan.rumblefish.dev/prices-api/docs`
   is the portal's own renderer of the live document, in Swagger UI's layout:
