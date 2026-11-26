@@ -1413,6 +1413,91 @@ export class ObservabilityStack extends cdk.Stack {
       description: `api-handler portal-load-failed alarm for ${config.envName}`,
     });
 
+    // Task 0355 — a new API key, the sign-up signal. One line covers both
+    // ways in: `portal issued an API key` with a boolean `created`, logged by
+    // `keys::issue_for` (portal/keys/mod.rs), which the API hub also calls
+    // (portal/hub/key.rs) — the hub's own `hub issued an API key` line would
+    // count its keys twice. An adopted key (`created: false`) is not a
+    // sign-up. Counts keys, not people: a revoke and re-issue counts again,
+    // and so does our own testing on production. Who signed up is not in the
+    // line and must not be (privacy policy: the Discord username is for
+    // display only) — the key's Discord ID is in API Gateway when needed.
+    // Tied to the log line by `tools/scripts/new-api-key-filter-guard.test.mjs`;
+    // pattern checked with `aws logs test-metric-filter` against real lines.
+    const newApiKeyFilter = new logs.MetricFilter(
+      this,
+      'ApiHandlerNewApiKeyFilter',
+      {
+        logGroup: apiHandlerLogGroup,
+        filterPattern: logs.FilterPattern.all(
+          logs.FilterPattern.stringValue(
+            '$.fields.message',
+            '=',
+            'portal issued an API key',
+          ),
+          logs.FilterPattern.booleanValue('$.fields.created', true),
+        ),
+        metricNamespace: 'Prices/ApiHandler',
+        metricName: 'PortalNewApiKeys',
+        metricValue: '1',
+      },
+    );
+    const newApiKeysPerDay = newApiKeyFilter.metric({
+      statistic: 'Sum',
+      period: cdk.Duration.days(1),
+      label: 'new API keys',
+    });
+
+    // Its own topic, not ops-alarms: a sign-up is news, not an incident.
+    const signupsTopic = new sns.Topic(this, 'SignupsTopic', {
+      topicName: `prices-${config.envName}-signups`,
+      displayName: `prices-api ${config.envName} sign-ups`,
+    });
+    const signupsChannelParam = config.opsAlarms.slack?.signupsChannelIdSsmParam;
+    if (config.opsAlarms.slack && signupsChannelParam) {
+      new chatbot.SlackChannelConfiguration(this, 'SignupsSlackChannel', {
+        slackChannelConfigurationName: `prices-${config.envName}-signups`,
+        slackWorkspaceId: ssm.StringParameter.valueForStringParameter(
+          this,
+          config.opsAlarms.slack.workspaceIdSsmParam,
+        ),
+        slackChannelId: ssm.StringParameter.valueForStringParameter(
+          this,
+          signupsChannelParam,
+        ),
+        notificationTopics: [signupsTopic],
+        loggingLevel: chatbot.LoggingLevel.ERROR,
+        role: new iam.Role(this, 'SignupsChatbotRole', {
+          assumedBy: new iam.ServicePrincipal('chatbot.amazonaws.com'),
+          managedPolicies: [
+            iam.ManagedPolicy.fromAwsManagedPolicyName(
+              'CloudWatchReadOnlyAccess',
+            ),
+          ],
+        }),
+      });
+    }
+
+    // ponytail: one message per 5-minute window, so two sign-ups minutes
+    // apart post once; the dashboard row has the exact count.
+    const newApiKeyAlarm = new cloudwatch.Alarm(this, 'PortalNewApiKeyAlarm', {
+      // The `-portal-new-api-key` suffix is how verify-dashboard-synth.mjs
+      // tells this alarm from the strip's.
+      alarmName: `prices-${config.envName}-portal-new-api-key`,
+      metric: newApiKeyFilter.metric({
+        statistic: 'Sum',
+        period: cdk.Duration.minutes(5),
+      }),
+      alarmDescription: `New Prices API key issued (portal or API hub). Not an incident. Daily count: dashboard prices-${config.envName}-overview, "Sign-ups" row. Who: API Gateway key discord-<id>-key, created today; runbook docs/runbooks/manual-api-key-tier.md. Task 0355.`,
+      threshold: 1,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    newApiKeyAlarm.addAlarmAction(new cw_actions.SnsAction(signupsTopic));
+
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
     // may only write a minute once it has walked PAST the end of it; if the
     // whole iteration budget is spent inside ONE minute it can never do so, and
@@ -2581,9 +2666,11 @@ export class ObservabilityStack extends cdk.Stack {
     // no maintenance when one is added or removed. Collected BEFORE the imports
     // below so an imported alarm can never be double-counted.
     // -----------------------------------------------------------------
+    // The sign-up alarm (task 0355) is the one exception: news, not health.
     const stackOwnAlarms = this.node
       .findAll()
-      .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm);
+      .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm)
+      .filter((a) => a !== newApiKeyAlarm);
 
     // The remaining alarms in the account are the per-worker `-errors` alarms
     // created inside `createWorkerLambda` and owned by EventBridgeStack, which
@@ -2735,6 +2822,40 @@ export class ObservabilityStack extends cdk.Stack {
         right: [cacheHitRatioPct],
         width: 8,
         height: 6,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 1b — sign-ups (task 0355).
+    // -----------------------------------------------------------------
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## Sign-ups',
+          '',
+          'New API keys issued by the portal or the API hub (a revoke and re-issue counts again). Counted since task 0355 deployed; earlier keys are in API Gateway. Who: the key `discord-<id>-key`, runbook `docs/runbooks/manual-api-key-tier.md`.',
+        ].join('\n'),
+        width: 24,
+        height: 2,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'New API keys per day — 90 days',
+        left: [newApiKeysPerDay],
+        view: cloudwatch.GraphWidgetView.BAR,
+        width: 16,
+        height: 5,
+        start: '-P90D',
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'New API keys — last 30 days',
+        metrics: [newApiKeysPerDay],
+        width: 8,
+        height: 5,
+        start: '-P30D',
+        setPeriodToTimeRange: true,
       }),
     );
 
