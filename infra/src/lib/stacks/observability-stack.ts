@@ -1502,7 +1502,8 @@ export class ObservabilityStack extends cdk.Stack {
     // No alarm action: Chatbot would render the stock red ALARM card with
     // "Threshold Crossed: 1 out of the last 1 datapoints…", which reads as an
     // incident in the team's main channel. EventBridge sees the same state
-    // change and publishes a Chatbot custom notification instead.
+    // change and publishes a Chatbot custom notification instead: two plain
+    // lines for the whole team, no names (Decision 1) and no runbook pointers.
     new events.Rule(this, 'PortalNewApiKeyNotifyRule', {
       description: `Posts a sign-up message to Slack when a new API key is issued (${config.envName}, task 0355)`,
       eventPattern: {
@@ -1523,8 +1524,7 @@ export class ObservabilityStack extends cdk.Stack {
               title: ':tada: New Prices API key',
               description: [
                 'Someone just got a Prices API key (portal or API hub).',
-                `Daily count: <https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview|prices-${config.envName}-overview>, "Sign-ups" row.`,
-                'Who and which plan: the newest `discord-…-key` in API Gateway, `change-plan` skill.',
+                `<https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview|Sign-ups per day on the dashboard>`,
               ].join('\n'),
             },
           }),
