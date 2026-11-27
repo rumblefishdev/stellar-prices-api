@@ -1071,6 +1071,18 @@ export class ComputeStack extends cdk.Stack {
         // round-trip back to — the callback runs here, the page lives there.
         // Unset would mean a same-origin deployment; production is not one.
         PORTAL_WEB_ORIGIN: config.portalWebOrigin,
+        // The paid routes under `/x402/v1/` (task 0356). Without
+        // `X402_PAY_TO` the handler mounts none of them. An address, a network
+        // name and two prices: nothing here is a secret, and the service holds
+        // no key for the account.
+        ...(config.x402
+          ? {
+              X402_PAY_TO: config.x402.payTo,
+              X402_NETWORK: config.x402.network,
+              X402_PRICE_USD: config.x402.priceUsd,
+              X402_PRICE_HEAVY_USD: config.x402.priceHeavyUsd,
+            }
+          : {}),
       },
     });
 

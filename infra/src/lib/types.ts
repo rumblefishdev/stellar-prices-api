@@ -215,11 +215,33 @@ export interface EnvironmentConfig {
    */
   readonly portalWebOrigin: string;
 
+  /**
+   * The paid routes under `/x402/v1/` (task 0356): a caller with no API key
+   * pays USDC for one request. Omit and the environment has no paid routes,
+   * in the handler or on the gateway.
+   *
+   * While `network` is `stellar:testnet` the handler sells a sandbox only
+   * (`packages/prices-api/src/x402.rs`): testnet USDC is free and the data is
+   * pubnet's.
+   */
+  readonly x402?: {
+    /** The Stellar account that is paid. The service holds no key for it. */
+    readonly payTo: string;
+    readonly network: 'stellar:testnet' | 'stellar:pubnet';
+    /** USD for one `price` request, as a decimal: `"0.001"`. */
+    readonly priceUsd: string;
+    /** USD for one `ohlcv` or `batch` request. */
+    readonly priceHeavyUsd: string;
+  };
+
   // API handler Lambda (consumed by ComputeStack + ApiGatewayStack — task 0040)
 
   /**
    * Sizing for the single axum api-handler Lambda (ADR 0008 — one function
-   * serves all routes). §2.1: 256–512 MB, 15 s timeout.
+   * serves all routes). §2.1: 256–512 MB. The timeout is 29 s, API Gateway's
+   * own limit, since task 0356: a paid request waits for its settlement on
+   * Stellar, about 6 s, and a Lambda that gives up first leaves a buyer who
+   * paid without an answer.
    */
   readonly apiHandler: {
     readonly memoryMb: number;
@@ -957,6 +979,34 @@ export function validateConfig(config: EnvironmentConfig): void {
           `a self-service key must not be sized within an order of magnitude of the stage's default per-method limit, ` +
           `so the maximum is ${Math.floor(stageValue / MAX_PLAN_SHARE_OF_STAGE_DEFAULT)}`,
       );
+    }
+  }
+
+  // The handler checks these again and serves no paid route when one is
+  // wrong; failing the synth says so before a deploy does.
+  const x402 = config.x402;
+  if (x402 !== undefined) {
+    if (!/^[GM][A-Z2-7]{55,68}$/.test(x402.payTo ?? '')) {
+      errors.push(
+        `x402.payTo must be a Stellar account address (G… or M…), got: "${x402.payTo}"`,
+      );
+    }
+    if (!['stellar:testnet', 'stellar:pubnet'].includes(x402.network)) {
+      errors.push(
+        `x402.network must be "stellar:testnet" or "stellar:pubnet", got: "${x402.network}"`,
+      );
+    }
+    for (const field of ['priceUsd', 'priceHeavyUsd'] as const) {
+      const price = x402[field];
+      if (
+        typeof price !== 'string' ||
+        !/^\d+(\.\d{1,7})?$/.test(price) ||
+        Number(price) <= 0
+      ) {
+        errors.push(
+          `x402.${field} must be a positive decimal with at most 7 decimals, as a string, got: ${JSON.stringify(price)}`,
+        );
+      }
     }
   }
 
