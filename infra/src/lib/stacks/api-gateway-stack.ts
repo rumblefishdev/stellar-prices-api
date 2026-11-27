@@ -107,8 +107,11 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  * Keyless, so outside every usage plan, and each request is a billed Lambda
  * invocation whether or not it carries a payment: the throttle below is the
  * only limit the gateway puts on them. One bucket per verb, shared by every
- * caller, so it bounds the cost and the load, not fairness between callers;
- * that is Cloudflare's per-address limit.
+ * caller, so it bounds the cost and the load, not fairness between callers.
+ * Nothing gives that fairness yet: Cloudflare's per-address limit (100
+ * requests in 10 s) equals this bucket, and the `rumblefish.dev` host skips
+ * Cloudflare. One caller can fill the bucket and every buyer gets `429`;
+ * nothing is verified or settled, so no payment is lost.
  *
  * Caching is stated off, never left to the wildcard default: the gateway's
  * cache key does not hold the payment header, so a cached paid answer would

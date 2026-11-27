@@ -47,7 +47,7 @@ async fn main() {
     };
 
     // The paid routes (task 0356), when `X402_PAY_TO` is set. Nothing is read
-    // here: the facilitator is asked on the first paid request.
+    // here: the facilitator is asked on the first request to a paid route.
     let x402 = prices_api::x402::Settings::from_env();
     let app = prices_api::x402::mount(app(&config, state.clone()), x402.as_ref(), &config, state);
 

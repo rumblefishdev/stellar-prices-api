@@ -55,7 +55,7 @@ listed in its catalog. The keyed routes, API keys, plans and quotas do not chang
 - [ ] A paid request is answered with `PAYMENT-RESPONSE`; an answer with nothing in it, an
       off-scope request and any 4xx are not charged
 - [ ] On testnet the sandbox scope holds for every way to name an asset
-- [ ] The gateway serves the three methods without a key, uncached and throttled; no keyed
+- [ ] The gateway serves the paid routes without a key, uncached and throttled; no keyed
       method changes
 
 ## Implementation Notes
@@ -80,7 +80,7 @@ listed in its catalog. The keyed routes, API keys, plans and quotas do not chang
 1. **Wrappers over the keyed handlers**, behind the crate's payment layer, with the gate asked
    on the first paid request (`PaymentGate::lazy`).
 2. **No data, no charge**: `404 unpriced` for an unpriced asset, `404 no_data` for an empty
-   `ohlcv` or a batch that found nothing.
+   `ohlcv` or a batch with no priced asset (unknown and `unpriced` ones only).
 3. **The sandbox applies exactly when the network is testnet**, before any query, and only to
    an asset named as the list writes it.
 4. **The handler's timeout is 29 s**, for every route: a settlement takes about 6 s.
@@ -103,8 +103,11 @@ listed in its catalog. The keyed routes, API keys, plans and quotas do not chang
 9. **The paid routes are not in the OpenAPI document**, and `verify-openapi-routes.mjs` skips
    the prefix on the gateway side only. A buyer reads the terms from the `402` and the catalog.
 10. **No facilitator API key setting.** Our facilitator asks for one on pubnet only.
-11. **A wrong setting leaves the API running without paid routes**, logged as an error, where
-    a panic at cold start would take the keyed routes down with it.
+11. **A malformed setting leaves the API running without paid routes**, logged as an error,
+    where a panic at cold start would take the keyed routes down with it. Malformed means an
+    address, a price, a network or a URL that does not parse. A well-formed wrong value (a
+    mistyped facilitator host) leaves the routes in place, and each request to them is a
+    `5xx`.
 12. **`prices-production-api-5xx` counts the paid routes too.** While the facilitator cannot be
     read, each request to a paid route is a `5xx`, with or without a payment: five in five
     minutes page. The alarm's text says where to look.

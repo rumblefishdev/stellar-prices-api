@@ -115,8 +115,9 @@ impl Settings {
 
 /// `app` with the paid routes, when there are settings and they are valid.
 ///
-/// A wrong setting (an address, a price, the network, the facilitator's URL) is
-/// logged and leaves `app` as it was: the keyed routes must start whatever is
+/// A malformed setting (an address, a price, the network, a facilitator URL that
+/// does not parse) is logged and leaves `app` as it was; a well-formed wrong
+/// one mounts the routes, which then answer `5xx`. The keyed routes must start whatever is
 /// wrong here.
 pub fn mount(
     app: Router,
@@ -191,7 +192,7 @@ fn routes(
     let ohlcv_listing = Listing::query(json!({ "timeframe": "24h" })).output(json!({
         "asset": "native",
         "granularity": "15m",
-        "base_currency": "usd",
+        "base_currency": "USD",
         "data": [{
             "timestamp": "2026-11-27T12:00:00Z",
             "open": "0.2729",
