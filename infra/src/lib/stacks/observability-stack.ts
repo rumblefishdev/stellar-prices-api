@@ -2,6 +2,8 @@ import * as cdk from 'aws-cdk-lib';
 import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -1497,7 +1499,38 @@ export class ObservabilityStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    newApiKeyAlarm.addAlarmAction(new cw_actions.SnsAction(signupsTopic));
+    // No alarm action: Chatbot would render the stock red ALARM card with
+    // "Threshold Crossed: 1 out of the last 1 datapoints…", which reads as an
+    // incident in the team's main channel. EventBridge sees the same state
+    // change and publishes a Chatbot custom notification instead.
+    new events.Rule(this, 'PortalNewApiKeyNotifyRule', {
+      description: `Posts a sign-up message to Slack when a new API key is issued (${config.envName}, task 0355)`,
+      eventPattern: {
+        source: ['aws.cloudwatch'],
+        detailType: ['CloudWatch Alarm State Change'],
+        detail: {
+          alarmName: [newApiKeyAlarm.alarmName],
+          state: { value: ['ALARM'] },
+        },
+      },
+      targets: [
+        new targets.SnsTopic(signupsTopic, {
+          message: events.RuleTargetInput.fromObject({
+            version: '1.0',
+            source: 'custom',
+            content: {
+              textType: 'client-markdown',
+              title: ':tada: New Prices API key',
+              description: [
+                'Someone just got a Prices API key (portal or API hub).',
+                `Daily count: <https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview|prices-${config.envName}-overview>, "Sign-ups" row.`,
+                'Who and which plan: the newest `discord-…-key` in API Gateway, `change-plan` skill.',
+              ].join('\n'),
+            },
+          }),
+        }),
+      ],
+    });
 
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
     // may only write a minute once it has walked PAST the end of it; if the
@@ -2845,7 +2878,6 @@ export class ObservabilityStack extends cdk.Stack {
       new cloudwatch.GraphWidget({
         title: 'New API keys per day — 90 days',
         left: [newApiKeysPerDay],
-        view: cloudwatch.GraphWidgetView.BAR,
         width: 16,
         height: 5,
         start: '-P90D',

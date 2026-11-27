@@ -536,8 +536,9 @@ export interface EnvironmentConfig {
       readonly channelIdSsmParam: string;
       /**
        * Optional channel for the sign-ups topic (task 0355): the team's main
-       * channel, not the ops one, one message per new API key. Same
-       * workspace; omit to leave sign-ups on the dashboard only.
+       * channel, not the ops one. A message when a key is issued; several
+       * within minutes post once. Same workspace; omit to leave sign-ups on
+       * the dashboard only.
        */
       readonly signupsChannelIdSsmParam?: string;
     };

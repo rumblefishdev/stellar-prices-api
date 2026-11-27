@@ -53,3 +53,17 @@ test('the hub issues through issue_for, so the portal line covers it', () => {
   assert.match(hub, /keys::issue_for\(/);
   assert.doesNotMatch(filter, /hub issued an API key/);
 });
+
+// The message is a Chatbot custom notification from an EventBridge rule, not
+// the alarm's own SNS action (the stock red ALARM card), and it goes to the
+// sign-ups topic, never ops-alarms.
+test('the sign-up message is a custom notification on the sign-ups topic', () => {
+  const rule = stack.match(
+    /new events\.Rule\(this, 'PortalNewApiKeyNotifyRule',([\s\S]*?)\n {4}\}\);/,
+  )?.[1];
+  assert.ok(rule, 'PortalNewApiKeyNotifyRule not found');
+  assert.match(rule, /alarmName: \[newApiKeyAlarm\.alarmName\]/);
+  assert.match(rule, /new targets\.SnsTopic\(signupsTopic,/);
+  assert.match(rule, /source: 'custom'/);
+  assert.doesNotMatch(stack, /newApiKeyAlarm\.add(Alarm|Ok)Action\(/);
+});

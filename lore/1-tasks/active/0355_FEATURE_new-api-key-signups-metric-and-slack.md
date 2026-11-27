@@ -62,13 +62,22 @@ portal-load-failed signal (0249, 0311) works.
    incident. `verify-dashboard-synth.mjs` counts it out by name.
 5. **No history.** A metric filter counts from its deploy on; the keys issued
    before stay in API Gateway (createdDate).
+6. **A custom message, not the alarm card (2026-11-27).** The alarm has no
+   action: Chatbot's stock card is a red ALARM with "Threshold Crossed: 1 out
+   of the last 1 datapoints…", an incident in the team's main channel. An
+   EventBridge rule on the alarm's move to ALARM publishes a Chatbot custom
+   notification to the sign-ups topic instead: ":tada: New Prices API key",
+   a link to the dashboard row, and where to look for who and which plan. No
+   Lambda. The alarm only feeds the rule; several keys within minutes still
+   post once.
 
 ## Before deploying Observability
 
 1. Invite the AWS app to the team's main channel (`/invite @Amazon Q` or
    `@AWS`, whichever the workspace shows; it is already in
    `#stellar-prices-api-bot`).
-2. Put that channel's ID in SSM, shared account, eu-central-1:
+2. Put that channel's ID in SSM, shared account, eu-central-1 (done
+   2026-11-27, `C0AN59N4J8M`):
    `aws ssm put-parameter --name /prices/production/slack-signups-channel-id --type String --value <channel-id>`
 3. Deploy Observability. Then issue a test key (or wait for a real one) and
    check the message lands.
@@ -80,9 +89,10 @@ portal-load-failed signal (0249, 0311) works.
       `aws logs test-metric-filter` on real production lines.
 - [ ] The overview dashboard has a sign-ups row: per day over 90 days, and the
       30-day total.
-- [ ] A new key posts to the team's main Slack channel; the ops channel
-      stays quiet.
+- [ ] A new key posts the custom sign-up message to the team's main Slack
+      channel; the ops channel stays quiet.
 - [x] The alarm is not in the alarm strip; `verify-dashboard-synth.mjs` passes
       (Observability synthesized alone: strip 80 own + 10 imported, unchanged).
-- [x] A guard test fails if the log line or the filter is reworded alone, or
-      if the hub stops issuing through `issue_for`.
+- [x] A guard test fails if the log line or the filter is reworded alone, if
+      the hub stops issuing through `issue_for`, or if the message moves back
+      to the alarm's own action or off the sign-ups topic.
