@@ -2,7 +2,7 @@
 id: "0340"
 title: "Serve the Prices API at prices-api.sorobanscan.com, then move the portal to sorobanscan.com"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0339", "0326", "0194", "0186", "0318"]
 tags: ["hosting", "portal", "domains", "priority-medium", "effort-medium"]
@@ -23,6 +23,13 @@ history:
     note: >
       Started: Step 1 (the second custom domain) on
       feat/0340_prices-api-on-prices-api-sorobanscan-com.
+  - date: 2026-11-24
+    status: completed
+    who: okarcz
+    note: >
+      Archived with the author's OK (2026-11-24 board triage). Steps 1-5 done,
+      all ACs met. Retiring the old host prices-api.sorobanscan.rumblefish.dev
+      moved to 0354.
 ---
 
 # Serve the Prices API at prices-api.sorobanscan.com, then move the portal to sorobanscan.com
@@ -35,7 +42,11 @@ The Prices API gets a second host, `prices-api.sorobanscan.com`, beside
 in one window with the backend's own config. The names were agreed by the team
 on 2026-11-03 (explorer task 0659, step 6).
 
-## Status: Active
+## Status: Completed (2026-11-24)
+
+All ACs met. Retiring the old host `prices-api.sorobanscan.rumblefish.dev`
+moved to [[0354]]: the cache verification and the k6 test need the new target
+first.
 
 **Current state:** Steps 1–4 done (2026-11-06). The portal runs on
 `https://sorobanscan.com/api/prices-api/` against `prices-api.sorobanscan.com`,

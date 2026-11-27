@@ -2,7 +2,8 @@
 id: "0253"
 title: "Timeframe::All's default_granularity arm is unreachable — and the value it would return diverges from the computed one in 2029"
 type: CHORE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0119", "0246"]
 tags: ["priority-low", "effort-small", "api", "read-surface", "dead-code"]
@@ -10,6 +11,17 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../packages/prices-api/src/assets/handlers.rs"
 history:
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: >
+      Implemented on chore/0253_… (f6998534): default_granularity returns
+      Option, None for all; resolve_granularity + 3 unit tests pin the
+      computed branch. No response change. PR to follow.
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: "Activated for implementation (quick-fix queue)."
   - date: 2026-09-02
     status: backlog
     who: okarcz
@@ -100,15 +112,56 @@ the arm gets a silent behaviour change with a three-year fuse.
 
 ## Acceptance Criteria
 
-- [ ] The reachability claim is verified workspace-wide, not asserted — every
+- [x] The reachability claim is verified workspace-wide, not asserted — every
       caller of `default_granularity` enumerated, tests included
-- [ ] A decision is recorded (delete vs. keep-and-document) with its reason
-- [ ] A test pins that `timeframe=all` with no `?granularity` resolves through
+      ✅ 2026-11-25: `grep -rn default_granularity --include=*.rs` over the whole
+      repo finds the definition and one call, `handlers.rs:579`, behind the
+      `!timeframe.is_all()` guard. No test, no other crate, no OpenAPI path.
+      The arm was neither reachable nor tested.
+- [x] A decision is recorded (delete vs. keep-and-document) with its reason
+      ✅ Deleted — see Design Decisions.
+- [x] A test pins that `timeframe=all` with no `?granularity` resolves through
       `finest_for_span`, so the guard cannot be removed silently
-- [ ] If the arm is kept, its shadowing is stated in a comment at the arm itself,
+      ✅ `handlers.rs` `tests::granularity::all_takes_the_computed_grain_not_a_fixed_default`:
+      `1d` at today's span, `1w` at 5000 days (the 2029-06-08 crossover).
+- [x] If the arm is kept, its shadowing is stated in a comment at the arm itself,
       not only at the call site
-- [ ] No change to any response a caller sees today — this is a clarity and
+      ✅ N/A: the arm was deleted. The doc comment on `default_granularity`
+      says why `all` returns `None`.
+- [x] No change to any response a caller sees today — this is a clarity and
       test-coverage change, and any behaviour change would be out of scope
+      ✅ Same resolution order as before; 355/355 `prices-api` unit tests pass.
+
+## Implementation Notes
+
+Branch `chore/0253_timeframe-all-default-granularity-arm-is-unreachable`,
+commit `f6998534`.
+
+- `queries_ch.rs`: `Timeframe::default_granularity` returns
+  `Option<Granularity>`, `None` for `All` — the same shape as
+  `Timeframe::seconds()`, which already returns `None` for `all`.
+- `handlers.rs`: the inline `match` with the `!timeframe.is_all()` guard is
+  replaced by `resolve_granularity(requested, explicit_window, timeframe, span)`:
+  the caller's grain, else the fixed default when no window was sent, else
+  `finest_for_span(span, OHLCV_MAX_POINTS)`.
+- Three unit tests in `handlers.rs` `tests::granularity`: `all` computed
+  (incl. the 2029 step to `1w`), fixed timeframes keep their default, an
+  explicit window or `?granularity` wins.
+- No existing test changed. clippy and rustfmt clean.
+
+## Design Decisions
+
+### Emerged
+
+1. **Delete the arm, encode it in the type.** `Option` instead of an
+   `unreachable!` or a kept-and-commented arm: `all` really has no fixed
+   default, so `None` states the fact and the compiler stops any caller from
+   reading one. A kept arm would still name `1d`, which is wrong from
+   2029-06-08; an `unreachable!` would only fail at run time.
+2. **Extract `resolve_granularity`.** The handler is async and needs
+   ClickHouse; a pure function lets the guard be pinned by a unit test with no
+   database. The `is_all()` guard is no longer needed there; `is_all()` stays
+   for the backfill note further down the handler.
 
 ## Out of scope
 

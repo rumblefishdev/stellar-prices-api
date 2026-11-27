@@ -2,7 +2,7 @@
 id: "0323"
 title: "coverage-sweep-unclassified stays in ALARM for 7 days after the residual is triaged — latch it until a clean run instead"
 type: FEATURE
-status: active
+status: completed
 assignee: stkrolikiewicz
 related_adr: []
 related_tasks: ["0100", "0214", "0294", "0296"]
@@ -13,6 +13,15 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../docs/runbooks/0100-coverage-sweep-triage.md"
 history:
+  - date: 2026-11-24
+    status: completed
+    who: okarcz
+    note: >
+      Archived with the author's OK (2026-11-24 board triage). #376 merged
+      2026-09-30; the latch is live and the alarm returned to OK on
+      2026-11-02. It has been in ALARM again since 2026-11-09 on a real
+      residual (16 unclassified emitters, 2091 events), triaged in 0353. No
+      review by akot is recorded.
   - date: "2026-09-30"
     status: active
     who: stkrolikiewicz
@@ -101,11 +110,14 @@ with him. The new alarms need their publishers live first, or they sit in
 
 ## Acceptance Criteria
 
-- [ ] A clean run yields `0` for both unclassified metrics (unit test)
-- [ ] Synth: the alarm is `Maximum`, 3600 s, 1 of 1, `ignore`
-- [ ] Code comments, alarm description and runbook §2, §3 and §4.5 describe
+- [x] A clean run yields `0` for both unclassified metrics (unit test)
+- [x] Synth: the alarm is `Maximum`, 3600 s, 1 of 1, `ignore`
+- [x] Code comments, alarm description and runbook §2, §3 and §4.5 describe
       the latch-until-clean-run behaviour; no text still promises the 7-day
       return to OK
-- [ ] Production after deploy + one invoke: `coverage sweep complete` with
+- [x] Production after deploy + one invoke: `coverage sweep complete` with
       `unclassified=0`, a `0` datapoint in `Prices/Coverage`, alarm OK
-- [ ] Reviewed by the [[0100]] owner (akot)
+      (#376; the latch returned the alarm to OK on 2026-11-02. Back in ALARM
+      since 2026-11-09 on a real residual, triaged in 0353)
+- [ ] Reviewed by the [[0100]] owner (akot): no review recorded on #376;
+      closed without it on the author's call, 2026-11-24

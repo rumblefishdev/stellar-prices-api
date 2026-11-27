@@ -2,7 +2,7 @@
 id: "0332"
 title: "USD candles take high/low from USDT-quoted markets, whose USD rate we cannot measure — set the extremes from USDC- and XLM-quoted markets only"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: ["0011", "0287"]
 related_tasks: ["0170", "0229", "0236", "0172", "0212", "0286", "0331"]
@@ -14,6 +14,13 @@ links:
   - "../../../2-adrs/0011_base-currency-is-a-denomination-not-a-pair-filter.md"
   - "../../../../web/portal/public/openapi.json"
 history:
+  - date: 2026-11-24
+    status: completed
+    who: okarcz
+    note: >
+      Archived with the owner's OK (2026-11-24 board triage). #402 merged
+      2026-10-14 and shipped in prod-2026-11-19 and prod-2026-11-23. The
+      client notice is not an AC; no record shows it was sent.
   - date: "2026-10-14"
     status: active
     who: akot
@@ -56,9 +63,11 @@ volume.
 - Measured on prod: [R-step-1-measured-on-production](notes/R-step-1-measured-on-production.md)
 - Client notice draft: [G-client-notice-usd-candle-prices](notes/G-client-notice-usd-candle-prices.md)
 
-## Status: Active
+## Status: Completed (2026-11-24)
 
-**Current state:** PR #402 open, not merged; not deployed. Notice drafted, not sent.
+**Current state (2026-11-24):** completed. #402 merged 2026-10-14 and shipped in
+`prod-2026-11-19` and `prod-2026-11-23`. The client notice (not an AC) was drafted;
+no record shows it was sent.
 Oskar's review (2026-10-14) addressed on the branch: the means follow the same
 markets as the prices; a USDC/XLM leg that formed a price but has no USD value
 yet leaves the bucket unpriced (0 such buckets in the stored 1d history); an

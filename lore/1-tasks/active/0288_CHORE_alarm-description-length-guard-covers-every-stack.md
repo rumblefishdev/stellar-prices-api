@@ -2,7 +2,8 @@
 id: "0288"
 title: "The 1024-character alarm-description synth guard only walks ObservabilityStack — the ten -errors alarms in EventBridgeStack can exceed the CloudWatch cap and fail mid-deploy"
 type: CHORE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0223", "0243"]
 tags: [layer-infra, priority-low, effort-small, observability, cloudwatch, alarms]
@@ -10,6 +11,17 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../infra/src/lib/lambda-baseline.ts"
 history:
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: >
+      Implemented on chore/0288_… (14a3953d): the guard moves to
+      alarm-guards.ts and runs over the whole App in createApp. Negative test
+      fails synth with the guard's message; templates unchanged. PR to follow.
+  - date: "2026-11-25"
+    status: active
+    who: okarcz
+    note: "Activated for implementation (quick-fix queue; Stan OK'd the handover 2026-11-24)."
   - date: 2026-09-15
     status: backlog
     who: stkrolikiewicz
@@ -54,10 +66,56 @@ after the deploy has started.
 
 ## Acceptance Criteria
 
-- [ ] Every `AWS::CloudWatch::Alarm` in every production stack is length-checked
+- [x] Every `AWS::CloudWatch::Alarm` in every production stack is length-checked
       at synth.
-- [ ] A deliberately over-long `-errors` description fails synth with the
+      ✅ 2026-11-25: the guard runs once over the whole `App` in `createApp`
+      (`infra/src/lib/app.ts`), before `app.synth()`. Production synth: 90 alarms
+      — EventBridge 10 (longest 629), Observability 80 (longest 1018); no other
+      stack builds one. A stack added later is covered without a new call.
+- [x] A deliberately over-long `-errors` description fails synth with the
       guard's own message, recorded in this task.
+      ✅ Prefixed the asset-discovery worker's description with
+      `'NEGATIVE-TEST-0288 '.repeat(60)` (local only, reverted), built, synthed:
+
+      ```
+      Error: 1 CloudWatch alarm description(s) exceed the 1024-character API limit and would fail mid-deploy:
+        prices-production-asset-discovery-errors — 1491 chars
+      Shorten the description(s); the limit is enforced by CloudWatch, not by synth.
+      node dist/bin/production.js: Subprocess exited with error 1
+      ```
+
+      Control: the same edit on `develop`'s code synthesizes successfully, with
+      the 1491-char description in the EventBridge template — the gap was real.
+
+## Implementation Notes
+
+Branch `chore/0288_alarm-description-length-guard-covers-every-stack`, commit `14a3953d`.
+
+- New `infra/src/lib/alarm-guards.ts`: `assertAlarmDescriptionsFitCloudWatch`,
+  moved verbatim from `observability-stack.ts` (doc comment updated, same error
+  message), now exported.
+- `observability-stack.ts`: the private copy and its call removed; a comment
+  points to `app.ts`.
+- `app.ts`: `assertAlarmDescriptionsFitCloudWatch(app)` before `app.synth()`.
+- All five production templates are byte-identical before and after. `nx test`
+  for the CDK project and `npm run infra:verify-dashboard` pass.
+
+## Design Decisions
+
+### Emerged
+
+1. **One call over the whole App, not one per stack.** The task offered both.
+   Per-stack calls must be remembered in every new stack — the same gap again.
+   The App-level walk covers every stack by construction. `cicd-app.ts` builds
+   no alarms, so it does not call it.
+2. **No per-stack fallback in ObservabilityStack.** Production synth always goes
+   through `createApp`; keeping a second call would only duplicate the walk.
+
+## Issues Encountered
+
+- During the control run a stale `infra/dist/lib/alarm-guards.js` was deleted
+  with `rm -f` instead of `mv … .trash/` (repo rule). It was a generated build
+  output, recreated by the next build; noted for the record.
 
 ## Adjacent observation — the lore validator has the same shape of defect
 

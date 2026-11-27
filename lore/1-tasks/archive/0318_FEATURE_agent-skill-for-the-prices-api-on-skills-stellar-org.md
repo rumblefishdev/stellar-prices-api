@@ -2,7 +2,7 @@
 id: "0318"
 title: "Agent skill for the prices API, listed on skills.stellar.org"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0315", "0316"]
 tags: [docs, marketing, agents, epic-self-service-onboarding, priority-medium, effort-small]
@@ -11,6 +11,13 @@ links:
   - "https://github.com/stellar/stellar-dev-skill/blob/main/site/src/data/skills.ts"
   - "../../../skills/stellar-prices-api/SKILL.md"
 history:
+  - date: 2026-11-24
+    status: completed
+    who: okarcz
+    note: >
+      Last AC met: stellar/stellar-dev-skill#141 merged 2026-10-12 and the
+      card is listed on skills.stellar.org. Archived with the author's OK
+      (2026-11-24 board triage).
   - date: "2026-09-29"
     status: active
     who: stkrolikiewicz
@@ -24,9 +31,12 @@ history:
 Write one `SKILL.md` that teaches an AI agent to call the prices API, and list it
 in the "Community skills" section of https://skills.stellar.org.
 
-## Status: Active
+## Status: Completed (2026-11-24)
 
-**Current state:** the Stellar PR
+stellar/stellar-dev-skill#141 merged 2026-10-12; the card is listed on
+skills.stellar.org. The text below is the state as of 2026-09-30.
+
+**Earlier state:** the Stellar PR
 [stellar/stellar-dev-skill#141](https://github.com/stellar/stellar-dev-skill/pull/141)
 was opened 2026-09-30 from the fork `stkrolikiewicz/stellar-dev-skill`. It adds
 the card (`copyValue` on `master`) and the Data Indexing catalog entry, and it is
@@ -353,7 +363,8 @@ PR #368 was merged to `develop` on 2026-09-30.
 - [x] `skills/stellar-prices-api/SKILL.md` merged to `develop` (#368, 2026-09-30)
 - [x] Every curl in it verified against production
 - [x] Hosting decided and `copyValue` resolves to raw markdown
-- [ ] Entry merged into `stellar/stellar-dev-skill` and visible on skills.stellar.org
+- [x] Entry merged into `stellar/stellar-dev-skill` and visible on skills.stellar.org
+      (stellar/stellar-dev-skill#141, merged 2026-10-12)
 
 ## Notes
 

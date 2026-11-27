@@ -1,10 +1,10 @@
 ---
 id: "0047"
-title: "Cross-tenant throughput verification — can shared Hetzner CH+Caddy absorb combined BE + prices-api read/write load?"
+title: "Cross-tenant write contention on shared Hetzner CH — do prices-api writes and BE's read API hold up under combined load? (reads measured in 0293)"
 type: RESEARCH
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0045", "0046", "0044"]
+related_tasks: ["0045", "0046", "0044", "0293"]
 tags: [layer-research, priority-low, effort-medium, hetzner, clickhouse, throughput, capacity, cross-team, deferred, phase-post-deploy]
 links:
   - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
@@ -78,16 +78,41 @@ history:
       exceptions). The explorer's indexer slowed for ~2 min and one ledger was
       indexed ~11 min late. Measured BEFORE the month-long backfill starting
       2026-09-21.
+  - date: "2026-11-26"
+    status: backlog
+    who: okarcz
+    note: >
+      Scope narrowed by the operator, not closed. [[0293]] measured prices-api
+      READS against the explorer's live ingestion (500 req/s fine, joint
+      collapse at ~900–1000 req/s; the gateway caps reads at 200 req/s per
+      method), so the read side is answered. What stays: prices-api WRITES
+      competing with BE, and BE's read API under combined load. The original
+      five-step plan is superseded; see "Scope (2026-11-26)".
 ---
 
 # Cross-tenant throughput verification on shared Hetzner CH
 
-> **Status (2026-06-26): DEFERRED — not a blocker.** ADR 0007 is already
-> accepted and the prices.* DB is already live + isolation-proven on the
-> shared Hetzner CH (0052/0063). There is no real combined load to verify
-> until the full system is built and deployed, so this runs as part of that
-> rollout, **coordinated with the BE team** — not as a gate on 0038/0040.
-> Kept open for that later joint verification.
+## Scope (2026-11-26) — narrowed to writes and BE's read API
+
+**Answered, not repeated:** prices-api **read** load against the explorer's
+live ingestion — measured in [[0293]] (table below). Normal read traffic is
+capped by API Gateway at 200 req/s per method, under the 500 req/s that held
+with no effect on BE.
+
+**Still open, and the whole of this task now:**
+
+1. **prices-api writes vs BE.** Ledger-processor inserts, the MV chain
+   (`price_ohlcv_1m → … → 1M`), the coarse-rollup sweep and the other workers,
+   measured while BE ingests. From `system.query_log` / `system.metric_log` on
+   ch-prod-01: our insert and MV CPU/IO share, BE ingestion latency, merge
+   pressure. Include a window with a backfill or re-ingest running, since that
+   is our heaviest write load.
+2. **BE's read API under combined load.** `api_reader` was silent in every
+   0293 run. Coordinate with BE to drive (or wait for) real explorer read
+   traffic while our writes and reads run, and record its latency.
+
+The "Research plan" further down is the original May plan, kept for history;
+where it disagrees with this section, this section wins.
 
 ## Summary
 
@@ -233,16 +258,16 @@ Output one of three:
 
 ## Acceptance Criteria
 
-- [ ] `notes/G-throughput-verification.md` — single report with:
-  BE current load (from `system.query_log` etc.), prices-api projected
-  load model (per §2), per-subsystem headroom table (§3), load-test
-  results if available (§4), color-coded recommendation (§5).
-- [ ] If GREEN or YELLOW: list concrete tuning asks for BE
-  (Caddy / CH settings), cross-link from task 0045's agreement record.
-- [ ] If RED: spawn ADR amendment + task to scope the sidecar-CH
-  build-out. Update 0045's agreement record.
-- [ ] Reproducible: the analytical model and any load-test setup
-  documented so another engineer can re-run after BE 0227 ships.
+- [ ] `notes/G-write-contention.md`: prices-api write load (inserts, MV chain,
+      rollup sweep) and its CPU/IO share on ch-prod-01, measured alongside BE
+      ingestion, including at least one window with a backfill or re-ingest
+      running.
+- [ ] BE's read API (`api_reader`) latency recorded under combined load,
+      coordinated with the BE team.
+- [ ] A green / yellow / red verdict as in §5, with 0293's read numbers cited
+      for the read side rather than re-measured.
+- [ ] If yellow or red: concrete tuning asks for BE, or a spawned task scoping
+      the sidecar-CH fallback.
 
 ## Blocked on
 

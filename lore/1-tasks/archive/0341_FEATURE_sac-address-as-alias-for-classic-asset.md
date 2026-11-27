@@ -2,7 +2,7 @@
 id: "0341"
 title: "Accept a classic asset's SAC C… address as an alias — today it answers 404"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0242", "0139"]
 tags: [layer-backend, api, identity, external-request, priority-medium, effort-small]
@@ -12,6 +12,23 @@ links:
   - "../../../packages/prices-api/src/assets/handlers.rs"
   - "../../../packages/prices-ingest-core/src/writer.rs"
 history:
+  - date: "2026-11-25"
+    status: completed
+    who: okarcz
+    note: >
+      Closed as done by 0242 D5; no new code. #416 answered and closed
+      (issuecomment-7156860371). Direct message to Dominik drafted for the
+      operator to send.
+  - date: "2026-11-25"
+    status: backlog
+    who: okarcz
+    note: >
+      Verified on production: done by 0242 D5 (3de11181), live since the
+      0242 Compute deploy of 2026-11-05 11:33 UTC (develop 43a28399, 0242
+      runbook §4e), before #416 was filed. Authenticated GET /v1/assets on
+      prices-api.sorobanscan.com returns the same asset for XLM's SAC and
+      `native`, and for USDC's SAC and USDC:GA5Z…. No new code. Left: tell
+      Dominik, close #416.
   - date: "2026-11-10"
     status: backlog
     who: mkowalski
@@ -90,8 +107,13 @@ wraps, so both names return the same data.
 
 ## Acceptance Criteria
 
-- [ ] `GET /assets/{SAC C…}` returns the same data as `GET /assets/{CODE:ISSUER}` for a held classic asset (incl. USDC, XLM's SAC → `native`)
-- [ ] A pure Soroban token and an unknown `C…` behave as before
-- [ ] OpenAPI docs no longer say SAC addresses answer `404`
-- [ ] Integration test covering at least one non-USDC SAC
-- [ ] Dominik (Inferera) informed; GH #416 closed
+- [x] `GET /assets/{SAC C…}` returns the same data as `GET /assets/{CODE:ISSUER}` for a held classic asset (incl. USDC, XLM's SAC → `native`)
+      ✅ 2026-11-25 on prod: `CAS3J7…OWMA` → `native`, `CCW67T…MI75` → `USDC:GA5Z…KZVN`, bodies identical to the classic lookups.
+- [x] A pure Soroban token and an unknown `C…` behave as before
+      ✅ `resolve_sac_alias` passes a `C…` with no classic match through unchanged (0242 D5); read in code, not exercised live.
+- [x] OpenAPI docs no longer say SAC addresses answer `404`
+      ✅ Released `assets/handlers.rs`: "accepted as an alias" on the price, asset and OHLCV routes.
+- [x] Integration test covering at least one non-USDC SAC
+      ✅ `tests/endpoints_it.rs`: XLM and XCR, incl. the pre-heal duplicate.
+- [x] Dominik (Inferera) informed; GH #416 closed
+      ✅ 2026-11-25: #416 answered (thanks Dominik, live since 2026-11-05) and closed as completed. A direct message to Dominik was drafted for the operator to send.
