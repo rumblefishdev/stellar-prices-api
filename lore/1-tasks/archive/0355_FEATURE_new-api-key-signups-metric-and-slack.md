@@ -2,7 +2,7 @@
 id: "0355"
 title: "New API keys: a metric, a dashboard row and a Slack message per sign-up"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0187", "0348", "0249"]
 tags: [layer-infra, priority-medium, effort-small]
@@ -13,6 +13,13 @@ history:
     note: >
       Asked for while answering an SCF survey question: who signed up and on
       which plan took a manual walk over API Gateway keys and Discord profiles.
+  - date: 2026-11-27
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      #436 merged to develop (14e30afd), released in #438 (prod-2026-11-27).
+      A test key on our own account (bkh7633eve) posted its message to the
+      team's main channel and counted 1 in PortalNewApiKeys.
 ---
 
 # New API keys: a metric, a dashboard row and a Slack message per sign-up
@@ -87,25 +94,34 @@ portal-load-failed signal (0249, 0311) works.
 
 ## Before deploying Observability
 
+All done 2026-11-27; kept for a new environment or a channel move.
+
 1. Invite the AWS app to the team's main channel (`/invite @Amazon Q` or
    `@AWS`, whichever the workspace shows; it is already in
    `#stellar-prices-api-bot`).
-2. Put that channel's ID in SSM, shared account, eu-central-1 (done
-   2026-11-27, `C0AN59N4J8M`):
+2. Put that channel's ID in SSM, shared account, eu-central-1 (production:
+   `C0AN59N4J8M`):
    `aws ssm put-parameter --name /prices/production/slack-signups-channel-id --type String --value <channel-id>`
 3. Deploy Observability. Then issue a test key (or wait for a real one) and
    check the message lands.
+
+To test without deleting anything: a test account whose key was revoked in
+an earlier month can take a new one in the portal; the re-issue is a
+`created: true` key like any sign-up. Revoking in the portal today blocks a
+new key until the 1st of next month.
 
 ## Acceptance
 
 - [x] `PortalNewApiKeys` (namespace `Prices/ApiHandler`) counts new keys from
       the portal and the hub once each: pattern checked with
       `aws logs test-metric-filter` on real production lines.
-- [ ] The overview dashboard has a sign-ups row: per day over 90 days, and the
-      30-day total.
-- [ ] A new key posts one message with its details to the team's main Slack
-      channel; the ops channel stays quiet. (The handler run locally on a
-      real key with SNS stubbed gave the expected message, 2026-11-27.)
+- [x] The overview dashboard has a sign-ups row: per day over 90 days, and the
+      30-day total (live on `prices-production-overview`, 2026-11-27).
+- [x] A new key posts one message with its details to the team's main Slack
+      channel; the ops channel stays quiet. Checked on production 2026-11-27:
+      the portal re-issued our test account's key (1556635043840135248, its
+      old key revoked 2026-10-05 and past the cap), the message landed, the
+      notifier logged no errors.
 - [x] The alarm strip is unchanged; `verify-dashboard-synth.mjs` passes
       (Observability synthesized alone: strip 80 own + 10 imported).
 - [x] A guard test fails if the log line or the pattern is reworded alone, if
