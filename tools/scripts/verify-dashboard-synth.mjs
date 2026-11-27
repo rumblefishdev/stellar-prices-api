@@ -295,11 +295,8 @@ if (opsAlarms) {
 }
 
 // -- 4. the alarm strip is complete and derived -----------------------------
-// The sign-up alarm (task 0355) is kept out of the strip on purpose.
 const ownAlarms = Object.values(template.Resources ?? {}).filter(
-  (r) =>
-    r.Type === 'AWS::CloudWatch::Alarm' &&
-    !String(r.Properties?.AlarmName ?? '').endsWith('-portal-new-api-key'),
+  (r) => r.Type === 'AWS::CloudWatch::Alarm',
 ).length;
 // Per-worker `-errors` alarms are owned by EventBridgeStack and imported into
 // the strip by ARN, so they are not resources in this template. Their count

@@ -1,10 +1,10 @@
-// The sign-up metric (task 0355) hangs on one log line. ObservabilityStack's
-// `ApiHandlerNewApiKeyFilter` matches `portal issued an API key` with
-// `created: true`, logged by `keys::issue_for`. The API hub issues through
+// The sign-up metric and the Slack message (task 0355) hang on one log line.
+// ObservabilityStack's `newApiKeyPattern` matches `portal issued an API key`
+// with `created: true`, logged by `keys::issue_for`; the metric filter and the
+// notifier's subscription filter both use it. The API hub issues through
 // that same function, which is why the hub's own line is not counted (it
 // would count each hub key twice). Reword the line, rename the field, or give
-// the hub its own issue path, and the metric undercounts with every check
-// green. The JSON shape (`$.fields.*`) is guarded by
+// the hub its own issue path, and both undercount with every check green. The JSON shape (`$.fields.*`) is guarded by
 // portal-load-failed-filter-guard.
 //
 // Run: npx nx test @rumblefish/stellar-prices-api-aws-cdk
@@ -29,17 +29,34 @@ const portal = read(
 );
 const hub = read('packages', 'prices-api', 'src', 'portal', 'hub', 'key.rs');
 
-const filter = stack.match(
-  /new logs\.MetricFilter\(\s*this,\s*'ApiHandlerNewApiKeyFilter',([\s\S]*?)\n\s*\);/,
+const pattern = stack.match(
+  /const newApiKeyPattern = logs\.FilterPattern\.all\(([\s\S]*?)\n {4}\);/,
 )?.[1];
+const block = (kind, id) =>
+  stack.match(
+    new RegExp(`new ${kind}\\(\\s*this,\\s*'${id}',([\\s\\S]*?)\\n\\s*\\}\\);`),
+  )?.[1];
 
-test('the filter matches the portal line and its created field', () => {
-  assert.ok(filter, 'ApiHandlerNewApiKeyFilter not found');
+test('the pattern matches the portal line and its created field', () => {
+  assert.ok(pattern, 'newApiKeyPattern not found');
   assert.match(
-    filter,
+    pattern,
     /'\$\.fields\.message',\s*'=',\s*'portal issued an API key'/,
   );
-  assert.match(filter, /booleanValue\('\$\.fields\.created', true\)/);
+  assert.match(pattern, /booleanValue\('\$\.fields\.created', true\)/);
+});
+
+test('the metric filter and the subscription filter share the pattern', () => {
+  const metric = block('logs\\.MetricFilter', 'ApiHandlerNewApiKeyFilter');
+  const subscription = block(
+    'logs\\.SubscriptionFilter',
+    'ApiHandlerNewApiKeySubscription',
+  );
+  assert.ok(metric, 'ApiHandlerNewApiKeyFilter not found');
+  assert.ok(subscription, 'ApiHandlerNewApiKeySubscription not found');
+  assert.match(metric, /filterPattern: newApiKeyPattern,/);
+  assert.match(subscription, /filterPattern: newApiKeyPattern,/);
+  assert.match(subscription, /LambdaDestination\(signupNotifier\)/);
 });
 
 test('issue_for logs that line with created', () => {
@@ -51,19 +68,13 @@ test('issue_for logs that line with created', () => {
 
 test('the hub issues through issue_for, so the portal line covers it', () => {
   assert.match(hub, /keys::issue_for\(/);
-  assert.doesNotMatch(filter, /hub issued an API key/);
+  assert.doesNotMatch(pattern, /hub issued an API key/);
 });
 
-// The message is a Chatbot custom notification from an EventBridge rule, not
-// the alarm's own SNS action (the stock red ALARM card), and it goes to the
-// sign-ups topic, never ops-alarms.
-test('the sign-up message is a custom notification on the sign-ups topic', () => {
-  const rule = stack.match(
-    /new events\.Rule\(this, 'PortalNewApiKeyNotifyRule',([\s\S]*?)\n {4}\}\);/,
-  )?.[1];
-  assert.ok(rule, 'PortalNewApiKeyNotifyRule not found');
-  assert.match(rule, /alarmName: \[newApiKeyAlarm\.alarmName\]/);
-  assert.match(rule, /new targets\.SnsTopic\(signupsTopic,/);
-  assert.match(rule, /source: 'custom'/);
-  assert.doesNotMatch(stack, /newApiKeyAlarm\.add(Alarm|Ok)Action\(/);
+// The message goes to the sign-ups topic, never ops-alarms, and the notifier
+// reads the key the line names.
+test('the notifier publishes to the sign-ups topic', () => {
+  assert.match(stack, /TOPIC_ARN: signupsTopic\.topicArn,/);
+  assert.match(stack, /signupsTopic\.grantPublish\(signupNotifier\);/);
+  assert.doesNotMatch(stack, /opsAlarmsTopic\.grantPublish\(signupNotifier\)/);
 });

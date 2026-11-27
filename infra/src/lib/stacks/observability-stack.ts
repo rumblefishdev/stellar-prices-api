@@ -2,14 +2,15 @@ import * as cdk from 'aws-cdk-lib';
 import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as logsDestinations from 'aws-cdk-lib/aws-logs-destinations';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
+import { fileURLToPath } from 'node:url';
 
 import type { EnvironmentConfig } from '../types.js';
 import {
@@ -1426,19 +1427,21 @@ export class ObservabilityStack extends cdk.Stack {
     // display only) — the key's Discord ID is in API Gateway when needed.
     // Tied to the log line by `tools/scripts/new-api-key-filter-guard.test.mjs`;
     // pattern checked with `aws logs test-metric-filter` against real lines.
+    // The metric filter (dashboard) and the subscription filter (Slack) share it.
+    const newApiKeyPattern = logs.FilterPattern.all(
+      logs.FilterPattern.stringValue(
+        '$.fields.message',
+        '=',
+        'portal issued an API key',
+      ),
+      logs.FilterPattern.booleanValue('$.fields.created', true),
+    );
     const newApiKeyFilter = new logs.MetricFilter(
       this,
       'ApiHandlerNewApiKeyFilter',
       {
         logGroup: apiHandlerLogGroup,
-        filterPattern: logs.FilterPattern.all(
-          logs.FilterPattern.stringValue(
-            '$.fields.message',
-            '=',
-            'portal issued an API key',
-          ),
-          logs.FilterPattern.booleanValue('$.fields.created', true),
-        ),
+        filterPattern: newApiKeyPattern,
         metricNamespace: 'Prices/ApiHandler',
         metricName: 'PortalNewApiKeys',
         metricValue: '1',
@@ -1481,58 +1484,57 @@ export class ObservabilityStack extends cdk.Stack {
       });
     }
 
-    // ponytail: one message per 5-minute window, so two sign-ups minutes
-    // apart post once; the dashboard row has the exact count.
-    const newApiKeyAlarm = new cloudwatch.Alarm(this, 'PortalNewApiKeyAlarm', {
-      // The `-portal-new-api-key` suffix is how verify-dashboard-synth.mjs
-      // tells this alarm from the strip's.
-      alarmName: `prices-${config.envName}-portal-new-api-key`,
-      metric: newApiKeyFilter.metric({
-        statistic: 'Sum',
-        period: cdk.Duration.minutes(5),
-      }),
-      alarmDescription: `New Prices API key issued (portal or API hub). Not an incident. Daily count: dashboard prices-${config.envName}-overview, "Sign-ups" row. Who: API Gateway key discord-<id>-key, created today; runbook docs/runbooks/manual-api-key-tier.md. Task 0355.`,
-      threshold: 1,
-      evaluationPeriods: 1,
-      datapointsToAlarm: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-    // No alarm action: Chatbot would render the stock red ALARM card with
-    // "Threshold Crossed: 1 out of the last 1 datapoints…", which reads as an
-    // incident in the team's main channel. EventBridge sees the same state
-    // change and publishes a Chatbot custom notification instead, in plain
-    // words for the whole team and with no names (Decision 1).
-    new events.Rule(this, 'PortalNewApiKeyNotifyRule', {
-      description: `Posts a sign-up message to Slack when a new API key is issued (${config.envName}, task 0355)`,
-      eventPattern: {
-        source: ['aws.cloudwatch'],
-        detailType: ['CloudWatch Alarm State Change'],
-        detail: {
-          alarmName: [newApiKeyAlarm.alarmName],
-          state: { value: ['ALARM'] },
-        },
+    // One message per key, with the key's details: a subscription filter on
+    // the same line feeds a small Node Lambda (no build step: one .mjs file,
+    // the AWS SDK comes with the runtime). A CloudWatch alarm could only say
+    // "at least one key in five minutes", and Chatbot renders it as a red
+    // ALARM card. ponytail: no errors alarm on the notifier; a failure loses
+    // one Slack message, the dashboard still counts the key, and the error is
+    // in its log group.
+    const signupNotifierLogGroup = new logs.LogGroup(
+      this,
+      'SignupNotifierLogGroup',
+      {
+        logGroupName: `/aws/lambda/prices-${config.envName}-signup-notifier`,
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
       },
-      targets: [
-        new targets.SnsTopic(signupsTopic, {
-          message: events.RuleTargetInput.fromObject({
-            version: '1.0',
-            source: 'custom',
-            content: {
-              textType: 'client-markdown',
-              title: ':tada: New Prices API key',
-              description: [
-                'Someone just got a Prices API key (portal or API hub).',
-                `<https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview|Sign-ups per day on the dashboard>`,
-                // No Discord ID in the message (Decision 1): the reader finds it
-                // in the key's name, the one input `/change-plan` needs.
-                `To see who it is or change their plan: find the newest key named \`discord-ID-key\` in <https://${config.awsRegion}.console.aws.amazon.com/apigateway/main/api-keys?region=${config.awsRegion}|API Gateway → API keys>, then run \`/change-plan ID\` in Claude Code in the prices repo (<https://github.com/rumblefishdev/stellar-prices-api/blob/develop/.claude/skills/change-plan/SKILL.md|what the skill does>).`,
-              ].join('\n'),
-            },
-          }),
-        }),
-      ],
+    );
+    const signupNotifier = new lambda.Function(this, 'SignupNotifier', {
+      functionName: `prices-${config.envName}-signup-notifier`,
+      description: `Posts one Slack message per new Prices API key (${config.envName}, task 0355)`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        fileURLToPath(
+          new URL('../../../lambda/signup-notifier', import.meta.url),
+        ),
+      ),
+      memorySize: 128,
+      timeout: cdk.Duration.seconds(30),
+      logGroup: signupNotifierLogGroup,
+      environment: {
+        TOPIC_ARN: signupsTopic.topicArn,
+        DASHBOARD_URL: `https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview`,
+      },
+    });
+    signupsTopic.grantPublish(signupNotifier);
+    // Read-only: GetApiKey, GetApiKeys (by name), GetUsagePlans (by key).
+    signupNotifier.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['apigateway:GET'],
+        resources: [
+          `arn:aws:apigateway:${config.awsRegion}::/apikeys`,
+          `arn:aws:apigateway:${config.awsRegion}::/apikeys/*`,
+          `arn:aws:apigateway:${config.awsRegion}::/usageplans`,
+        ],
+      }),
+    );
+    new logs.SubscriptionFilter(this, 'ApiHandlerNewApiKeySubscription', {
+      logGroup: apiHandlerLogGroup,
+      destination: new logsDestinations.LambdaDestination(signupNotifier),
+      filterPattern: newApiKeyPattern,
     });
 
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
@@ -2703,11 +2705,9 @@ export class ObservabilityStack extends cdk.Stack {
     // no maintenance when one is added or removed. Collected BEFORE the imports
     // below so an imported alarm can never be double-counted.
     // -----------------------------------------------------------------
-    // The sign-up alarm (task 0355) is the one exception: news, not health.
     const stackOwnAlarms = this.node
       .findAll()
-      .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm)
-      .filter((a) => a !== newApiKeyAlarm);
+      .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm);
 
     // The remaining alarms in the account are the per-worker `-errors` alarms
     // created inside `createWorkerLambda` and owned by EventBridgeStack, which
