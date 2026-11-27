@@ -46,7 +46,28 @@ async fn main() {
         AppState::without_ch()
     };
 
-    lambda_http::run(app(&config, state))
-        .await
-        .expect("failed to run Lambda");
+    let app = app(&config, state).layer(axum::middleware::from_fn(within_its_resource));
+    lambda_http::run(app).await.expect("failed to run Lambda");
+}
+
+/// Refuses a request whose path, once `lambda_http` resolved its dot segments,
+/// left the gateway resource it came through: `/api/../v1/...` would otherwise
+/// reach a keyed route through a keyless resource (task 0357).
+async fn within_its_resource(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use lambda_http::request::RequestContext;
+    if let Some(RequestContext::ApiGatewayV1(context)) = request.extensions().get()
+        && let Some(resource) = context.resource_path.as_deref()
+        && prices_api::common::gateway::left_its_resource(resource, request.uri().path())
+    {
+        tracing::warn!(
+            resource,
+            path = request.uri().path(),
+            "a path left the gateway resource it came through"
+        );
+        return prices_api::common::errors::not_found("no such route");
+    }
+    next.run(request).await
 }
