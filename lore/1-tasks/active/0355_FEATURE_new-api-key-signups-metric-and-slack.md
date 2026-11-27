@@ -21,8 +21,8 @@ history:
 
 Count the keys the portal and the API hub issue, show the count on the
 `prices-<env>-overview` dashboard, and post each one with its details to the
-team's Slack channel, so a new user is seen the day they sign up rather than when someone
-goes looking.
+team's Slack channel, so a new user is seen the day they sign up rather than
+when someone goes looking.
 
 ## Context
 
@@ -67,17 +67,23 @@ portal-load-failed signal (0249, 0311) works.
 5. **No history.** A metric filter counts from its deploy on; the keys issued
    before stay in API Gateway (createdDate).
 6. **One message per key, from a small Lambda (2026-11-27).** A subscription
-   filter with the metric filter's pattern feeds `prices-<env>-signup-notifier`
-   (Node.js 22, one `.mjs` file in `infra/lambda/signup-notifier`, no build:
-   the runtime ships the AWS SDK; the other Lambdas are Rust). It reads the
-   key from API Gateway (`apigateway:GET` only) and publishes a Chatbot custom
-   notification: ":tada: New Prices API key", the profile link and ID, the
-   plan (a re-issue carries a paid plan over), portal or API hub (the
-   `IssuedBy` tag), first key or re-issue, `/change-plan <id>` with a link to
-   the skill, the key id and the dashboard row. About $0.00001 a month at
-   today's ~10 keys, less than the $0.10 alarm it replaces. No errors alarm:
-   a failure loses one message, the dashboard still counts the key, and the
-   error is in the Lambda's log group.
+   filter with the metric filter's pattern feeds
+   `prices-<env>-signup-notifier` (Node.js 22, one `.mjs` file in
+   `infra/lambda/signup-notifier`, no build: the runtime ships the AWS SDK;
+   the other Lambdas are Rust). It reads the key from API Gateway
+   (`apigateway:GET` on keys and usage plans only) and publishes a Chatbot
+   custom notification: ":tada: New Prices API key", the profile link and ID,
+   the plan, portal or API hub (the `IssuedBy` tag), `/change-plan <id>` with
+   a link to the skill, the key id and the dashboard row. No "first key" or
+   "re-issue" label: `reconcile` deletes the user's revoked records before the
+   line is logged, so every key looks like the only one; a re-issue shows only
+   as a carried-over paid plan. Each key is handled on its own: a key that
+   fails (already deleted, as test keys are) is logged and skipped, since a
+   throw would make Logs retry the batch and post earlier keys again. A
+   CONTROL_MESSAGE or a non-JSON line carries no key. About $0.00001 a month
+   at today's ~10 keys, less than the $0.10 alarm it replaces. No errors
+   alarm: a failure loses one message, the dashboard still counts the key, and
+   the error is in the Lambda's log group.
 
 ## Before deploying Observability
 

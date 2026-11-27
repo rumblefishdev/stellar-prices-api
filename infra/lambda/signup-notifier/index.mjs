@@ -19,21 +19,28 @@ const SKILL_URL =
 // The `IssuedBy` tag (packages/prices-api/src/portal/keys/gateway.rs).
 const ISSUERS = { 'task-0187': 'portal', 'hub-contract': 'API hub' };
 
-/** The key ids in a CloudWatch Logs subscription batch. */
+/**
+ * The key ids in a CloudWatch Logs subscription batch. A CONTROL_MESSAGE
+ * (Logs checking the destination) and a line that is not JSON carry none.
+ */
 export function keyIds(event) {
   const batch = JSON.parse(
     gunzipSync(Buffer.from(event.awslogs.data, 'base64')).toString('utf8'),
   );
+  if (batch.messageType !== 'DATA_MESSAGE') return [];
   return batch.logEvents
-    .map((e) => JSON.parse(e.message).fields?.key_id)
+    .map((e) => {
+      try {
+        return JSON.parse(e.message).fields?.key_id;
+      } catch {
+        return undefined;
+      }
+    })
     .filter(Boolean);
 }
 
 /** The Chatbot custom notification for one key. */
-export function notification(
-  { name, keyId, plans, issuedBy, sameName },
-  dashboardUrl,
-) {
+export function notification({ name, keyId, plans, issuedBy }, dashboardUrl) {
   const id = /^discord-(\d+)-key$/.exec(name)?.[1];
   const plan =
     plans.map((p) => /^pricing-api-([a-z]+)-/.exec(p)?.[1] ?? p).join(', ') ||
@@ -41,12 +48,11 @@ export function notification(
   const who = id
     ? `<https://discord.com/users/${id}|Discord profile> · ID \`${id}\``
     : `Key name \`${name}\``;
-  const history =
-    sameName > 1
-      ? `re-issued (${sameName} keys under this name)`
-      : 'first key for this user';
+  // No "first key" or "re-issue": by the time the line is logged, reconcile
+  // has deleted the user's revoked records (portal/keys/mod.rs), so the key
+  // always looks like the only one. A re-issue shows as a carried-over plan.
   const lines = [
-    `${who} · ${plan} plan · via ${ISSUERS[issuedBy] ?? issuedBy ?? 'unknown'} · ${history}`,
+    `${who} · ${plan} plan · via ${ISSUERS[issuedBy] ?? issuedBy ?? 'unknown'}`,
     ...(id
       ? [
           `Change the plan: \`/change-plan ${id}\` in Claude Code in the prices repo (<${SKILL_URL}|what the skill does>)`,
@@ -73,30 +79,32 @@ export async function handler(event) {
   const gateway = new api.APIGatewayClient({});
   const sns = new SNSClient({});
 
+  // One key at a time, each on its own: a key that fails (deleted already,
+  // as our test keys are) costs only its own message. Throwing would make
+  // Logs retry the whole batch and post the keys before it again.
   for (const keyId of keyIds(event)) {
-    const key = await gateway.send(new api.GetApiKeyCommand({ apiKey: keyId }));
-    const [plans, keys] = await Promise.all([
-      gateway.send(new api.GetUsagePlansCommand({ keyId })),
-      gateway.send(
-        new api.GetApiKeysCommand({ nameQuery: key.name, limit: 500 }),
-      ),
-    ]);
-    const message = notification(
-      {
-        name: key.name,
-        keyId,
-        plans: (plans.items ?? []).map((p) => p.name),
-        issuedBy: key.tags?.IssuedBy,
-        // `nameQuery` matches a prefix; count the exact name only.
-        sameName: (keys.items ?? []).filter((k) => k.name === key.name).length,
-      },
-      process.env.DASHBOARD_URL,
-    );
-    await sns.send(
-      new PublishCommand({
-        TopicArn: process.env.TOPIC_ARN,
-        Message: JSON.stringify(message),
-      }),
-    );
+    try {
+      const key = await gateway.send(
+        new api.GetApiKeyCommand({ apiKey: keyId }),
+      );
+      const plans = await gateway.send(new api.GetUsagePlansCommand({ keyId }));
+      const message = notification(
+        {
+          name: key.name,
+          keyId,
+          plans: (plans.items ?? []).map((p) => p.name),
+          issuedBy: key.tags?.IssuedBy,
+        },
+        process.env.DASHBOARD_URL,
+      );
+      await sns.send(
+        new PublishCommand({
+          TopicArn: process.env.TOPIC_ARN,
+          Message: JSON.stringify(message),
+        }),
+      );
+    } catch (error) {
+      console.error(`sign-up message for key ${keyId} not sent:`, error);
+    }
   }
 }

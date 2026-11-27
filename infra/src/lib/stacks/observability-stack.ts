@@ -1520,12 +1520,11 @@ export class ObservabilityStack extends cdk.Stack {
       },
     });
     signupsTopic.grantPublish(signupNotifier);
-    // Read-only: GetApiKey, GetApiKeys (by name), GetUsagePlans (by key).
+    // Read-only: GetApiKey, GetUsagePlans (by key).
     signupNotifier.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['apigateway:GET'],
         resources: [
-          `arn:aws:apigateway:${config.awsRegion}::/apikeys`,
           `arn:aws:apigateway:${config.awsRegion}::/apikeys/*`,
           `arn:aws:apigateway:${config.awsRegion}::/usageplans`,
         ],

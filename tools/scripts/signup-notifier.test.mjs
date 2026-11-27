@@ -25,10 +25,11 @@ const line = (keyId) =>
     span: { name: 'Lambda runtime invoke' },
   });
 
-const batch = (...messages) => ({
+const batch = (messageType, ...messages) => ({
   awslogs: {
     data: gzipSync(
       JSON.stringify({
+        messageType,
         logEvents: messages.map((message, i) => ({ id: String(i), message })),
       }),
     ).toString('base64'),
@@ -36,9 +37,24 @@ const batch = (...messages) => ({
 });
 
 test('keyIds reads every key id in the batch', () => {
-  assert.deepEqual(keyIds(batch(line('abc123'), line('def456'))), [
+  assert.deepEqual(
+    keyIds(batch('DATA_MESSAGE', line('abc123'), line('def456'))),
+    ['abc123', 'def456'],
+  );
+});
+
+test('keyIds skips a control message and a line that is not JSON', () => {
+  assert.deepEqual(
+    keyIds(
+      batch(
+        'CONTROL_MESSAGE',
+        'CWL CONTROL MESSAGE: Checking health of destination Lambda.',
+      ),
+    ),
+    [],
+  );
+  assert.deepEqual(keyIds(batch('DATA_MESSAGE', 'not json', line('abc123'))), [
     'abc123',
-    'def456',
   ]);
 });
 
@@ -51,7 +67,6 @@ test('a first portal key: profile link, ID, plan, change-plan', () => {
       keyId: 'xtzde0tusb',
       plans: ['pricing-api-free-production'],
       issuedBy: 'task-0187',
-      sameName: 1,
     },
     dashboard,
   );
@@ -60,7 +75,7 @@ test('a first portal key: profile link, ID, plan, change-plan', () => {
   const [who, change, key] = content.description.split('\n');
   assert.equal(
     who,
-    '<https://discord.com/users/1534853384740540537|Discord profile> · ID `1534853384740540537` · free plan · via portal · first key for this user',
+    '<https://discord.com/users/1534853384740540537|Discord profile> · ID `1534853384740540537` · free plan · via portal',
   );
   assert.match(change, /^Change the plan: `\/change-plan 1534853384740540537`/);
   assert.equal(
@@ -69,21 +84,20 @@ test('a first portal key: profile link, ID, plan, change-plan', () => {
   );
 });
 
-test('a re-issued hub key keeps its paid plan', () => {
+// A re-issue shows only as its carried-over plan: reconcile deletes the
+// revoked records before the line is logged, so there is no history label.
+test('a hub key on a paid plan', () => {
   const { content } = notification(
     {
       name: 'discord-1-key',
       keyId: 'k',
       plans: ['pricing-api-pro-production'],
       issuedBy: 'hub-contract',
-      sameName: 3,
     },
     dashboard,
   );
-  assert.match(
-    content.description,
-    /· pro plan · via API hub · re-issued \(3 keys under this name\)/,
-  );
+  assert.match(content.description, /· pro plan · via API hub\n/);
+  assert.doesNotMatch(content.description, /first key|re-issued/);
 });
 
 test('a key not named after a Discord ID gets no link and no change-plan', () => {
@@ -93,7 +107,6 @@ test('a key not named after a Discord ID gets no link and no change-plan', () =>
       keyId: 'k',
       plans: [],
       issuedBy: undefined,
-      sameName: 1,
     },
     dashboard,
   );

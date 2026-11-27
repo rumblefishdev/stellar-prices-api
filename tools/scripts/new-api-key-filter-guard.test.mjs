@@ -4,8 +4,8 @@
 // notifier's subscription filter both use it. The API hub issues through
 // that same function, which is why the hub's own line is not counted (it
 // would count each hub key twice). Reword the line, rename the field, or give
-// the hub its own issue path, and both undercount with every check green. The JSON shape (`$.fields.*`) is guarded by
-// portal-load-failed-filter-guard.
+// the hub its own issue path, and both undercount with every check green.
+// The JSON shape (`$.fields.*`) is guarded by portal-load-failed-filter-guard.
 //
 // Run: npx nx test @rumblefish/stellar-prices-api-aws-cdk
 
