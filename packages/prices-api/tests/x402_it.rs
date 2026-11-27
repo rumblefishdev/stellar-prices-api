@@ -188,8 +188,10 @@ async fn a_batch_is_charged_when_it_finds_at_least_one_price() {
     let db = "it_x402_batch_0356";
     let (seller, facilitator) = seller_on(setup(db).await, "stellar:pubnet").await;
     let ghost = format!("GHOST:{USDC_ISSUER}");
+    let dust = format!("DUST:{USDC_ISSUER}");
 
-    let nothing = json!({ "assets": [ghost] });
+    // Unknown and unpriced assets only: no price to sell.
+    let nothing = json!({ "assets": [ghost, dust] });
     let (status, _, answer) = pay(&seller, "/x402/v1/prices/batch", Some(&nothing)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body={answer}");
     assert_eq!(answer["code"], "no_data");
