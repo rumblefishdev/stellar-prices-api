@@ -50,10 +50,13 @@ portal-load-failed signal (0249, 0311) works.
    an adopted key (`created = false`) does not. Our own testing on production
    counts too: of 9 new keys in the 29 days before this task, 7 were test keys
    created and deleted on 2026-11-18 and 2026-11-20.
-3. **Its own Slack channel, optional.** Sign-ups are not incidents, so the
-   alarm goes to its own topic, `prices-<env>-signups`, routed to Slack only
-   when `opsAlarms.slack.signupsChannelIdSsmParam` is set. It reuses the
-   workspace already authorized in AWS Chatbot.
+3. **The team's main channel, not the ops one (daily, 2026-11-27).**
+   Sign-ups are news for the whole team, not incidents, so the alarm goes to
+   its own topic, `prices-<env>-signups`, and from there to the team's main
+   Slack channel rather than `#stellar-prices-api-bot` (ops alarms). Routed
+   to Slack only when `opsAlarms.slack.signupsChannelIdSsmParam` is set; the
+   channel is that parameter's value, so moving it is an SSM change, not a
+   code change. It reuses the workspace already authorized in AWS Chatbot.
 4. **Kept out of the alarm strip.** The strip on the dashboard is the ops
    health board; a sign-up turning it red for five minutes would read as an
    incident. `verify-dashboard-synth.mjs` counts it out by name.
@@ -62,9 +65,10 @@ portal-load-failed signal (0249, 0311) works.
 
 ## Before deploying Observability
 
-1. Create the Slack channel (e.g. `#stellar-prices-api-signups`) and invite
-   the AWS app (`/invite @Amazon Q` or `@AWS`, whichever the workspace shows).
-2. Put its channel ID in SSM, shared account, eu-central-1:
+1. Invite the AWS app to the team's main channel (`/invite @Amazon Q` or
+   `@AWS`, whichever the workspace shows; it is already in
+   `#stellar-prices-api-bot`).
+2. Put that channel's ID in SSM, shared account, eu-central-1:
    `aws ssm put-parameter --name /prices/production/slack-signups-channel-id --type String --value <channel-id>`
 3. Deploy Observability. Then issue a test key (or wait for a real one) and
    check the message lands.
@@ -76,8 +80,8 @@ portal-load-failed signal (0249, 0311) works.
       `aws logs test-metric-filter` on real production lines.
 - [ ] The overview dashboard has a sign-ups row: per day over 90 days, and the
       30-day total.
-- [ ] A new key posts to the sign-ups Slack channel; the ops channel stays
-      quiet.
+- [ ] A new key posts to the team's main Slack channel; the ops channel
+      stays quiet.
 - [x] The alarm is not in the alarm strip; `verify-dashboard-synth.mjs` passes
       (Observability synthesized alone: strip 80 own + 10 imported, unchanged).
 - [x] A guard test fails if the log line or the filter is reworded alone, or
