@@ -114,7 +114,13 @@ pub async fn post_batch(
         }
     }
 
+    let empty = prices.is_empty();
     let mut resp = Json(BatchResponse { prices, not_found }).into_response();
     cache_control::attach(&mut resp, cache_control::NO_STORE);
+    // For the paid twin only (task 0356); never sent.
+    if empty {
+        resp.extensions_mut()
+            .insert(crate::x402::Nothing(errors::NO_DATA));
+    }
     resp
 }

@@ -46,7 +46,10 @@ async fn main() {
         AppState::without_ch()
     };
 
-    lambda_http::run(app(&config, state))
-        .await
-        .expect("failed to run Lambda");
+    // The paid routes (task 0356), when `X402_PAY_TO` is set. Nothing is read
+    // here: the facilitator is asked on the first paid request.
+    let x402 = prices_api::x402::Settings::from_env();
+    let app = prices_api::x402::mount(app(&config, state.clone()), x402.as_ref(), &config, state);
+
+    lambda_http::run(app).await.expect("failed to run Lambda");
 }

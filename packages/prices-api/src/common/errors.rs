@@ -64,6 +64,28 @@ pub const DB_ERROR: &str = "db_error";
 /// requested `base_currency` cannot be served.
 pub const QUOTE_UNAVAILABLE: &str = "quote_unavailable";
 
+/// A paid route has no data to sell for the request (task 0356).
+pub const NO_DATA: &str = "no_data";
+/// A paid route was asked for an asset that has no price (task 0356).
+pub const UNPRICED: &str = "unpriced";
+/// A paid route was asked for more than its testnet sandbox sells (task 0356).
+pub const SANDBOX_SCOPE: &str = "sandbox_scope";
+
+/// A refusal with a caller-chosen status and `code`, never cached. For the
+/// paid routes (task 0356), whose `403` and `404` are what keep a payment from
+/// being settled.
+pub fn refusal(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
+    let mut resp = ErrorEnvelope {
+        code,
+        message: message.into(),
+        details: None,
+    }
+    .into_response_with(status);
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, cache_control::NO_STORE);
+    resp
+}
+
 /// 400 Bad Request with a machine-readable `code`. Carries
 /// `Cache-Control: no-store` so a client/CDN never caches a rejection (`limit`
 /// is a gateway cache-key param; the gateway's own cache is config-side and
