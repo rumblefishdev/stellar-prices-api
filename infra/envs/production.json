@@ -64,7 +64,8 @@
     "sacIdentityAlarmsEnabled": true,
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
-      "channelIdSsmParam": "/prices/production/slack-channel-id"
+      "channelIdSsmParam": "/prices/production/slack-channel-id",
+      "signupsChannelIdSsmParam": "/prices/production/slack-signups-channel-id"
     }
   },
   "ledgerProcessor": {

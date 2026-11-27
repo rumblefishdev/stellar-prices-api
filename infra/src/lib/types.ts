@@ -534,6 +534,12 @@ export interface EnvironmentConfig {
     readonly slack?: {
       readonly workspaceIdSsmParam: string;
       readonly channelIdSsmParam: string;
+      /**
+       * Optional channel for the sign-ups topic (task 0355): the team's main
+       * channel, not the ops one, one message per new API key. Same
+       * workspace; omit to leave sign-ups on the dashboard only.
+       */
+      readonly signupsChannelIdSsmParam?: string;
     };
   };
 
@@ -1163,10 +1169,12 @@ export function validateConfig(config: EnvironmentConfig): void {
         typeof ops.slack !== 'object' ||
         ops.slack === null ||
         !isSsmName(ops.slack.workspaceIdSsmParam) ||
-        !isSsmName(ops.slack.channelIdSsmParam)
+        !isSsmName(ops.slack.channelIdSsmParam) ||
+        (ops.slack.signupsChannelIdSsmParam !== undefined &&
+          !isSsmName(ops.slack.signupsChannelIdSsmParam))
       ) {
         errors.push(
-          'opsAlarms.slack, when set, must be { workspaceIdSsmParam, channelIdSsmParam } with absolute SSM parameter names (leading "/")',
+          'opsAlarms.slack, when set, must be { workspaceIdSsmParam, channelIdSsmParam, signupsChannelIdSsmParam? } with absolute SSM parameter names (leading "/")',
         );
       }
     }

@@ -3,11 +3,14 @@ import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as logsDestinations from 'aws-cdk-lib/aws-logs-destinations';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
+import { fileURLToPath } from 'node:url';
 
 import type { EnvironmentConfig } from '../types.js';
 import {
@@ -1413,6 +1416,126 @@ export class ObservabilityStack extends cdk.Stack {
       description: `api-handler portal-load-failed alarm for ${config.envName}`,
     });
 
+    // Task 0355 — a new API key, the sign-up signal. One line covers both
+    // ways in: `portal issued an API key` with a boolean `created`, logged by
+    // `keys::issue_for` (portal/keys/mod.rs), which the API hub also calls
+    // (portal/hub/key.rs) — the hub's own `hub issued an API key` line would
+    // count its keys twice. An adopted key (`created: false`) is not a
+    // sign-up. Counts keys, not people: a revoke and re-issue counts again,
+    // and so does our own testing on production. Who signed up is not in the
+    // line and must not be (privacy policy: the Discord username is for
+    // display only) — the key's Discord ID is in API Gateway when needed.
+    // Tied to the log line by `tools/scripts/new-api-key-filter-guard.test.mjs`;
+    // pattern checked with `aws logs test-metric-filter` against real lines.
+    // The metric filter (dashboard) and the subscription filter (Slack) share it.
+    const newApiKeyPattern = logs.FilterPattern.all(
+      logs.FilterPattern.stringValue(
+        '$.fields.message',
+        '=',
+        'portal issued an API key',
+      ),
+      logs.FilterPattern.booleanValue('$.fields.created', true),
+    );
+    const newApiKeyFilter = new logs.MetricFilter(
+      this,
+      'ApiHandlerNewApiKeyFilter',
+      {
+        logGroup: apiHandlerLogGroup,
+        filterPattern: newApiKeyPattern,
+        metricNamespace: 'Prices/ApiHandler',
+        metricName: 'PortalNewApiKeys',
+        metricValue: '1',
+      },
+    );
+    const newApiKeysPerDay = newApiKeyFilter.metric({
+      statistic: 'Sum',
+      period: cdk.Duration.days(1),
+      label: 'new API keys',
+    });
+
+    // Its own topic, not ops-alarms: a sign-up is news, not an incident.
+    const signupsTopic = new sns.Topic(this, 'SignupsTopic', {
+      topicName: `prices-${config.envName}-signups`,
+      displayName: `prices-api ${config.envName} sign-ups`,
+    });
+    const signupsChannelParam =
+      config.opsAlarms.slack?.signupsChannelIdSsmParam;
+    if (config.opsAlarms.slack && signupsChannelParam) {
+      new chatbot.SlackChannelConfiguration(this, 'SignupsSlackChannel', {
+        slackChannelConfigurationName: `prices-${config.envName}-signups`,
+        slackWorkspaceId: ssm.StringParameter.valueForStringParameter(
+          this,
+          config.opsAlarms.slack.workspaceIdSsmParam,
+        ),
+        slackChannelId: ssm.StringParameter.valueForStringParameter(
+          this,
+          signupsChannelParam,
+        ),
+        notificationTopics: [signupsTopic],
+        loggingLevel: chatbot.LoggingLevel.ERROR,
+        role: new iam.Role(this, 'SignupsChatbotRole', {
+          assumedBy: new iam.ServicePrincipal('chatbot.amazonaws.com'),
+          managedPolicies: [
+            iam.ManagedPolicy.fromAwsManagedPolicyName(
+              'CloudWatchReadOnlyAccess',
+            ),
+          ],
+        }),
+      });
+    }
+
+    // One message per key, with the key's details: a subscription filter on
+    // the same line feeds a small Node Lambda (no build step: one .mjs file,
+    // the AWS SDK comes with the runtime). A CloudWatch alarm could only say
+    // "at least one key in five minutes", and Chatbot renders it as a red
+    // ALARM card. ponytail: no errors alarm on the notifier; a failure loses
+    // one Slack message, the dashboard still counts the key, and the error is
+    // in its log group.
+    const signupNotifierLogGroup = new logs.LogGroup(
+      this,
+      'SignupNotifierLogGroup',
+      {
+        logGroupName: `/aws/lambda/prices-${config.envName}-signup-notifier`,
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      },
+    );
+    const signupNotifier = new lambda.Function(this, 'SignupNotifier', {
+      functionName: `prices-${config.envName}-signup-notifier`,
+      description: `Posts one Slack message per new Prices API key (${config.envName}, task 0355)`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        fileURLToPath(
+          new URL('../../../lambda/signup-notifier', import.meta.url),
+        ),
+      ),
+      memorySize: 128,
+      timeout: cdk.Duration.seconds(30),
+      logGroup: signupNotifierLogGroup,
+      environment: {
+        TOPIC_ARN: signupsTopic.topicArn,
+        DASHBOARD_URL: `https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview`,
+      },
+    });
+    signupsTopic.grantPublish(signupNotifier);
+    // Read-only: GetApiKey, GetUsagePlans (by key).
+    signupNotifier.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['apigateway:GET'],
+        resources: [
+          `arn:aws:apigateway:${config.awsRegion}::/apikeys/*`,
+          `arn:aws:apigateway:${config.awsRegion}::/usageplans`,
+        ],
+      }),
+    );
+    new logs.SubscriptionFilter(this, 'ApiHandlerNewApiKeySubscription', {
+      logGroup: apiHandlerLogGroup,
+      destination: new logsDestinations.LambdaDestination(signupNotifier),
+      filterPattern: newApiKeyPattern,
+    });
+
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
     // may only write a minute once it has walked PAST the end of it; if the
     // whole iteration budget is spent inside ONE minute it can never do so, and
@@ -2735,6 +2858,39 @@ export class ObservabilityStack extends cdk.Stack {
         right: [cacheHitRatioPct],
         width: 8,
         height: 6,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 1b — sign-ups (task 0355).
+    // -----------------------------------------------------------------
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## Sign-ups',
+          '',
+          'New API keys issued by the portal or the API hub (a revoke and re-issue counts again). Counted since task 0355 deployed; earlier keys are in API Gateway. Who: the key `discord-<id>-key`, runbook `docs/runbooks/manual-api-key-tier.md`.',
+        ].join('\n'),
+        width: 24,
+        height: 2,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'New API keys per day — 90 days',
+        left: [newApiKeysPerDay],
+        width: 16,
+        height: 5,
+        start: '-P90D',
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'New API keys — last 30 days',
+        metrics: [newApiKeysPerDay],
+        width: 8,
+        height: 5,
+        start: '-P30D',
+        setPeriodToTimeRange: true,
       }),
     );
 
