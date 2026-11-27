@@ -67,9 +67,10 @@ portal-load-failed signal (0249, 0311) works.
    of the last 1 datapoints…", an incident in the team's main channel. An
    EventBridge rule on the alarm's move to ALARM publishes a Chatbot custom
    notification to the sign-ups topic instead: ":tada: New Prices API key",
-   one line that someone got a key, and a link to the dashboard row. Plain
-   words for the whole team: no runbook or skill pointers (who and which
-   plan stays the `change-plan` skill, for whoever needs it). No Lambda.
+   one line that someone got a key, a link to the dashboard row, and when to
+   use the `change-plan` skill (who it is, or a plan change) with links to
+   API Gateway's keys, where the Discord ID is in the key's name, and to the
+   skill. Plain words for the whole team, no ID in the message. No Lambda.
    The alarm only feeds the rule; several keys within minutes still post
    once.
 

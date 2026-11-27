@@ -1502,8 +1502,8 @@ export class ObservabilityStack extends cdk.Stack {
     // No alarm action: Chatbot would render the stock red ALARM card with
     // "Threshold Crossed: 1 out of the last 1 datapoints…", which reads as an
     // incident in the team's main channel. EventBridge sees the same state
-    // change and publishes a Chatbot custom notification instead: two plain
-    // lines for the whole team, no names (Decision 1) and no runbook pointers.
+    // change and publishes a Chatbot custom notification instead, in plain
+    // words for the whole team and with no names (Decision 1).
     new events.Rule(this, 'PortalNewApiKeyNotifyRule', {
       description: `Posts a sign-up message to Slack when a new API key is issued (${config.envName}, task 0355)`,
       eventPattern: {
@@ -1525,6 +1525,9 @@ export class ObservabilityStack extends cdk.Stack {
               description: [
                 'Someone just got a Prices API key (portal or API hub).',
                 `<https://${config.awsRegion}.console.aws.amazon.com/cloudwatch/home?region=${config.awsRegion}#dashboards/dashboard/prices-${config.envName}-overview|Sign-ups per day on the dashboard>`,
+                // No Discord ID in the message (Decision 1): the reader finds it
+                // in the key's name, the one input `/change-plan` needs.
+                `To see who it is or change their plan: find the newest key named \`discord-ID-key\` in <https://${config.awsRegion}.console.aws.amazon.com/apigateway/main/api-keys?region=${config.awsRegion}|API Gateway → API keys>, then run \`/change-plan ID\` in Claude Code in the prices repo (<https://github.com/rumblefishdev/stellar-prices-api/blob/develop/.claude/skills/change-plan/SKILL.md|what the skill does>).`,
               ].join('\n'),
             },
           }),
