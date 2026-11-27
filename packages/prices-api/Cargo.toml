@@ -93,6 +93,15 @@ reqwest = { version = "0.12", default-features = false, features = [
 aws-config = { workspace = true }
 aws-sdk-apigateway = { workspace = true }
 
+# ---------------------------------------------------------------------------
+# Pay per request (task 0356) — the seller's side of x402 on Stellar.
+# ---------------------------------------------------------------------------
+# UNCONDITIONAL, like the portal's crates above: `tests/x402.rs` drives the
+# paid routes in the default build against a facilitator mocked on loopback.
+# Pinned by `rev` to a commit of that repository's `develop`, never a branch:
+# what answers a buyer's payment must not change under a `cargo update`.
+stellar-x402 = { git = "https://github.com/rumblefishdev/stellar-x402.git", rev = "ff5933c2b8648b327fe09f7c0369df88efea37d3" }
+
 lambda_http = { workspace = true, optional = true }
 
 [dev-dependencies]

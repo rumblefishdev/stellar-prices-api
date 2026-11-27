@@ -21,6 +21,7 @@ pub mod oracles;
 pub mod portal;
 pub mod state;
 pub mod telemetry;
+pub mod x402;
 
 // The unit tests include `tests/portal_keys/harness.rs`
 // (`portal::test_harness`), which names this crate `prices_api` the way every

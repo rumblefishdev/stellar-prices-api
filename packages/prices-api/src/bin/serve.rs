@@ -94,7 +94,10 @@ async fn main() {
         .expect("failed to bind");
     tracing::info!("prices-api local server listening on http://{addr}");
 
-    axum::serve(listener, app(&config, state))
-        .await
-        .expect("server error");
+    // The paid routes (task 0356), when `X402_PAY_TO` is set, as the Lambda
+    // mounts them.
+    let x402 = prices_api::x402::Settings::from_env();
+    let app = prices_api::x402::mount(app(&config, state.clone()), x402.as_ref(), &config, state);
+
+    axum::serve(listener, app).await.expect("server error");
 }

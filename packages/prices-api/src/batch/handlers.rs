@@ -114,7 +114,14 @@ pub async fn post_batch(
         }
     }
 
+    // No price at all, the same rule as the `price` twin's `404 unpriced`.
+    let empty = prices.iter().all(|p| p.price_status == "unpriced");
     let mut resp = Json(BatchResponse { prices, not_found }).into_response();
     cache_control::attach(&mut resp, cache_control::NO_STORE);
+    // For the paid twin only (task 0356); never sent.
+    if empty {
+        resp.extensions_mut()
+            .insert(crate::x402::Nothing(errors::NO_DATA));
+    }
     resp
 }

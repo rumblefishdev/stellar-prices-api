@@ -125,8 +125,14 @@ pub async fn get_price(
             if let Some(t) = q.min_volume_usd {
                 crate::assets::dto::apply_min_volume(&mut body.sources, &mut body.vwap_24h, t);
             }
+            let unpriced = body.price_status == "unpriced";
             let mut resp = Json(body).into_response();
             cache_control::attach(&mut resp, cache_control::SHORT);
+            // For the paid twin only (task 0356); never sent.
+            if unpriced {
+                resp.extensions_mut()
+                    .insert(crate::x402::Nothing(errors::UNPRICED));
+            }
             resp
         }
         Ok(None) => errors::not_found("no current price for the asset"),
@@ -825,6 +831,7 @@ fn ohlcv_response(
     backfill_note: Option<String>,
     data: Vec<crate::assets::dto::Candle>,
 ) -> Response {
+    let empty = data.is_empty();
     let mut resp = Json(OhlcvResponse {
         asset: id.to_canonical(),
         granularity: granularity.as_str().to_string(),
@@ -834,6 +841,11 @@ fn ohlcv_response(
     })
     .into_response();
     cache_control::attach(&mut resp, cache_control::MEDIUM);
+    // For the paid twin only (task 0356); never sent.
+    if empty {
+        resp.extensions_mut()
+            .insert(crate::x402::Nothing(errors::NO_DATA));
+    }
     resp
 }
 

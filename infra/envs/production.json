@@ -25,9 +25,15 @@
     "certificateArn": "arn:aws:acm:eu-central-1:750702271865:certificate/c937aeef-20b3-4e94-ba90-ade97c7d00ec"
   },
   "portalWebOrigin": "https://sorobanscan.com",
+  "x402": {
+    "payTo": "GCH5WHIRNCHA2J23YDM2O2SYDBCAHUJ6YKTLM74FEI7DV4IOJR4N5WEN",
+    "network": "stellar:testnet",
+    "priceUsd": "0.001",
+    "priceHeavyUsd": "0.005"
+  },
   "apiHandler": {
     "memoryMb": 512,
-    "timeoutSeconds": 15
+    "timeoutSeconds": 29
   },
   "scheduleExpressions": {
     "assetSupply": "rate(1 hour)",

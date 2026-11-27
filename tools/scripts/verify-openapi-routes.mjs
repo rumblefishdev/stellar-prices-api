@@ -187,6 +187,19 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  */
 const PORTAL_API_PREFIX = '/api/';
 
+/**
+ * The paid routes' prefix (task 0356), skipped on the GATEWAY side only.
+ *
+ * Mapped as a greedy `{proxy+}` like the portal's (`X402_RESOURCE_PATH` in
+ * `infra/src/lib/stacks/api-gateway-stack.ts`), so there is nothing to compare
+ * a document against, and the document does not describe them yet: while they
+ * sell a testnet sandbox, a buyer reads their terms from the `402` and from the
+ * facilitator's catalog. One-sided on purpose: a `/x402/` path that does
+ * appear in the document is compared like any other and fails as unmapped,
+ * which is the reminder to map the routes one by one and drop this skip.
+ */
+const X402_PREFIX = '/x402/';
+
 const gatewayRoutes = new Set();
 /** Routes the prefix skip above swallowed — asserted non-empty further down. */
 const portalGatewayRoutes = [];
@@ -232,6 +245,7 @@ for (const [, res] of resources) {
     portalGatewayRoutes.push(`${method} ${path}`);
     continue;
   }
+  if (path.startsWith(X402_PREFIX)) continue;
   // `ANY` maps every verb at once and can never equal an OpenAPI operation
   // key, so it would report as undocumented forever. Skipping it silently
   // would instead hide a mapped route from the check — fail loudly and make

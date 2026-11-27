@@ -32,6 +32,31 @@ tests/health.rs   # in-process oneshot smoke test
 
 Full plan: [`0040 G-implementation-plan.md`](../../lore/1-tasks/active/0040_FEATURE_prices-api-gateway-and-read-handlers/notes/G-implementation-plan.md).
 
+## Paid routes: pay per request through x402 (task 0356)
+
+Three data routes have a keyless twin under `/x402/v1/`: `GET assets/{asset_identifier}/price`,
+`GET assets/{asset_identifier}/ohlcv` and `POST prices/batch`. A request without a payment
+answers `402` with the terms; with one, the stellar-x402 facilitator verifies it, the keyed
+route's own handler runs, and only an answer below `400` is settled. `src/x402.rs` says what is
+turned into a `4xx`, and so never charged for.
+
+| Variable               | Default                                    | Meaning                                                                  |
+| ---------------------- | ------------------------------------------ | ------------------------------------------------------------------------ |
+| `X402_PAY_TO`          | unset: no paid routes                      | the Stellar account that is paid; the service holds no key for it        |
+| `X402_NETWORK`         | `stellar:testnet`                          | the network the USDC is paid on; on testnet the routes sell a sandbox    |
+| `X402_FACILITATOR_URL` | `https://x402-facilitator.sorobanscan.com` | asked on the first paid-route request, never at cold start               |
+| `X402_PRICE_USD`       | `0.001`                                    | one `price` request                                                      |
+| `X402_PRICE_HEAVY_USD` | `0.005`                                    | one `ohlcv` or `batch` request                                           |
+| `X402_SANDBOX_ASSETS`  | `native` and canonical USDC                | the assets sold while payments are in testnet USDC, separated by commas |
+
+Locally, with no ClickHouse needed to see the terms:
+
+```sh
+X402_PAY_TO=<a G… address> API_BASE_URL=http://localhost:8080 \
+  cargo run -p prices-api --bin serve --features local-server
+curl -i http://localhost:8080/x402/v1/assets/native/price   # 402, terms in PAYMENT-REQUIRED
+```
+
 ## Build & test
 
 ```bash

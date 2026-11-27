@@ -98,6 +98,30 @@ const CACHE_CLUSTER_SIZE = '0.5';
 const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
 
 /**
+ * The paid routes (task 0356): `/x402/v1/...`, where a caller with no API key
+ * pays for one request through x402. The handler owns the routes under the
+ * prefix (`packages/prices-api/src/x402.rs`); here they are one greedy
+ * resource with its verbs enumerated, for the reason `PORTAL_API_RESOURCE_PATH`
+ * gives: `ANY` cannot carry a stage method setting.
+ *
+ * Keyless, so outside every usage plan, and each request is a billed Lambda
+ * invocation whether or not it carries a payment: the throttle below is the
+ * only limit the gateway puts on them. One bucket per verb, shared by every
+ * caller, so it bounds the cost and the load, not fairness between callers.
+ * Nothing gives that fairness yet: Cloudflare's per-address limit (100
+ * requests in 10 s) equals this bucket, and the `rumblefish.dev` host skips
+ * Cloudflare. One caller can fill the bucket and every buyer gets `429`;
+ * nothing is verified or settled, so no payment is lost.
+ *
+ * Caching is stated off, never left to the wildcard default: the gateway's
+ * cache key does not hold the payment header, so a cached paid answer would
+ * be served to a caller who did not pay.
+ */
+const X402_RESOURCE_PATH = '/x402/{proxy+}';
+const X402_METHODS = ['GET', 'POST'] as const;
+const X402_THROTTLE = { rate: 10, burst: 20 } as const;
+
+/**
  * The portal backend's gateway resource path, in the form API Gateway uses for
  * a method setting.
  *
@@ -565,6 +589,16 @@ export class ApiGatewayStack extends cdk.Stack {
       portalProxy.addMethod(httpMethod, proxy([]), { apiKeyRequired: false });
     }
 
+    // /x402/{proxy+} — the paid routes (task 0356), see `X402_RESOURCE_PATH`.
+    // Only when the environment sells: without `config.x402` the handler mounts
+    // no route under the prefix. No preflight: a browser is not a buyer yet.
+    if (config.x402) {
+      const paid = this.api.root.addResource('x402').addResource('{proxy+}');
+      for (const httpMethod of X402_METHODS) {
+        paid.addMethod(httpMethod, proxy([]), { apiKeyRequired: false });
+      }
+    }
+
     // The preflight for the bundle's cross-origin calls (task 0194).
     //
     // The bundle is served from `config.portalWebOrigin` — another
@@ -722,6 +756,19 @@ export class ApiGatewayStack extends cdk.Stack {
       cachingEnabled: false,
     }));
 
+    // The paid routes: their own throttle, caching explicitly off. Declared
+    // outside the `cacheEnabled` branch and spread into both arms, as
+    // `portalSettings` is and for its reason.
+    const x402Settings = (config.x402 ? X402_METHODS : []).map(
+      (httpMethod) => ({
+        resourcePath: X402_RESOURCE_PATH,
+        httpMethod,
+        throttlingRateLimit: X402_THROTTLE.rate,
+        throttlingBurstLimit: X402_THROTTLE.burst,
+        cachingEnabled: false,
+      }),
+    );
+
     // One entry, not two: method settings are keyed by resourcePath+httpMethod,
     // so a separate throttle entry for this route would collide with its cache
     // entry. The throttle is declared OUTSIDE the `cacheEnabled` branch on
@@ -746,6 +793,7 @@ export class ApiGatewayStack extends cdk.Stack {
         defaultCachingOff,
         apiDocsSettings,
         ...portalSettings,
+        ...x402Settings,
         {
           resourcePath: '/v1/assets',
           httpMethod: 'GET',
@@ -807,6 +855,7 @@ export class ApiGatewayStack extends cdk.Stack {
         defaultCachingOff,
         apiDocsSettings,
         ...portalSettings,
+        ...x402Settings,
       ];
     }
 
